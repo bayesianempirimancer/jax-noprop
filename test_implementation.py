@@ -39,8 +39,10 @@ def test_noise_schedules():
         alpha_t = linear.get_alpha_t(t)
         sigma_t = linear.get_sigma_t(t)
         
-        assert jnp.allclose(alpha_t, jnp.array([1.0, 0.5, 0.0]))
-        assert jnp.allclose(sigma_t, jnp.array([0.0, jnp.sqrt(0.5), 1.0]))
+        # With corrected notation: ᾱ(t) = t (INCREASING), σ(t) = sqrt(1-ᾱ(t))
+        # Note: Due to numerical precision with gamma_t approach, we use more tolerant checks
+        assert jnp.allclose(alpha_t, jnp.array([0.0, 0.5, 1.0]), atol=1e-6)
+        assert jnp.allclose(sigma_t, jnp.array([1.0, jnp.sqrt(0.5), 0.0]), atol=1e-6)
         
         # Test cosine schedule
         cosine = CosineNoiseSchedule()
@@ -125,6 +127,7 @@ def test_training_step():
     print("Testing training step...")
     
     try:
+        import optax
         from jax_noprop import NoPropDT
         from jax_noprop.models import SimpleCNN
         from jax_noprop.utils import one_hot_encode
@@ -142,10 +145,14 @@ def test_training_step():
         dummy_z = jnp.ones((1, 10))
         params = model.init(init_key, dummy_z, dummy_x[:1])
         
+        # Create optimizer
+        optimizer = optax.adam(learning_rate=1e-3)
+        opt_state = optimizer.init(params)
+        
         # Test training step
         key, train_key = jax.random.split(key)
-        updated_params, loss, metrics = noprop_dt.train_step(
-            params, dummy_x, dummy_y, train_key
+        updated_params, updated_opt_state, loss, metrics = noprop_dt.train_step(
+            params, opt_state, dummy_x, dummy_y, train_key, optimizer
         )
         
         assert isinstance(loss, jnp.ndarray)

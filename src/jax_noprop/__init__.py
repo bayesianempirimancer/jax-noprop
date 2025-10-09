@@ -11,6 +11,7 @@ from .noprop_dt import NoPropDT
 from .noprop_ct import NoPropCT
 from .noprop_fm import NoPropFM
 from .models import ConditionalResNet, SimpleCNN
+from .model_wrapper import NoPropModelWrapper, create_no_prop_model
 from .noise_schedules import (
     LinearNoiseSchedule,
     CosineNoiseSchedule,
@@ -40,6 +41,8 @@ __all__ = [
     "NoPropFM",
     "ConditionalResNet",
     "SimpleCNN",
+    "NoPropModelWrapper",
+    "create_no_prop_model",
     "LinearNoiseSchedule",
     "CosineNoiseSchedule", 
     "SigmoidNoiseSchedule",

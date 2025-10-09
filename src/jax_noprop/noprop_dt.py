@@ -12,8 +12,9 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 from flax import struct
+import optax
 
-from .noise_schedules import NoiseSchedule, LinearNoiseSchedule, add_noise, sample_noise
+from .noise_schedules import NoiseSchedule, LinearNoiseSchedule
 
 
 @struct.dataclass
@@ -25,53 +26,14 @@ class NoPropDT:
     """
     
     model: nn.Module
-    num_timesteps: int = 10
+    num_timesteps: int = 20
     noise_schedule: NoiseSchedule = struct.field(default_factory=LinearNoiseSchedule)
     eta: float = 0.1  # Hyperparameter from the paper
     
     def __post_init__(self):
         # Create timestep values
         object.__setattr__(self, 'timesteps', jnp.linspace(0.0, 1.0, self.num_timesteps + 1))
-    
-    def sample_timestep(self, key: jax.random.PRNGKey, batch_size: int) -> jnp.ndarray:
-        """Sample random timesteps for training."""
-        return jax.random.choice(
-            key, 
-            self.timesteps[1:],  # Exclude t=0
-            shape=(batch_size,)
-        )
-    
-    def get_noise_params(self, t: jnp.ndarray) -> Dict[str, jnp.ndarray]:
-        """Get noise parameters for given timesteps."""
-        return self.noise_schedule.get_noise_params(t)
-    
-    def add_noise_to_target(
-        self, 
-        target: jnp.ndarray, 
-        key: jax.random.PRNGKey,
-        t: jnp.ndarray
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Add noise to the target according to the schedule.
-        
-        Args:
-            target: Clean target [batch_size, num_classes]
-            key: Random key
-            t: Timesteps [batch_size]
-            
-        Returns:
-            Tuple of (noisy_target, noise)
-        """
-        noise = sample_noise(key, target.shape)
-        noise_params = self.get_noise_params(t)
-        
-        noisy_target = add_noise(
-            target, 
-            noise, 
-            noise_params["alpha_t"], 
-            noise_params["sigma_t"]
-        )
-        
-        return noisy_target, noise
+
     
     def compute_loss(
         self,
@@ -131,10 +93,12 @@ class NoPropDT:
     def train_step(
         self,
         params: Dict[str, Any],
+        opt_state: optax.OptState,
         x: jnp.ndarray,
         target: jnp.ndarray,
-        key: jax.random.PRNGKey
-    ) -> Tuple[Dict[str, Any], jnp.ndarray, Dict[str, jnp.ndarray]]:
+        key: jax.random.PRNGKey,
+        optimizer: optax.GradientTransformation
+    ) -> Tuple[Dict[str, Any], optax.OptState, jnp.ndarray, Dict[str, jnp.ndarray]]:
         """Single training step for NoProp-DT.
         
         Key insight from the paper: NoProp does NOT require a forward pass during training.
@@ -142,22 +106,24 @@ class NoPropDT:
         
         Args:
             params: Model parameters
+            opt_state: Optimizer state
             x: Input data [batch_size, height, width, channels]
             target: Clean target [batch_size, num_classes]
             key: Random key
+            optimizer: Optax optimizer
             
         Returns:
-            Tuple of (updated_params, loss, metrics)
+            Tuple of (updated_params, updated_opt_state, loss, metrics)
         """
         batch_size = x.shape[0]
         
         # Sample random timesteps (excluding t=0)
         key, t_key = jax.random.split(key)
-        t = self.sample_timestep(t_key, batch_size)
+        t = jax.random.choice(t_key, self.timesteps[1:], shape=(batch_size,))
         
         # Add noise to target according to the noise schedule
         key, noise_key = jax.random.split(key)
-        z_t, noise = self.add_noise_to_target(target, noise_key, t)
+        z_t = self.noise_schedule.sample_zt(noise_key, target, t)
         
         # Compute loss and gradients
         # Note: No forward pass through the network is needed!
@@ -166,11 +132,11 @@ class NoPropDT:
             self.compute_loss, has_aux=True
         )(params, z_t, x, target, t, key)
         
-        # Update parameters (this would typically be done by an optimizer)
-        # For now, we just return the gradients
-        updated_params = grads
+        # Update parameters using optimizer
+        updates, updated_opt_state = optimizer.update(grads, opt_state, params)
+        updated_params = optax.apply_updates(params, updates)
         
-        return updated_params, loss, metrics
+        return updated_params, updated_opt_state, loss, metrics
     
     def generate(
         self,
@@ -200,7 +166,7 @@ class NoPropDT:
         
         # Start with pure noise (t=1)
         key, noise_key = jax.random.split(key)
-        z = sample_noise(noise_key, (batch_size, self.model.num_classes))
+        z = jax.random.normal(noise_key, (batch_size, self.model.num_classes))
         
         # Iterative denoising from t=1 to t=0
         for i in range(num_steps):

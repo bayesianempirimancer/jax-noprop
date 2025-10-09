@@ -80,7 +80,7 @@ def main():
             # For FM, we need to sample from base distribution
             z_t, noise = noprop.sample_base_distribution(noise_key, labels_onehot.shape), None
         else:
-            z_t, noise = noprop.add_noise_to_target(labels_onehot, noise_key, t)
+            z_t = noprop.noise_schedule.sample_zt(noise_key, labels_onehot, t)
         
         print(f"Noisy target shape: {z_t.shape}")
         print(f"Noisy target norm: {jnp.linalg.norm(z_t, axis=-1)[:5]}")

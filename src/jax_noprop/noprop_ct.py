@@ -13,8 +13,9 @@ import flax.linen as nn
 from flax import struct
 from scipy.integrate import odeint
 import numpy as np
+import optax
 
-from .noise_schedules import NoiseSchedule, LinearNoiseSchedule, add_noise, sample_noise
+from .noise_schedules import NoiseSchedule, LinearNoiseSchedule, LearnableNoiseSchedule
 from .ode_integration import euler_step, heun_step, integrate_ode
 
 
@@ -37,43 +38,7 @@ class NoPropCT:
         # Create timestep values for continuous time
         object.__setattr__(self, 'timesteps', jnp.linspace(0.0, 1.0, self.num_timesteps + 1))
     
-    def sample_timestep(self, key: jax.random.PRNGKey, batch_size: int) -> jnp.ndarray:
-        """Sample random timesteps for training."""
-        return jax.random.uniform(key, (batch_size,), minval=0.0, maxval=1.0)
-    
-    def get_noise_params(self, t: jnp.ndarray) -> Dict[str, jnp.ndarray]:
-        """Get noise parameters for given timesteps."""
-        return self.noise_schedule.get_noise_params(t)
-    
-    def add_noise_to_target(
-        self, 
-        target: jnp.ndarray, 
-        key: jax.random.PRNGKey,
-        t: jnp.ndarray
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Add noise to the target according to the schedule.
-        
-        Args:
-            target: Clean target [batch_size, num_classes]
-            key: Random key
-            t: Timesteps [batch_size]
-            
-        Returns:
-            Tuple of (noisy_target, noise)
-        """
-        noise = sample_noise(key, target.shape)
-        noise_params = self.get_noise_params(t)
-        
-        noisy_target = add_noise(
-            target, 
-            noise, 
-            noise_params["alpha_t"], 
-            noise_params["sigma_t"]
-        )
-        
-        return noisy_target, noise
-    
-    def vector_field(
+    def dz_dt(
         self,
         params: Dict[str, Any],
         z: jnp.ndarray,
@@ -82,7 +47,14 @@ class NoPropCT:
     ) -> jnp.ndarray:
         """Compute the vector field dz/dt = f(z, x, t).
         
-        Based on the PyTorch implementation, the model directly predicts the denoised target.
+        Based on the PyTorch implementation, the model directly predicts the denoised target, but the forward
+        process moves toward the target is a manner specified by the noise schedule.  In the original paper, 
+        the forward process was incorrectly specified for continuous time approximations, and in the torch 
+        implementation a completely different approach seems to have been used.  Here, we note that the forward 
+        is simply given by: 
+
+        dz/dt = alpha'(t)/alpha(t)/(1-alpha(t))*(sqrt(alpha(t))*target - (1+alpha(t))/2*z)
+         
         The vector field is then computed as the difference between the predicted target and current state.
         
         Args:
@@ -97,9 +69,10 @@ class NoPropCT:
         # The model predicts the denoised target directly
         predicted_target = self.model.apply(params, z, x, t)
         
-        # The vector field is the difference between predicted target and current state
-        # This represents the direction the state should move
-        return predicted_target - z
+        alpha_t = self.noise_schedule.get_alpha_t(t, params)
+        tau_inverse = self.noise_schedule.get_tau_inverse(t, params)
+        
+        return tau_inverse * (jnp.sqrt(alpha_t) * predicted_target - (1 + alpha_t) / 2.0 * z)
     
     def integrate_ode(
         self,
@@ -122,7 +95,7 @@ class NoPropCT:
             Final state [batch_size, num_classes]
         """
         return integrate_ode(
-            vector_field=self.vector_field,
+            vector_field=self.dz_dt,
             params=params,
             z0=z0,
             x=x,
@@ -161,96 +134,73 @@ class NoPropCT:
         # Compute the model output (predicted denoised target)
         model_output = self.model.apply(params, z_t, x, t)
         
-        # Compute SNR weighting factor (1/SNR(t))
-        snr_weight = self._compute_snr_inverse(t)
+        # Compute SNR weighting factor using SNR derivative
+        snr_weight = self.noise_schedule.get_snr_prime(t, params)
         
         # Main loss: SNR-weighted MSE between model output and noisy input
-        # This follows the PyTorch implementation pattern
-        main_loss = jnp.mean(snr_weight * (model_output - z_t) ** 2)
-        
-        # Regularization term: L2 norm of the model output
+        # This follows the NoProp paper where loss is weighted by SNR derivative
+        squared_error = (model_output - target) ** 2
+        mse = jnp.mean(squared_error)
         reg_loss = jnp.mean(model_output ** 2)
+
+        ct_loss = jnp.mean(snr_weight[..., None] * squared_error)
         
-        # Total loss with regularization weight η
-        total_loss = main_loss + self.eta * reg_loss
-        
+        # total loss
+        total_loss = ct_loss + self.eta * reg_loss
+
         # Compute additional metrics
         metrics = {
-            "loss": total_loss,
-            "main_loss": main_loss,
+            "ct_loss": ct_loss,
             "reg_loss": reg_loss,
-            "model_output_mse": jnp.mean((model_output - z_t) ** 2),
-            "target_mse": jnp.mean((model_output - target) ** 2),
+            "total_loss": total_loss,
+            "mse": mse,
             "snr_weight_mean": jnp.mean(snr_weight),
-            "pred_norm": jnp.mean(jnp.linalg.norm(model_output, axis=-1)),
-            "target_norm": jnp.mean(jnp.linalg.norm(target, axis=-1)),
         }
         
         return total_loss, metrics
     
-    def _compute_snr_inverse(self, t: jnp.ndarray) -> jnp.ndarray:
-        """Compute the inverse SNR weighting factor for the loss.
-        
-        Based on the PyTorch implementation, the loss should be weighted by 1/SNR(t).
-        For the linear noise schedule: α_t = 1 - t, σ_t = sqrt(t)
-        SNR(t) = α_t² / σ_t² = (1-t)² / t
-        1/SNR(t) = t / (1-t)²
-        
-        Args:
-            t: Timesteps [batch_size]
-            
-        Returns:
-            Inverse SNR weight [batch_size]
-        """
-        # Avoid division by zero and ensure t < 1
-        t_safe = jnp.maximum(jnp.minimum(t, 0.999), 1e-8)
-        
-        # For linear schedule: 1/SNR(t) = t / (1-t)²
-        snr_inverse = t_safe / ((1 - t_safe) ** 2)
-        
-        # Normalize to have mean 1 for stability
-        snr_inverse = snr_inverse / jnp.mean(snr_inverse)
-        
-        return snr_inverse
     
     def train_step(
         self,
         params: Dict[str, Any],
+        opt_state: optax.OptState,
         x: jnp.ndarray,
         target: jnp.ndarray,
-        key: jax.random.PRNGKey
-    ) -> Tuple[Dict[str, Any], jnp.ndarray, Dict[str, jnp.ndarray]]:
+        key: jax.random.PRNGKey,
+        optimizer: optax.GradientTransformation
+    ) -> Tuple[Dict[str, Any], optax.OptState, jnp.ndarray, Dict[str, jnp.ndarray]]:
         """Single training step for NoProp-CT.
         
         Args:
             params: Model parameters
+            opt_state: Optimizer state
             x: Input data [batch_size, height, width, channels]
             target: Clean target [batch_size, num_classes]
             key: Random key
+            optimizer: Optax optimizer
             
         Returns:
-            Tuple of (updated_params, loss, metrics)
+            Tuple of (updated_params, updated_opt_state, loss, metrics)
         """
         batch_size = x.shape[0]
         
         # Sample random timesteps
         key, t_key = jax.random.split(key)
-        t = self.sample_timestep(t_key, batch_size)
+        t = jax.random.uniform(t_key, (batch_size,), minval=0.0, maxval=1.0)
         
-        # Add noise to target
+        # Sample z_t from backward process
         key, noise_key = jax.random.split(key)
-        z_t, noise = self.add_noise_to_target(target, noise_key, t)
+        z_t = self.noise_schedule.sample_zt(noise_key, target, t)
         
         # Compute loss and gradients
         (loss, metrics), grads = jax.value_and_grad(
-            self.compute_loss, has_aux=True
-        )(params, z_t, x, target, t, key)
+            self.compute_loss, has_aux=True)(params, z_t, x, target, t, key)
         
-        # Update parameters (this would typically be done by an optimizer)
-        # For now, we just return the gradients
-        updated_params = grads
+        # Update parameters using optimizer
+        updates, updated_opt_state = optimizer.update(grads, opt_state, params)
+        updated_params = optax.apply_updates(params, updates)
         
-        return updated_params, loss, metrics
+        return updated_params, updated_opt_state, loss, metrics
     
     def generate(
         self,
@@ -280,7 +230,7 @@ class NoPropCT:
         
         # Start with pure noise at t=1
         key, noise_key = jax.random.split(key)
-        z0 = sample_noise(noise_key, (batch_size, self.model.num_classes))
+        z0 = jax.random.normal(noise_key, (batch_size, self.model.num_classes))
         
         # Integrate the neural ODE from t=1 to t=0
         # The vector field was trained to point from z_t to the clean target

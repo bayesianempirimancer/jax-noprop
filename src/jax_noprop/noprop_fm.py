@@ -12,8 +12,9 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 from flax import struct
+import optax
 
-from .noise_schedules import NoiseSchedule, LinearNoiseSchedule, add_noise, sample_noise
+from .noise_schedules import NoiseSchedule, LinearNoiseSchedule
 from .ode_integration import euler_step, heun_step, integrate_flow
 
 
@@ -36,13 +37,7 @@ class NoPropFM:
         # Create timestep values for continuous time
         object.__setattr__(self, 'timesteps', jnp.linspace(0.0, 1.0, self.num_timesteps + 1))
     
-    def sample_timestep(self, key: jax.random.PRNGKey, batch_size: int) -> jnp.ndarray:
-        """Sample random timesteps for training."""
-        return jax.random.uniform(key, (batch_size,), minval=0.0, maxval=1.0)
     
-    def get_noise_params(self, t: jnp.ndarray) -> Dict[str, jnp.ndarray]:
-        """Get noise parameters for given timesteps."""
-        return self.noise_schedule.get_noise_params(t)
     
     def sample_base_distribution(
         self, 
@@ -58,7 +53,7 @@ class NoPropFM:
         Returns:
             Samples from base distribution
         """
-        return sample_noise(key, shape)
+        return jax.random.normal(key, shape)
     
     def interpolate_path(
         self,
@@ -184,26 +179,30 @@ class NoPropFM:
     def train_step(
         self,
         params: Dict[str, Any],
+        opt_state: optax.OptState,
         x: jnp.ndarray,
         target: jnp.ndarray,
-        key: jax.random.PRNGKey
-    ) -> Tuple[Dict[str, Any], jnp.ndarray, Dict[str, jnp.ndarray]]:
+        key: jax.random.PRNGKey,
+        optimizer: optax.GradientTransformation
+    ) -> Tuple[Dict[str, Any], optax.OptState, jnp.ndarray, Dict[str, jnp.ndarray]]:
         """Single training step for NoProp-FM.
         
         Args:
             params: Model parameters
+            opt_state: Optimizer state
             x: Input data [batch_size, height, width, channels]
             target: Clean target [batch_size, num_classes]
             key: Random key
+            optimizer: Optax optimizer
             
         Returns:
-            Tuple of (updated_params, loss, metrics)
+            Tuple of (updated_params, updated_opt_state, loss, metrics)
         """
         batch_size = x.shape[0]
         
         # Sample random timesteps
         key, t_key = jax.random.split(key)
-        t = self.sample_timestep(t_key, batch_size)
+        t = jax.random.uniform(t_key, (batch_size,), minval=0.0, maxval=1.0)
         
         # Sample from base distribution
         key, z0_key = jax.random.split(key)
@@ -217,11 +216,11 @@ class NoPropFM:
             self.compute_flow_matching_loss, has_aux=True
         )(params, z0, z1, x, t, key)
         
-        # Update parameters (this would typically be done by an optimizer)
-        # For now, we just return the gradients
-        updated_params = grads
+        # Update parameters using optimizer
+        updates, updated_opt_state = optimizer.update(grads, opt_state, params)
+        updated_params = optax.apply_updates(params, updates)
         
-        return updated_params, loss, metrics
+        return updated_params, updated_opt_state, loss, metrics
     
     def generate(
         self,
