@@ -1,0 +1,23 @@
+# Core dependencies
+jax>=0.4.0
+jaxlib>=0.4.0
+flax>=0.7.0
+optax>=0.1.0
+numpy>=1.21.0
+scipy>=1.9.0
+
+# Visualization and utilities
+matplotlib>=3.5.0
+tqdm>=4.64.0
+
+# Data loading
+datasets>=2.0.0
+torchvision>=0.15.0
+
+# Development dependencies (optional)
+pytest>=7.0.0
+pytest-cov>=4.0.0
+black>=22.0.0
+isort>=5.10.0
+flake8>=5.0.0
+mypy>=0.991

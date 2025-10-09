@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jax-noprop"
+version = "0.1.0"
+description = "JAX/Flax implementation of NoProp: Training Neural Networks without Back-propagation or Forward-propagation"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+    "flax>=0.7.0",
+    "optax>=0.1.0",
+    "numpy>=1.21.0",
+    "matplotlib>=3.5.0",
+    "tqdm>=4.64.0",
+    "datasets>=2.0.0",
+    "torchvision>=0.15.0",  # For dataset loading
+    "scipy>=1.9.0",  # For ODE integration
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=22.0.0",
+    "isort>=5.10.0",
+    "flake8>=5.0.0",
+    "mypy>=0.991",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/jax-noprop"
+Repository = "https://github.com/yourusername/jax-noprop"
+Documentation = "https://github.com/yourusername/jax-noprop#readme"
+"Bug Tracker" = "https://github.com/yourusername/jax-noprop/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
