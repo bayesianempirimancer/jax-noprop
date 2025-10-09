@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jax-noprop"
+version = "0.1.0"
+description = "A Jax Implementation of the NoProp Algorithm"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Bayesian Empirimancer"}
+]
+dependencies = [
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+    "flax>=0.7.0",
+    "numpy>=1.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jax_noprop*"]
