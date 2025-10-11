@@ -1,181 +1,182 @@
 """
 NoProp-FM: Flow Matching NoProp implementation.
 
-This module implements the flow matching variant of NoProp, which is inspired
-by flow matching methods. The key idea is to learn a vector field that
-transforms a simple distribution (e.g., Gaussian) to the target distribution.
+This module implements the flow matching variant of NoProp.
+The key idea is to model the denoising process as a flow that transforms
+a base distribution to the target distribution.
 """
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Callable
+from functools import partial
 
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from flax import struct
+from scipy.integrate import odeint
 import optax
 
-from .noise_schedules import NoiseSchedule, LinearNoiseSchedule
-from .ode_integration import euler_step, heun_step, integrate_ode
+# NoProp-FM doesn't use noise schedules
+from .ode_integration import euler_step, heun_step, integrate_ode, _integrate_ode_euler_scan, _integrate_ode_heun_scan, _integrate_ode_rk4_scan, _integrate_ode_euler_scan_trajectory, _integrate_ode_heun_scan_trajectory, _integrate_ode_rk4_scan_trajectory
 
 
-@struct.dataclass
-class NoPropFM:
+class NoPropFM(nn.Module):
     """Flow Matching NoProp implementation.
     
-    This class implements the flow matching variant where we learn a vector field
-    that transforms a simple base distribution to the target distribution.
-    The flow is parameterized by a neural network that takes (z, x, t) as input.
+    This class implements the flow matching variant where the denoising
+    process is modeled as a flow that transforms a base distribution
+    to the target distribution over continuous time.
     """
     
+    target_dim: int  # Dimension of target z
     model: nn.Module
-    num_timesteps: int = 1000
-    noise_schedule: NoiseSchedule = struct.field(default_factory=LinearNoiseSchedule)
+    num_timesteps: int = 20
     integration_method: str = "euler"  # "euler" or "heun"
-    eta: float = 1.0  # Hyperparameter from the paper
+    reg_weight: float = 0.0  # Hyperparameter from the paper
+    sigma_t: float = 0.1  # Standard deviation of noise added to z_t
     
-    def __post_init__(self):
-        # Create timestep values for continuous time
-        object.__setattr__(self, 'timesteps', jnp.linspace(0.0, 1.0, self.num_timesteps + 1))
-    
-    
-    
-    def sample_base_distribution(
+    @nn.compact
+    def __call__(
         self, 
-        key: jax.random.PRNGKey, 
-        shape: Tuple[int, ...]
-    ) -> jnp.ndarray:
-        """Sample from the base distribution (Gaussian noise).
-        
-        Args:
-            key: Random key
-            shape: Shape of the samples
-            
-        Returns:
-            Samples from base distribution
-        """
-        return jax.random.normal(key, shape)
-    
-    def interpolate_path(
-        self,
-        z0: jnp.ndarray,
-        z1: jnp.ndarray,
+        z: jnp.ndarray, 
+        x: jnp.ndarray, 
         t: jnp.ndarray
     ) -> jnp.ndarray:
-        """Interpolate between z0 and z1 at time t.
+        """Initialize all parameters by calling all @nn.compact methods once.
         
-        This implements the linear interpolation path used in flow matching:
-        z_t = (1 - t) * z0 + t * z1
+        This method is only called during init() to set up the parameter tree.
+        During training, we use apply(params, method=...) to call specific methods.
         
         Args:
-            z0: Base distribution samples [batch_size, ...]
-            z1: Target samples [batch_size, ...]
-            t: Time values [batch_size]
+            z: Noisy target [batch_size, z_dim]
+            x: Input data [batch_size, height, width, channels]
+            t: Time step [batch_size]
             
         Returns:
-            Interpolated samples [batch_size, ...]
+            Model output [batch_size, z_dim]
         """
-        # Ensure proper broadcasting
-        if t.ndim == 0:
-            t = t[None]
-        elif t.ndim == 1:
-            t = t[:, None]
-        
-        # Reshape t for broadcasting across all dimensions
-        while t.ndim < z0.ndim:
-            t = t[..., None]
-        
-        return (1 - t) * z0 + t * z1
+        # For flow matching, dz/dt is just the model output
+        return self.model(z, x, t)
     
-    def compute_flow_matching_loss(
+    def dz_dt(
         self,
         params: Dict[str, Any],
-        z0: jnp.ndarray,
-        z1: jnp.ndarray,
+        z: jnp.ndarray,
         x: jnp.ndarray,
-        t: jnp.ndarray,
-        key: jax.random.PRNGKey
-    ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
-        """Compute the NoProp-FM loss according to the paper and PyTorch implementation.
+        t: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Compute the vector field dz/dt = f(z, x, t).
         
-        Based on the PyTorch implementation, the model should predict the noise ε
-        that transforms the base distribution z0 to the target z1.
-        
-        The loss is: L_FM = E[||ε_pred - ε_true||²]
-        where ε_true = z1 - z0 (the transformation from base to target)
-        
+        For flow matching, the vector field is simply the model output.
+        The model learns to predict the direction of flow from the current state
+        to the target distribution.
+                 
         Args:
             params: Model parameters
-            z0: Base distribution samples [batch_size, num_classes]
-            z1: Target samples [batch_size, num_classes]
+            z: Current state [batch_size, num_classes]
             x: Input data [batch_size, height, width, channels]
-            t: Timesteps [batch_size]
-            key: Random key
+            t: Current time [batch_size]
             
         Returns:
-            Tuple of (loss, metrics)
+            Vector field dz/dt [batch_size, num_classes]
         """
-        # Interpolate between z0 and z1 at time t
-        z_t = self.interpolate_path(z0, z1, t)
-        
-        # Compute the predicted noise/transformation
-        noise_pred = self.model.apply(params, z_t, x, t)
-        
-        # The true transformation is the difference between target and base
-        noise_true = z1 - z0
-        
-        # Main loss: MSE between predicted and true transformation
-        main_loss = jnp.mean((noise_pred - noise_true) ** 2)
-        
-        # Regularization term: L2 norm of the predicted transformation
-        reg_loss = jnp.mean(noise_pred ** 2)
-        
-        # Total loss with regularization weight η
-        total_loss = main_loss + self.eta * reg_loss
-        
-        # Compute additional metrics
-        metrics = {
-            "loss": total_loss,
-            "main_loss": main_loss,
-            "reg_loss": reg_loss,
-            "transformation_mse": main_loss,
-            "pred_norm": jnp.mean(jnp.linalg.norm(noise_pred, axis=-1)),
-            "true_norm": jnp.mean(jnp.linalg.norm(noise_true, axis=-1)),
-        }
-        
-        return total_loss, metrics
+        # For flow matching, dz/dt is just the model output
+        return self.apply(params, z, x, t)
     
     def integrate_ode(
         self,
         params: Dict[str, Any],
         z0: jnp.ndarray,
         x: jnp.ndarray,
+        t_span: Tuple[float, float],
         num_steps: int
     ) -> jnp.ndarray:
-        """Integrate the ODE from base distribution to target.
+        """Integrate the neural ODE from t_start to t_end.
         
         Args:
             params: Model parameters
-            z0: Initial state (base distribution) [batch_size, num_classes]
+            z0: Initial state [batch_size, num_classes]
             x: Input data [batch_size, height, width, channels]
+            t_span: Time span (t_start, t_end)
             num_steps: Number of integration steps
             
         Returns:
             Final state [batch_size, num_classes]
         """
-        # Define vector field function for flow matching
-        def vector_field(params, z, x, t):
-            return self.model.apply(params, z, x, t)
-        
         return integrate_ode(
-            vector_field=vector_field,
+            vector_field=self.dz_dt,
             params=params,
             z0=z0,
             x=x,
-            time_span=(0.0, 1.0),
+            time_span=t_span,
             num_steps=num_steps,
             method=self.integration_method
         )
     
+    
+    @partial(jax.jit, static_argnums=(0,))  # self is static
+    def compute_loss(
+        self,
+        params: Dict[str, Any],
+        x: jnp.ndarray,
+        target: jnp.ndarray,
+        key: jax.random.PRNGKey
+    ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
+        """Compute the NoProp-FM loss.
+        
+        For flow matching, the loss is simply the MSE between model output and target:
+        L_FM = E[||model_output - target||²]
+        
+        Args:
+            params: Model parameters
+            x: Input data [batch_size, height, width, channels]
+            target: Clean target [batch_size, num_classes]
+            key: Random key for sampling t and z_t
+            
+        Returns:
+            Tuple of (loss, metrics)
+        """
+        # Infer batch size from input tensor
+        batch_shape = x.shape[:-1]
+        
+        # Split keys for all random operations
+        key, t_key, z0_key, z_t_noise_key = jax.random.split(key, 4)
+        
+        # Sample random timesteps
+        t = jax.random.uniform(t_key, batch_shape, minval=0.0, maxval=1.0)[...,None]
+        
+        # Sample z_t using linear interpolation: z_t = (1-t) * z0 + t * z_target + noise
+        # where z0 ~ N(0, I) is sampled from unit normal distribution
+        z_0 = jax.random.normal(z0_key, target.shape)
+
+        z_t = (1.0 - t) * z_0 + t * target
+        z_t = z_t + self.sigma_t * jax.random.normal(z_t_noise_key, target.shape)
+
+        # Get model output
+        dz_dt = self.apply(params, z_t, x, t)
+        z_1_est = z_t + dz_dt*(1.0-t)
+
+        # Compute MSE loss
+        squared_error = (z_1_est - target) ** 2
+        mse = jnp.mean(squared_error)
+        
+        # Regularization loss
+        reg_loss = jnp.mean(dz_dt ** 2)
+        no_prop_fm_loss = jnp.mean((dz_dt - (target - z_0)) ** 2)
+
+        total_loss = no_prop_fm_loss + self.reg_weight * reg_loss
+
+        # Compute additional metrics
+        metrics = {
+            "mse": mse,
+            "reg_loss": reg_loss,
+            "total_loss": total_loss,
+            "no_prop_fm_loss": no_prop_fm_loss,
+        }
+        
+        return total_loss, metrics
+    
+    
+    @partial(jax.jit, static_argnums=(0, 6))  # self and optimizer are static arguments
     def train_step(
         self,
         params: Dict[str, Any],
@@ -198,23 +199,10 @@ class NoPropFM:
         Returns:
             Tuple of (updated_params, updated_opt_state, loss, metrics)
         """
-        batch_size = x.shape[0]
-        
-        # Sample random timesteps
-        key, t_key = jax.random.split(key)
-        t = jax.random.uniform(t_key, (batch_size,), minval=0.0, maxval=1.0)
-        
-        # Sample from base distribution
-        key, z0_key = jax.random.split(key)
-        z0 = self.sample_base_distribution(z0_key, target.shape)
-        
-        # Use target as z1
-        z1 = target
-        
-        # Compute loss and gradients
+        # Compute loss and gradients (t and z_t are sampled inside compute_loss)
+        # compute_loss is already JIT-compiled, so this will be fast
         (loss, metrics), grads = jax.value_and_grad(
-            self.compute_flow_matching_loss, has_aux=True
-        )(params, z0, z1, x, t, key)
+            self.compute_loss, has_aux=True)(params, x, target, key)
         
         # Update parameters using optimizer
         updates, updated_opt_state = optimizer.update(grads, opt_state, params)
@@ -222,77 +210,97 @@ class NoPropFM:
         
         return updated_params, updated_opt_state, loss, metrics
     
-    def generate(
+    
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, integration_method, output_dim, num_steps are static arguments
+    def predict(
         self,
         params: Dict[str, Any],
         x: jnp.ndarray,
-        key: jax.random.PRNGKey,
-        num_steps: Optional[int] = None
+        integration_method: str,
+        output_dim: int,
+        num_steps: int
     ) -> jnp.ndarray:
-        """Generate predictions using the trained flow matching model.
+        """Generate predictions using the trained NoProp-FM neural ODE.
         
-        This integrates the learned vector field from the base distribution
-        to generate samples from the target distribution.
+        This integrates the learned vector field from zeros (t=0)
+        to the final prediction (t=1), following the paper's approach.
+        Uses scan-based integration for better performance.
         
         Args:
             params: Model parameters
             x: Input data [batch_size, height, width, channels]
-            key: Random key
-            num_steps: Number of integration steps (default: 40 for evaluation)
+            integration_method: Integration method to use ("euler", "heun", "rk4")
+            output_dim: Output dimension
+            num_steps: Number of integration steps
             
         Returns:
-            Final prediction [batch_size, num_classes]
+            Final prediction [batch_size, output_dim]
         """
-        if num_steps is None:
-            num_steps = 40  # Default for evaluation as in the paper
-            
-        batch_size = x.shape[0]
+        # Infer batch size from input tensor
+        batch_shape = x.shape[:-1]
         
-        # Start with samples from base distribution
-        z0 = self.sample_base_distribution(key, (batch_size, self.model.num_classes))
+        # Start with zeros at t=0
+        z0 = jnp.zeros(batch_shape + (output_dim,))
         
-        # Integrate the ODE
-        z_final = self.integrate_ode(params, z0, x, num_steps)
+        # Create a static vector field function to avoid recompilation
+        def vector_field(params, z, x, t):
+            return self.dz_dt(params, z, x, t)
+        
+        # Use scan-based integration implementation with static dispatch
+        if integration_method == "euler":
+            z_final = _integrate_ode_euler_scan(vector_field, params, z0, x, (0.0, 1.0), num_steps)
+        elif integration_method == "heun":
+            z_final = _integrate_ode_heun_scan(vector_field, params, z0, x, (0.0, 1.0), num_steps)
+        elif integration_method == "rk4":
+            z_final = _integrate_ode_rk4_scan(vector_field, params, z0, x, (0.0, 1.0), num_steps)
+        else:
+            raise ValueError(f"Unknown integration method: {integration_method}")
         
         return z_final
     
-    def evaluate(
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, integration_method, output_dim, num_steps are static arguments
+    def predict_trajectory(
         self,
         params: Dict[str, Any],
         x: jnp.ndarray,
-        target: jnp.ndarray,
-        key: jax.random.PRNGKey,
-        num_steps: Optional[int] = None
-    ) -> Dict[str, jnp.ndarray]:
-        """Evaluate the model on a batch of data.
+        integration_method: str,
+        output_dim: int,
+        num_steps: int
+    ) -> jnp.ndarray:
+        """Generate prediction trajectories using the trained NoProp-FM neural ODE.
+        
+        This integrates the learned vector field from zeros (t=0)
+        to the final prediction (t=1), returning the full time course.
+        Uses scan-based integration for better performance.
         
         Args:
             params: Model parameters
             x: Input data [batch_size, height, width, channels]
-            target: Clean target [batch_size, num_classes]
-            key: Random key
-            num_steps: Number of integration steps for generation
+            integration_method: Integration method to use ("euler", "heun", "rk4")
+            output_dim: Output dimension
+            num_steps: Number of integration steps
             
         Returns:
-            Dictionary of evaluation metrics
+            Full trajectory [batch_size, num_steps + 1, output_dim] (includes initial state)
         """
-        # Generate predictions
-        pred = self.generate(params, x, key, num_steps)
+        # Infer batch size from input tensor
+        batch_shape = x.shape[:-1]
         
-        # Compute metrics
-        mse = jnp.mean((pred - target) ** 2)
+        # Start with zeros at t=0
+        z0 = jnp.zeros(batch_shape + (output_dim,))
         
-        # For classification, compute accuracy
-        if target.ndim > 1 and target.shape[-1] > 1:
-            pred_class = jnp.argmax(pred, axis=-1)
-            target_class = jnp.argmax(target, axis=-1)
-            accuracy = jnp.mean(pred_class == target_class)
+        # Create a static vector field function to avoid recompilation
+        def vector_field(params, z, x, t):
+            return self.dz_dt(params, z, x, t)
+        
+        # Use scan-based integration implementation with static dispatch
+        if integration_method == "euler":
+            trajectory = _integrate_ode_euler_scan_trajectory(vector_field, params, z0, x, (0.0, 1.0), num_steps)
+        elif integration_method == "heun":
+            trajectory = _integrate_ode_heun_scan_trajectory(vector_field, params, z0, x, (0.0, 1.0), num_steps)
+        elif integration_method == "rk4":
+            trajectory = _integrate_ode_rk4_scan_trajectory(vector_field, params, z0, x, (0.0, 1.0), num_steps)
         else:
-            accuracy = jnp.nan
+            raise ValueError(f"Unknown integration method: {integration_method}")
         
-        return {
-            "mse": mse,
-            "accuracy": accuracy,
-            "pred_norm": jnp.mean(jnp.linalg.norm(pred, axis=-1)),
-            "target_norm": jnp.mean(jnp.linalg.norm(target, axis=-1)),
-        }
+        return trajectory

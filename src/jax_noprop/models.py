@@ -16,10 +16,10 @@ from .embeddings import sinusoidal_time_embedding
 
 
 class SimpleMLP(nn.Module):
-    """Simple 3-layer MLP for NoProp-CT.
+    """Simple 4-layer MLP for NoProp-CT.
     
     This is a lightweight model that concatenates z, x, and t_embed
-    and processes them through 3 dense layers.
+    and processes them through 4 dense layers.
     """
     hidden_dim: int = 64
     
@@ -42,6 +42,18 @@ class SimpleMLP(nn.Module):
         t_embed = nn.Dense(self.hidden_dim)(t[..., None])
         t_embed = nn.relu(t_embed)
         
+        # Ensure all inputs have the same number of dimensions
+        if z.ndim == 1:
+            z = z[:, None]
+        if x.ndim == 1:
+            x = x[:, None]
+        
+        # Ensure t_embed has the correct shape (batch_size, hidden_dim)
+        if t_embed.ndim > 2:
+            t_embed = t_embed.reshape(t_embed.shape[0], -1)
+        elif t_embed.ndim == 1:
+            t_embed = t_embed[:, None]
+        
         # Concatenate z, x, and t_embed
         combined = jnp.concatenate([z, x, t_embed], axis=-1)
         
@@ -53,8 +65,12 @@ class SimpleMLP(nn.Module):
         h2 = nn.Dense(self.hidden_dim)(h1)
         h2 = nn.relu(h2)
         
+        # Third hidden layer
+        h3 = nn.Dense(self.hidden_dim)(h2)
+        h3 = nn.relu(h3)
+        
         # Output layer - use the same dimension as input z
-        output = nn.Dense(output_dim)(h2)
+        output = nn.Dense(output_dim)(h3)
         
         return output
 

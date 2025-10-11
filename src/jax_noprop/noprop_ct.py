@@ -14,7 +14,7 @@ import flax.linen as nn
 from scipy.integrate import odeint
 import optax
 
-from .noise_schedules import NoiseSchedule, LearnableNoiseSchedule, CosineNoiseSchedule
+from .noise_schedules import NoiseSchedule, LearnableNoiseSchedule, CosineNoiseSchedule, LinearNoiseSchedule
 from .ode_integration import euler_step, heun_step, integrate_ode, _integrate_ode_euler_scan, _integrate_ode_heun_scan, _integrate_ode_rk4_scan, _integrate_ode_euler_scan_trajectory, _integrate_ode_heun_scan_trajectory, _integrate_ode_rk4_scan_trajectory
 
 
@@ -28,17 +28,11 @@ class NoPropCT(nn.Module):
     
     target_dim: int  # Dimension of target z
     model: nn.Module
-    noise_schedule: NoiseSchedule = CosineNoiseSchedule()
+    noise_schedule: NoiseSchedule = LinearNoiseSchedule()
     num_timesteps: int = 20
     integration_method: str = "euler"  # "euler" or "heun"
     reg_weight: float = 0.0  # Hyperparameter from the paper
-    
-    def setup(self):
-        """Setup the NoProp-CT module."""
-        # Create timestep values for continuous time
-        self.timesteps = jnp.linspace(0.0, 1.0, self.num_timesteps + 1)
-    
-    
+        
     @nn.compact
     def __call__(
         self, 
@@ -107,17 +101,8 @@ class NoPropCT(nn.Module):
         x: jnp.ndarray,
         t: jnp.ndarray
     ) -> jnp.ndarray:
-        """Compute the vector field dz/dt = f(z, x, t).
+        """Public interface for dz_dt computation.
         
-        Based on the PyTorch implementation, the model directly predicts the denoised target, but the forward
-        process moves toward the target is a manner specified by the noise schedule.  In the original paper, 
-        the forward process was incorrectly specified for continuous time approximations, and in the torch 
-        implementation a completely different approach seems to have been used.  Here, we note that the forward 
-        is simply given by: 
-
-        dz/dt = alpha'(t)/alpha(t)/(1-alpha(t))*(sqrt(alpha(t))*target - (1+alpha(t))/2*z)
-              = tau_inverse(t) * (sqrt(alpha(t))*target - (1+alpha(t))/2*z)
-                 
         Args:
             params: Model parameters
             z: Current state [batch_size, num_classes]
@@ -127,20 +112,7 @@ class NoPropCT(nn.Module):
         Returns:
             Vector field dz/dt [batch_size, num_classes]
         """
-        # Get model output and gamma values using compact methods
-        model_output = self.apply(params, z, x, t, method=self._get_model_output)
-        gamma_t, gamma_prime_t = self.apply(params, t, method=self._get_gamma_gamma_prime)
-        
-        # Compute alpha_t and tau_inverse from gamma values
-        alpha_t = self.noise_schedule.get_alpha_from_gamma(gamma_t)
-        tau_inverse = self.noise_schedule.get_tau_inverse_from_gamma(gamma_t, gamma_prime_t)
-        
-        # Reshape for broadcasting: [batch_size] -> [batch_size, 1]
-        alpha_t = alpha_t[..., None]
-        tau_inverse = tau_inverse[..., None]
-        
-        # Compute dz/dt = tau_inverse(t) * (sqrt(alpha(t))*target - (1+alpha(t))/2*z)
-        return tau_inverse * (jnp.sqrt(alpha_t) * model_output - (1 + alpha_t) / 2.0 * z)
+        return self.apply(params, z, x, t, method=self._get_dz_dt)
     
     def integrate_ode(
         self,
@@ -313,7 +285,8 @@ class NoPropCT(nn.Module):
         alpha_t = self.noise_schedule.get_alpha_from_gamma(gamma_t)
         
         # Compute z_t = sqrt(ᾱ(t)) * z_target + sqrt(1-ᾱ(t)) * ε
-        return jnp.sqrt(alpha_t)[:, None] * z_target + jnp.sqrt(1.0 - alpha_t)[:, None] * jax.random.normal(key, z_target.shape)
+        alpha_t = alpha_t[..., None]
+        return jnp.sqrt(alpha_t) * z_target + jnp.sqrt(1.0 - alpha_t) * jax.random.normal(key, z_target.shape)
     
     @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, integration_method, output_dim, num_steps are static arguments
     def predict(

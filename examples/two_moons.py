@@ -13,7 +13,7 @@ The two moons dataset is perfect for visualizing:
 2. The continuous-time evolution of predictions z(t)
 3. The effect of different noise schedules
 """
-
+import time
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -32,7 +32,8 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from src.jax_noprop.noprop_ct import NoPropCT
-from src.jax_noprop.models import ConditionalResNet
+from src.jax_noprop.noprop_fm import NoPropFM
+from src.jax_noprop.models import SimpleMLP
 from src.jax_noprop.noise_schedules import (
     LinearNoiseSchedule, 
     CosineNoiseSchedule, 
@@ -60,76 +61,43 @@ def generate_two_moons_data(n_samples: int = 1000, noise: float = 0.1, random_st
     scaler = StandardScaler()
     x = scaler.fit_transform(x)
     
-    # Convert to one-hot encoding
-    z = np.eye(2)[y]
+    # Convert to binary labels: +1 for class 1, -1 for class 0
+    z = (2 * y - 1).astype(np.float32).reshape(-1, 1)
     
     return x.astype(np.float32), z.astype(np.float32)
 
 
-def create_simple_model(input_dim: int = 2, output_dim: int = 2, hidden_dim: int = 64) -> nn.Module:
-    """Create a simple MLP for the two moons task.
-    
-    Args:
-        input_dim: Input dimension (2 for 2D coordinates)
-        output_dim: Output dimension (2 for one-hot labels)
-        hidden_dim: Hidden layer dimension
-        
-    Returns:
-        Simple MLP model
-    """
-    class SimpleMLP(nn.Module):
-        num_classes: int = output_dim
-        
-        @nn.compact
-        def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
-            # For NoProp-CT, we need to predict dz/dt given (z, x, t)
-            # In this simple case, we'll use x and t to predict the target z
-            
-            # Time embedding
-            t_embed = nn.Dense(hidden_dim)(t[..., None])
-            t_embed = nn.relu(t_embed)
-            
-            # Concatenate x and time embedding
-            combined_input = jnp.concatenate([x, t_embed], axis=-1)
-            input_dim_with_time = input_dim + hidden_dim
-            
-            # Main network
-            h = nn.Dense(hidden_dim)(combined_input)
-            h = nn.relu(h)
-            h = nn.Dense(hidden_dim)(h)
-            h = nn.relu(h)
-            
-            # Output layer - predict dz/dt
-            dz_dt = nn.Dense(output_dim)(h)
-            
-            return dz_dt
-    
-    return SimpleMLP()
 
 
-def train_noprop_ct(
+def train_model(
     x_train: np.ndarray,
     z_train: np.ndarray,
     x_val: np.ndarray,
     z_val: np.ndarray,
+    model_type: str = "ct",
     noise_schedule_name: str = "cosine",
     learning_rate: float = 1e-3,
     num_epochs: int = 100,
     batch_size: int = 64,
-    random_seed: int = 42
+    random_seed: int = 42,
+    sigma_t: float = 0.05,
+    reg_weight: float = 0.0
 ) -> Dict[str, Any]:
-    """Train NoProp-CT on two moons dataset.
+    """Train NoProp model (CT or FM) on two moons dataset.
     
     Args:
         x_train: Training features [n_train, 2]
-        z_train: Training targets [n_train, 2]
+        z_train: Training targets [n_train, 1]
         x_val: Validation features [n_val, 2]
-        z_val: Validation targets [n_val, 2]
-        noise_schedule_name: Name of noise schedule to use
+        z_val: Validation targets [n_val, 1]
+        model_type: "ct" for NoProp-CT or "fm" for NoProp-FM
+        noise_schedule_name: Name of noise schedule to use (for CT only)
         learning_rate: Learning rate for optimizer
         num_epochs: Number of training epochs
         batch_size: Batch size for training
         random_seed: Random seed for reproducibility
+        sigma_t: Noise standard deviation for z_t (for FM only)
+        reg_weight: Regularization weight (for FM only)
         
     Returns:
         Dictionary containing training results
@@ -137,34 +105,52 @@ def train_noprop_ct(
     # Set random seed
     key = jr.PRNGKey(random_seed)
     
-    # Create noise schedule
-    if noise_schedule_name == "linear":
-        noise_schedule = LinearNoiseSchedule()
-    elif noise_schedule_name == "cosine":
-        noise_schedule = CosineNoiseSchedule()
-    elif noise_schedule_name == "sigmoid":
-        noise_schedule = SigmoidNoiseSchedule()
-    elif noise_schedule_name == "learnable":
-        noise_schedule = LearnableNoiseSchedule(
-            hidden_dims=(32, 32),
-            monotonic_network=SimpleMonotonicNetwork(hidden_dims=(32, 32))
+    # Create model using the new SimpleMLP
+    model = SimpleMLP(hidden_dim=32)
+    
+    # Create the appropriate NoProp model
+    if model_type == "ct":
+        # Create noise schedule
+        if noise_schedule_name == "linear":
+            noise_schedule = LinearNoiseSchedule()
+        elif noise_schedule_name == "cosine":
+            noise_schedule = CosineNoiseSchedule()
+        elif noise_schedule_name == "sigmoid":
+            noise_schedule = SigmoidNoiseSchedule()
+        elif noise_schedule_name == "learnable":
+            noise_schedule = LearnableNoiseSchedule(
+                hidden_dims=(32, 32),
+                monotonic_network=SimpleMonotonicNetwork(hidden_dims=(32, 32))
+            )
+        else:
+            raise ValueError(f"Unknown noise schedule: {noise_schedule_name}")
+        
+        # Create NoProp-CT
+        noprop_model = NoPropCT(target_dim=1, model=model, noise_schedule=noise_schedule)
+        model_name = f"NoProp-CT ({noise_schedule_name})"
+        
+    elif model_type == "fm":
+        # Create NoProp-FM
+        noprop_model = NoPropFM(
+            target_dim=1, 
+            model=model, 
+            num_timesteps=20,
+            integration_method="euler",
+            reg_weight=reg_weight,
+            sigma_t=sigma_t
         )
+        model_name = f"NoProp-FM (σ_t={sigma_t}, reg={reg_weight})"
+        
     else:
-        raise ValueError(f"Unknown noise schedule: {noise_schedule_name}")
-    
-    # Create model
-    model = create_simple_model(input_dim=2, output_dim=2, hidden_dim=64)
-    
-    # Create NoProp-CT
-    noprop_ct = NoPropCT(target_dim=2, model=model, noise_schedule=noise_schedule)
+        raise ValueError(f"Unknown model type: {model_type}")
     
     # Initialize parameters
     key, subkey = jr.split(key)
     dummy_x = jnp.ones((batch_size, 2))
-    dummy_z = jnp.ones((batch_size, 2))
+    dummy_z = jnp.ones((batch_size, 1))
     dummy_t = jnp.ones((batch_size,))
     
-    params = noprop_ct.init(subkey, dummy_z, dummy_x, dummy_t)
+    params = noprop_model.init(subkey, dummy_z, dummy_x, dummy_t)
     
     # Create optimizer
     optimizer = optax.adam(learning_rate=learning_rate)
@@ -181,10 +167,15 @@ def train_noprop_ct(
     n_train = len(x_train)
     n_val = len(x_val)
     
-    print(f"Training NoProp-CT with {noise_schedule_name} noise schedule...")
+    print(f"Training {model_name}...")
     print(f"Training samples: {n_train}, Validation samples: {n_val}")
     
+    # Timing measurements
+    epoch_times = []
+    total_train_start = time.time()
+    
     for epoch in range(num_epochs):
+        epoch_start = time.time()
         # Training
         epoch_train_losses = []
         epoch_train_mses = []
@@ -213,7 +204,7 @@ def train_noprop_ct(
             
             # Training step
             key, subkey = jr.split(key)
-            params, opt_state, loss, metrics = noprop_ct.train_step(
+            params, opt_state, loss, metrics = noprop_model.train_step(
                 params, opt_state, x_batch, z_batch, subkey, optimizer
             )
             
@@ -234,35 +225,52 @@ def train_noprop_ct(
         train_accuracies.append(0.0)  # Placeholder, will be computed after training
         val_accuracies.append(np.mean(epoch_val_accuracies))
         
+        # Record epoch timing
+        epoch_end = time.time()
+        epoch_time = epoch_end - epoch_start
+        epoch_times.append(epoch_time)
+        
         if epoch % 10 == 0:
             print(f"Epoch {epoch:3d}: Train Loss = {train_losses[-1]:.4f}, "
                   f"Val Loss = {val_losses[-1]:.4f}, "
                   f"Train MSE = {train_mses[-1]:.4f}, "
                   f"Val MSE = {val_mses[-1]:.4f}, "
                   f"Train Acc = {train_accuracies[-1]:.4f}, "
-                  f"Val Acc = {val_accuracies[-1]:.4f}")
+                  f"Val Acc = {val_accuracies[-1]:.4f}, "
+                  f"Time = {epoch_time:.3f}s")
     
-    # Compute final accuracies after training is complete
-    print("Computing final accuracies...")
+    # Compute final accuracies and measure inference time
+    print("Computing final accuracies and measuring inference time...")
     
-    # Training accuracy
-    z_train_pred = noprop_ct.predict(params, x_train, "euler", 2, 10)
-    train_pred_classes = jnp.argmax(z_train_pred, axis=1)
-    train_true_classes = jnp.argmax(z_train, axis=1)
+    # Measure inference time for training set
+    inference_start = time.time()
+    z_train_pred = noprop_model.predict(params, x_train, "euler", 1, 10)
+    train_inference_time = time.time() - inference_start
+    train_pred_classes = jnp.sign(z_train_pred).flatten()
+    train_true_classes = jnp.sign(z_train).flatten()
     final_train_accuracy = jnp.mean(train_pred_classes == train_true_classes)
     
-    # Validation accuracy
-    z_val_pred = noprop_ct.predict(params, x_val, "euler", 2, 10)
-    val_pred_classes = jnp.argmax(z_val_pred, axis=1)
-    val_true_classes = jnp.argmax(z_val, axis=1)
+    # Measure inference time for validation set
+    inference_start = time.time()
+    z_val_pred = noprop_model.predict(params, x_val, "euler", 1, 10)
+    val_inference_time = time.time() - inference_start
+    val_pred_classes = jnp.sign(z_val_pred).flatten()
+    val_true_classes = jnp.sign(z_val).flatten()
     final_val_accuracy = jnp.mean(val_pred_classes == val_true_classes)
+    
+    # Calculate total training time
+    total_train_time = time.time() - total_train_start
     
     print(f"Final Training Accuracy: {final_train_accuracy:.4f}")
     print(f"Final Validation Accuracy: {final_val_accuracy:.4f}")
+    print(f"Total Training Time: {total_train_time:.3f}s")
+    print(f"Average Epoch Time: {np.mean(epoch_times):.3f}s")
+    print(f"Train Inference Time: {train_inference_time:.3f}s")
+    print(f"Val Inference Time: {val_inference_time:.3f}s")
     
-    return {
+    # Return results with model-specific keys
+    results = {
         'params': params,
-        'noprop_ct': noprop_ct,
         'train_losses': train_losses,
         'val_losses': val_losses,
         'train_mses': train_mses,
@@ -271,12 +279,28 @@ def train_noprop_ct(
         'val_accuracies': val_accuracies,
         'final_train_accuracy': final_train_accuracy,
         'final_val_accuracy': final_val_accuracy,
-        'noise_schedule_name': noise_schedule_name
+        'model_type': model_type,
+        'model_name': model_name,
+        'total_train_time': total_train_time,
+        'epoch_times': epoch_times,
+        'avg_epoch_time': np.mean(epoch_times),
+        'train_inference_time': train_inference_time,
+        'val_inference_time': val_inference_time
     }
+    
+    if model_type == "ct":
+        results['noprop_ct'] = noprop_model
+        results['noise_schedule_name'] = noise_schedule_name
+    elif model_type == "fm":
+        results['noprop_fm'] = noprop_model
+        results['sigma_t'] = sigma_t
+        results['reg_weight'] = reg_weight
+    
+    return results
 
 
 def predict_trajectories(
-    noprop_ct: NoPropCT,
+    noprop_model,
     params: Dict[str, Any],
     x: np.ndarray,
     num_timesteps: int = 50,
@@ -285,21 +309,21 @@ def predict_trajectories(
     """Predict z(t) trajectories for given inputs using actual ODE integration.
     
     Args:
-        noprop_ct: Trained NoProp-CT model
+        noprop_model: Trained NoProp model (CT or FM)
         params: Model parameters
         x: Input features [n_samples, 2]
         num_timesteps: Number of timesteps to use for prediction
         random_seed: Random seed for reproducibility
         
     Returns:
-        z_trajectories: Predicted trajectories [n_samples, num_timesteps + 1, 2]
+        z_trajectories: Predicted trajectories [n_samples, num_timesteps + 1, 1]
     """
     # Use the new predict_trajectory method to get actual ODE integration trajectories
-    z_trajectories = noprop_ct.predict_trajectory(
-        params, x, "euler", 2, num_timesteps
+    z_trajectories = noprop_model.predict_trajectory(
+        params, x, "euler", 1, num_timesteps
     )
     
-    return z_trajectories  # [n_samples, num_timesteps + 1, 2]
+    return z_trajectories  # [n_samples, num_timesteps + 1, 1]
 
 
 def plot_results(
@@ -329,7 +353,21 @@ def plot_results(
     val_mses = results['val_mses']
     train_accuracies = results['train_accuracies']
     val_accuracies = results['val_accuracies']
-    noise_schedule_name = results['noise_schedule_name']
+    model_name = results['model_name']
+    model_type = results['model_type']
+    
+    # Get model-specific information
+    if model_type == "ct":
+        noise_schedule_name = results['noise_schedule_name']
+        noprop_model = results['noprop_ct']
+        plot_suffix = noise_schedule_name
+    elif model_type == "fm":
+        sigma_t = results['sigma_t']
+        reg_weight = results['reg_weight']
+        noprop_model = results['noprop_fm']
+        plot_suffix = f"fm_sigma{sigma_t}_reg{reg_weight}"
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
     
     # 1. Plot learning curves
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 5))
@@ -340,7 +378,7 @@ def plot_results(
     ax1.plot(epochs, val_losses, label='Val Loss', color='red')
     ax1.set_xlabel('Epoch')
     ax1.set_ylabel('Loss')
-    ax1.set_title(f'Training Progress - {noise_schedule_name.title()} Noise Schedule')
+    ax1.set_title(f'Training Progress - {model_name}')
     ax1.legend()
     ax1.grid(True)
     
@@ -348,7 +386,7 @@ def plot_results(
     ax2.plot(epochs, val_mses, label='Val MSE', color='red')
     ax2.set_xlabel('Epoch')
     ax2.set_ylabel('MSE')
-    ax2.set_title(f'MSE Progress - {noise_schedule_name.title()} Noise Schedule')
+    ax2.set_title(f'MSE Progress - {model_name}')
     ax2.legend()
     ax2.grid(True)
     
@@ -356,12 +394,12 @@ def plot_results(
     ax3.plot(epochs, val_accuracies, label='Val Accuracy', color='red')
     ax3.set_xlabel('Epoch')
     ax3.set_ylabel('Accuracy')
-    ax3.set_title(f'Accuracy Progress - {noise_schedule_name.title()} Noise Schedule')
+    ax3.set_title(f'Accuracy Progress - {model_name}')
     ax3.legend()
     ax3.grid(True)
     
     plt.tight_layout()
-    plt.savefig(f'{save_dir}/learning_curves_{noise_schedule_name}.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{save_dir}/learning_curves_{plot_suffix}.png', dpi=300, bbox_inches='tight')
     plt.close()
     
     # 2. Plot data and predictions
@@ -371,9 +409,11 @@ def plot_results(
     colors = ['red', 'blue']
     labels = ['Moon 0', 'Moon 1']
     
-    for i in range(2):
-        mask = z_train[:, i] == 1
-        ax1.scatter(x_train[mask, 0], x_train[mask, 1], c=colors[i], label=labels[i], alpha=0.6, s=20)
+    # Plot true labels (binary: +1 for class 1, -1 for class 0)
+    mask_class0 = z_train[:, 0] == -1  # Class 0 (Moon 0)
+    mask_class1 = z_train[:, 0] == 1   # Class 1 (Moon 1)
+    ax1.scatter(x_train[mask_class0, 0], x_train[mask_class0, 1], c=colors[0], label=labels[0], alpha=0.6, s=20)
+    ax1.scatter(x_train[mask_class1, 0], x_train[mask_class1, 1], c=colors[1], label=labels[1], alpha=0.6, s=20)
     
     ax1.set_xlabel('Feature 1')
     ax1.set_ylabel('Feature 2')
@@ -382,16 +422,15 @@ def plot_results(
     ax1.grid(True)
     
     # Predictions
-    noprop_ct = results['noprop_ct']
     params = results['params']
     
     # Get final predictions
     key = jr.PRNGKey(42)
     num_steps = 40  # Number of integration steps for prediction
-    z_pred = noprop_ct.predict(params, x_val, "euler", 2, num_steps)
+    z_pred = noprop_model.predict(params, x_val, "euler", 1, num_steps)
     
-    # Convert to class predictions
-    pred_classes = jnp.argmax(z_pred, axis=1)
+    # Convert to class predictions (binary: +1 -> class 1, -1 -> class 0)
+    pred_classes = (jnp.sign(z_pred).flatten() + 1) // 2  # Convert +1/-1 to 0/1
     
     for i in range(2):
         mask = pred_classes == i
@@ -399,17 +438,17 @@ def plot_results(
     
     ax2.set_xlabel('Feature 1')
     ax2.set_ylabel('Feature 2')
-    ax2.set_title(f'NoProp-CT Predictions - {noise_schedule_name.title()} Noise Schedule')
+    ax2.set_title(f'{model_name} Predictions')
     ax2.legend()
     ax2.grid(True)
     
     plt.tight_layout()
-    plt.savefig(f'{save_dir}/predictions_{noise_schedule_name}.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{save_dir}/predictions_{plot_suffix}.png', dpi=300, bbox_inches='tight')
     plt.close()
     
     # 3. Plot z(t) trajectories for a few samples
     print("Computing z(t) trajectories...")
-    z_trajectories = predict_trajectories(noprop_ct, params, x_val[:10], num_timesteps=20)
+    z_trajectories = predict_trajectories(noprop_model, params, x_val[:10], num_timesteps=20)
     
     fig, axes = plt.subplots(2, 5, figsize=(20, 8))
     axes = axes.flatten()
@@ -417,28 +456,25 @@ def plot_results(
     for i in range(10):
         ax = axes[i]
         
-        # Plot trajectory - now using actual ODE integration
+        # Plot trajectory - now using actual ODE integration (1D output)
         t_points = np.linspace(0, 1, z_trajectories.shape[1])
-        ax.plot(t_points, z_trajectories[i, :, 0], 'r-', label='z₀(t)', linewidth=2)
-        ax.plot(t_points, z_trajectories[i, :, 1], 'b-', label='z₁(t)', linewidth=2)
+        ax.plot(t_points, z_trajectories[i, :, 0], 'b-', label='z(t)', linewidth=2)
         
         # Mark start and end points
-        ax.scatter([0], [z_trajectories[i, 0, 0]], c='red', s=100, marker='o', label='z₀(0)')
-        ax.scatter([0], [z_trajectories[i, 0, 1]], c='blue', s=100, marker='o', label='z₁(0)')
-        ax.scatter([1], [z_trajectories[i, -1, 0]], c='red', s=100, marker='s', label='z₀(1)')
-        ax.scatter([1], [z_trajectories[i, -1, 1]], c='blue', s=100, marker='s', label='z₁(1)')
+        ax.scatter([0], [z_trajectories[i, 0, 0]], c='red', s=100, marker='o', label='z(0)')
+        ax.scatter([1], [z_trajectories[i, -1, 0]], c='blue', s=100, marker='s', label='z(1)')
         
         # True label
-        true_class = np.argmax(z_val[i])
+        true_class = int((jnp.sign(z_val[i, 0]) + 1) // 2)  # Convert +1/-1 to 0/1
         ax.set_title(f'Sample {i+1} (True: {labels[true_class]})')
         ax.set_xlabel('Time t')
         ax.set_ylabel('z(t)')
         ax.grid(True)
         ax.legend(fontsize=8)
     
-    plt.suptitle(f'z(t) Trajectories - {noise_schedule_name.title()} Noise Schedule', fontsize=16)
+    plt.suptitle(f'z(t) Trajectories - {model_name}', fontsize=16)
     plt.tight_layout()
-    plt.savefig(f'{save_dir}/trajectories_{noise_schedule_name}.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{save_dir}/trajectories_{plot_suffix}.png', dpi=300, bbox_inches='tight')
     plt.close()
     
     # 4. Plot 2D trajectory evolution in feature space
@@ -454,48 +490,49 @@ def plot_results(
         ax = axes[i]
         
         # Plot the full trajectory in 2D space
-        trajectory_2d = z_trajectories[sample_idx, :, :]  # [num_timesteps+1, 2]
+        trajectory_1d = z_trajectories[sample_idx, :, 0]  # [num_timesteps+1] - 1D output
+        t_points = np.linspace(0, 1, len(trajectory_1d))
         
         # Plot trajectory line
-        ax.plot(trajectory_2d[:, 0], trajectory_2d[:, 1], 'k-', alpha=0.3, linewidth=1)
+        ax.plot(t_points, trajectory_1d, 'k-', alpha=0.3, linewidth=1)
         
         # Plot trajectory points with color gradient
-        colors = plt.cm.viridis(np.linspace(0, 1, len(trajectory_2d)))
-        for j, (x, y) in enumerate(trajectory_2d):
-            ax.scatter(x, y, c=[colors[j]], s=30, alpha=0.7)
+        colors = plt.cm.viridis(np.linspace(0, 1, len(trajectory_1d)))
+        for j, (t, z) in enumerate(zip(t_points, trajectory_1d)):
+            ax.scatter(t, z, c=[colors[j]], s=30, alpha=0.7)
         
         # Mark start and end points
-        ax.scatter(trajectory_2d[0, 0], trajectory_2d[0, 1], c='red', s=200, marker='o', 
+        ax.scatter(t_points[0], trajectory_1d[0], c='red', s=200, marker='o', 
                   label='Start (t=0)', edgecolors='black', linewidth=2)
-        ax.scatter(trajectory_2d[-1, 0], trajectory_2d[-1, 1], c='blue', s=200, marker='s', 
+        ax.scatter(t_points[-1], trajectory_1d[-1], c='blue', s=200, marker='s', 
                   label='End (t=1)', edgecolors='black', linewidth=2)
         
         # Mark intermediate time points
         for t_idx in time_indices[1:-1]:  # Skip start and end
-            if t_idx < len(trajectory_2d):
-                ax.scatter(trajectory_2d[t_idx, 0], trajectory_2d[t_idx, 1], 
+            if t_idx < len(trajectory_1d):
+                ax.scatter(t_points[t_idx], trajectory_1d[t_idx], 
                           c='orange', s=100, marker='^', alpha=0.8)
         
         # True label
-        true_class = np.argmax(z_val[sample_idx])
+        true_class = int((jnp.sign(z_val[sample_idx, 0]) + 1) // 2)  # Convert +1/-1 to 0/1
         ax.set_title(f'Sample {sample_idx+1} (True: {labels[true_class]})', fontsize=12)
-        ax.set_xlabel('z₀(t)')
-        ax.set_ylabel('z₁(t)')
+        ax.set_xlabel('Time t')
+        ax.set_ylabel('z(t)')
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=8)
         
         # Set equal aspect ratio
         ax.set_aspect('equal', adjustable='box')
     
-    plt.suptitle(f'2D Trajectory Evolution - {noise_schedule_name.title()} Noise Schedule', fontsize=16)
+    plt.suptitle(f'2D Trajectory Evolution - {model_name}', fontsize=16)
     plt.tight_layout()
-    plt.savefig(f'{save_dir}/trajectory_evolution_{noise_schedule_name}.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{save_dir}/trajectory_evolution_{plot_suffix}.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 
 def main():
     """Main function to run the two moons example."""
-    print("🌙 Two Moons NoProp-CT Example")
+    print("🌙 Two Moons NoProp Comparison Example")
     print("=" * 50)
     
     # Generate data
@@ -517,41 +554,99 @@ def main():
     print(f"Training: {len(x_train)} samples")
     print(f"Validation: {len(x_val)} samples")
     
-    # Test with learnable noise schedule
-    noise_schedule_name = "learnable"
+    # Train both models for runtime comparison
+    models_to_train = [
+        {"type": "ct", "noise_schedule": "linear", "name": "NoProp-CT (Linear)"},
+        {"type": "fm", "sigma_t": 0.05, "reg_weight": 0.0, "name": "NoProp-FM (σ_t=0.05)"}
+    ]
+    
+    all_results = []
+    
+    for model_config in models_to_train:
+        print(f"\n{'='*60}")
+        print(f"Training {model_config['name']}")
+        print(f"{'='*60}")
+        
+        # Train model
+        if model_config["type"] == "ct":
+            results = train_model(
+                x_train=x_train,
+                z_train=z_train,
+                x_val=x_val,
+                z_val=z_val,
+                model_type="ct",
+                noise_schedule_name=model_config["noise_schedule"],
+                learning_rate=1e-3,
+                num_epochs=50,
+                batch_size=32,
+                random_seed=42
+            )
+        elif model_config["type"] == "fm":
+            results = train_model(
+                x_train=x_train,
+                z_train=z_train,
+                x_val=x_val,
+                z_val=z_val,
+                model_type="fm",
+                learning_rate=1e-3,
+                num_epochs=50,
+                batch_size=32,
+                random_seed=42,
+                sigma_t=model_config["sigma_t"],
+                reg_weight=model_config["reg_weight"]
+            )
+        
+        # Plot results
+        plot_results(x_train, z_train, x_val, z_val, results)
+        
+        # Print final metrics
+        print(f"\nFinal Results for {model_config['name']}:")
+        print(f"  Final Train Loss: {results['train_losses'][-1]:.4f}")
+        print(f"  Final Val Loss: {results['val_losses'][-1]:.4f}")
+        print(f"  Final Train MSE: {results['train_mses'][-1]:.4f}")
+        print(f"  Final Val MSE: {results['val_mses'][-1]:.4f}")
+        print(f"  Final Train Accuracy: {results['final_train_accuracy']:.4f}")
+        print(f"  Final Val Accuracy: {results['final_val_accuracy']:.4f}")
+        
+        all_results.append(results)
+    
+    # Print comparison summary
+    print(f"\n{'='*80}")
+    print("📊 RUNTIME COMPARISON SUMMARY")
+    print(f"{'='*80}")
+    print(f"{'Model':<30} {'Train Acc':<10} {'Val Acc':<10} {'Avg Epoch':<10} {'Train Inf':<10} {'Val Inf':<10}")
+    print("-" * 80)
+    
+    for results in all_results:
+        model_name = results['model_name']
+        train_acc = results['final_train_accuracy']
+        val_acc = results['final_val_accuracy']
+        avg_epoch_time = results['avg_epoch_time']
+        train_inf_time = results['train_inference_time']
+        val_inf_time = results['val_inference_time']
+        
+        print(f"{model_name:<30} {train_acc:<10.4f} {val_acc:<10.4f} {avg_epoch_time:<10.3f} {train_inf_time:<10.3f} {val_inf_time:<10.3f}")
+    
+    print(f"\n{'='*80}")
+    print("📈 DETAILED TIMING BREAKDOWN")
+    print(f"{'='*80}")
+    
+    for results in all_results:
+        model_name = results['model_name']
+        total_train_time = results['total_train_time']
+        avg_epoch_time = results['avg_epoch_time']
+        train_inf_time = results['train_inference_time']
+        val_inf_time = results['val_inference_time']
+        
+        print(f"\n{model_name}:")
+        print(f"  Total Training Time: {total_train_time:.3f}s")
+        print(f"  Average Epoch Time:  {avg_epoch_time:.3f}s")
+        print(f"  Train Inference:     {train_inf_time:.3f}s")
+        print(f"  Val Inference:       {val_inf_time:.3f}s")
     
     print(f"\n{'='*60}")
-    print(f"Training with {noise_schedule_name.upper()} noise schedule")
-    print(f"{'='*60}")
-    
-    # Train model
-    results = train_noprop_ct(
-        x_train=x_train,
-        z_train=z_train,
-        x_val=x_val,
-        z_val=z_val,
-        noise_schedule_name=noise_schedule_name,
-        learning_rate=1e-3,
-        num_epochs=50,
-        batch_size=32,
-        random_seed=42
-    )
-    
-    # Plot results
-    plot_results(x_train, z_train, x_val, z_val, results)
-    
-    # Print final metrics
-    print(f"\nFinal Results for {noise_schedule_name.upper()}:")
-    print(f"  Final Train Loss: {results['train_losses'][-1]:.4f}")
-    print(f"  Final Val Loss: {results['val_losses'][-1]:.4f}")
-    print(f"  Final Train MSE: {results['train_mses'][-1]:.4f}")
-    print(f"  Final Val MSE: {results['val_mses'][-1]:.4f}")
-    print(f"  Final Train Accuracy: {results['final_train_accuracy']:.4f}")
-    print(f"  Final Val Accuracy: {results['final_val_accuracy']:.4f}")
-    
-    print(f"\n{'='*60}")
-    print("🎉 Two Moons Example Complete!")
-    print("Check the 'plots' directory for visualization results.")
+    print("🎉 Two Moons Comparison Complete!")
+    print("Check the 'artifacts' directory for visualization results.")
     print(f"{'='*60}")
 
 

@@ -184,14 +184,20 @@ class LinearNoiseSchedule(NoiseSchedule):
         For linear schedule: ᾱ(t) = t, so γ(t) = logit(t)
         This ensures ᾱ(t) = sigmoid(γ(t)) = t
         γ'(t) = 1/(t*(1-t))
-        """
-        # Use logit with numerical stability, but handle boundary cases
-        t_clipped = jnp.clip(t, 1e-8, 1.0 - 1e-8)
-        gamma_t = jax.scipy.special.logit(t_clipped)
         
-        # Compute derivative
-        t_clipped_prime = jnp.clip(t, 1e-7, 1.0 - 1e-7)
-        gamma_prime_t = 1.0 / (t_clipped_prime * (1.0 - t_clipped_prime))
+        To avoid singularities at t=0 and t=1, we use a modified linear schedule
+        that stays away from the boundaries: ᾱ(t) = 0.05 + 0.9*t
+        """
+        # Modified linear schedule to avoid boundary singularities
+        # ᾱ(t) = 0.05 + 0.9*t ranges from 0.05 to 0.95
+        alpha_t = 0.05 + 0.9 * t
+        alpha_prime_t = 0.9
+        
+        # Clip to avoid numerical issues
+        alpha_t_clipped = jnp.clip(alpha_t, 1e-3, 1.0 - 1e-3)
+        
+        gamma_t = jax.scipy.special.logit(alpha_t_clipped)
+        gamma_prime_t = alpha_prime_t / (alpha_t_clipped * (1.0 - alpha_t_clipped))
         
         return gamma_t, gamma_prime_t
 
@@ -210,10 +216,17 @@ class CosineNoiseSchedule(NoiseSchedule):
         For cosine schedule: ᾱ(t) = sin(π/2 * t), so γ(t) = logit(sin(π/2 * t))
         This ensures ᾱ(t) = sigmoid(γ(t)) = sin(π/2 * t)
         γ'(t) = (π/2) * cos(π/2 * t) / (sin(π/2 * t) * (1 - sin(π/2 * t)))
+        
+        To avoid singularities at t=0 and t=1, we use a modified cosine schedule
+        that stays away from the boundaries: ᾱ(t) = 0.5 * (1 + sin(π * (t - 0.5)))
         """
-        alpha_t = jnp.sin(jnp.pi / 2 * t)
-        alpha_prime_t = (jnp.pi / 2) * jnp.cos(jnp.pi / 2 * t)
-        alpha_t_clipped = jnp.clip(alpha_t, 1e-7, 1.0 - 1e-7)
+        # Modified cosine schedule to avoid boundary singularities
+        # ᾱ(t) = 0.5 * (1 + sin(π * (t - 0.5))) ranges from ~0.05 to ~0.95
+        alpha_t = 0.5 * (1.0 + jnp.sin(jnp.pi * (t - 0.5)))
+        alpha_prime_t = 0.5 * jnp.pi * jnp.cos(jnp.pi * (t - 0.5))
+        
+        # Clip to avoid numerical issues
+        alpha_t_clipped = jnp.clip(alpha_t, 1e-3, 1.0 - 1e-3)
         
         gamma_t = jax.scipy.special.logit(alpha_t_clipped)
         gamma_prime_t = alpha_prime_t / (alpha_t_clipped * (1.0 - alpha_t_clipped))
@@ -305,8 +318,8 @@ class LearnableNoiseSchedule(NoiseSchedule):
             t: Time values [batch_size]
         """
         scale_logit = self.param('scale_logit', nn.initializers.constant(0.0), ())
-        gamma_min = self.param('gamma_min', nn.initializers.constant(-5.0), ())
-        gamma_max = self.param('gamma_max', nn.initializers.constant(5.0), ())
+        gamma_min = self.param('gamma_min', nn.initializers.constant(-3.0), ())
+        gamma_max = self.param('gamma_max', nn.initializers.constant(3.0), ())
 
         def gamma_fn(t_input):
             f_t = self.monotonic_network(t_input).squeeze()
