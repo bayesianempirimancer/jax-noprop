@@ -11,7 +11,7 @@ A JAX/Flax implementation of the NoProp algorithm from the paper "NoProp: Traini
 
 NoProp is a novel approach for training neural networks without relying on standard back-propagation or forward-propagation steps, taking inspiration from diffusion and flow matching methods. This repository provides:
 
-- **NoProp-DT**: Discrete-time implementation
+- **NoProp-DT**: Discrete-time implementation (Currently Broken)
 - **NoProp-CT**: Continuous-time implementation with neural ODEs (fully optimized)
 - **NoProp-FM**: Flow matching variant (fully optimized)
 
