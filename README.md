@@ -97,7 +97,7 @@ The implementation follows the paper's architecture with several key improvement
 
 - **Input signature**: `model(z, x, t)` where:
   - `z`: Noisy target tensor `[batch_size, z_dim]`
-  - `x`: Input data tensor `[batch_size, height, width, channels]` 
+  - `x`: Input data tensor `[batch_size, x_dim]` 
   - `t`: Time step tensor `[batch_size]` (can be `None` for discrete-time variants)
 - **Output**: Must return `z'` with **exactly the same shape** as input `z`
 - **Time handling**: For discrete-time variants, `t=None` is allowed

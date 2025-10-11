@@ -61,8 +61,12 @@ def generate_two_moons_data(n_samples: int = 1000, noise: float = 0.1, random_st
     scaler = StandardScaler()
     x = scaler.fit_transform(x)
     
-    # Convert to binary labels: +1 for class 1, -1 for class 0
-    z = (2 * y - 1).astype(np.float32).reshape(-1, 1)
+    # Convert to 2D binary labels: class 0 = [-1, 1], class 1 = [1, -1]
+    z = np.zeros((n_samples, 2), dtype=np.float32)
+    z[y == 0, 0] = -1.0  # Class 0: [-1, 1]
+    z[y == 0, 1] = 1.0
+    z[y == 1, 0] = 1.0   # Class 1: [1, -1]
+    z[y == 1, 1] = -1.0
     
     return x.astype(np.float32), z.astype(np.float32)
 
@@ -105,8 +109,8 @@ def train_model(
     # Set random seed
     key = jr.PRNGKey(random_seed)
     
-    # Create model using the new SimpleMLP
-    model = SimpleMLP(hidden_dim=32)
+    # Create model using the new SimpleMLP with multiple hidden layers
+    model = SimpleMLP(hidden_dims=(64, 32))
     
     # Create the appropriate NoProp model
     if model_type == "ct":
@@ -126,16 +130,14 @@ def train_model(
             raise ValueError(f"Unknown noise schedule: {noise_schedule_name}")
         
         # Create NoProp-CT
-        noprop_model = NoPropCT(target_dim=1, model=model, noise_schedule=noise_schedule)
+        noprop_model = NoPropCT(target_dim=2, model=model, noise_schedule=noise_schedule)
         model_name = f"NoProp-CT ({noise_schedule_name})"
         
     elif model_type == "fm":
         # Create NoProp-FM
         noprop_model = NoPropFM(
-            target_dim=1, 
-            model=model, 
-            num_timesteps=20,
-            integration_method="euler",
+            target_dim=2, 
+            model=model,
             reg_weight=reg_weight,
             sigma_t=sigma_t
         )
@@ -147,7 +149,7 @@ def train_model(
     # Initialize parameters
     key, subkey = jr.split(key)
     dummy_x = jnp.ones((batch_size, 2))
-    dummy_z = jnp.ones((batch_size, 1))
+    dummy_z = jnp.ones((batch_size, 2))
     dummy_t = jnp.ones((batch_size,))
     
     params = noprop_model.init(subkey, dummy_z, dummy_x, dummy_t)
@@ -211,19 +213,32 @@ def train_model(
             epoch_train_losses.append(loss)
             epoch_train_mses.append(metrics['mse'])
         
-        # For validation, we'll just use a simple loss based on the training metrics
-        # We'll compute actual accuracy only after training is complete
-        epoch_val_losses = [np.mean(epoch_train_losses)]  # Use training loss as proxy
-        epoch_val_mses = [np.mean(epoch_train_mses)]      # Use training MSE as proxy
-        epoch_val_accuracies = [0.0]  # Placeholder, will be computed after training
+        # Compute actual validation metrics
+        val_loss, val_metrics = noprop_model.compute_loss(params, x_val, z_val, jr.PRNGKey(42))
+        epoch_val_losses = [val_loss]
+        epoch_val_mses = [val_metrics['mse']]
+        
+        # Compute training accuracy for this epoch
+        z_train_pred = noprop_model.predict(params, x_train, "euler", 2, 10)
+        train_pred_classes = (z_train_pred[:, 0] > z_train_pred[:, 1]).astype(int)
+        train_true_classes = (z_train[:, 0] > z_train[:, 1]).astype(int)
+        epoch_train_accuracy = jnp.mean(train_pred_classes == train_true_classes)
+        
+        # Compute validation accuracy for this epoch
+        z_val_pred = noprop_model.predict(params, x_val, "euler", 2, 10)
+        val_pred_classes = (z_val_pred[:, 0] > z_val_pred[:, 1]).astype(int)
+        val_true_classes = (z_val[:, 0] > z_val[:, 1]).astype(int)
+        epoch_val_accuracy = jnp.mean(val_pred_classes == val_true_classes)
+        
+        epoch_val_accuracies = [epoch_val_accuracy]
         
         # Record metrics
         train_losses.append(np.mean(epoch_train_losses))
         val_losses.append(np.mean(epoch_val_losses))
         train_mses.append(np.mean(epoch_train_mses))
         val_mses.append(np.mean(epoch_val_mses))
-        train_accuracies.append(0.0)  # Placeholder, will be computed after training
-        val_accuracies.append(np.mean(epoch_val_accuracies))
+        train_accuracies.append(epoch_train_accuracy)
+        val_accuracies.append(epoch_val_accuracy)
         
         # Record epoch timing
         epoch_end = time.time()
@@ -244,18 +259,18 @@ def train_model(
     
     # Measure inference time for training set
     inference_start = time.time()
-    z_train_pred = noprop_model.predict(params, x_train, "euler", 1, 10)
+    z_train_pred = noprop_model.predict(params, x_train, "euler", 2, 10)
     train_inference_time = time.time() - inference_start
-    train_pred_classes = jnp.sign(z_train_pred).flatten()
-    train_true_classes = jnp.sign(z_train).flatten()
+    train_pred_classes = (z_train_pred[:, 0] > z_train_pred[:, 1]).astype(int)  # z[0] > z[1]
+    train_true_classes = (z_train[:, 0] > z_train[:, 1]).astype(int)  # z[0] > z[1]
     final_train_accuracy = jnp.mean(train_pred_classes == train_true_classes)
     
     # Measure inference time for validation set
     inference_start = time.time()
-    z_val_pred = noprop_model.predict(params, x_val, "euler", 1, 10)
+    z_val_pred = noprop_model.predict(params, x_val, "euler", 2, 10)
     val_inference_time = time.time() - inference_start
-    val_pred_classes = jnp.sign(z_val_pred).flatten()
-    val_true_classes = jnp.sign(z_val).flatten()
+    val_pred_classes = (z_val_pred[:, 0] > z_val_pred[:, 1]).astype(int)  # z[0] > z[1]
+    val_true_classes = (z_val[:, 0] > z_val[:, 1]).astype(int)  # z[0] > z[1]
     final_val_accuracy = jnp.mean(val_pred_classes == val_true_classes)
     
     # Calculate total training time
@@ -316,14 +331,14 @@ def predict_trajectories(
         random_seed: Random seed for reproducibility
         
     Returns:
-        z_trajectories: Predicted trajectories [n_samples, num_timesteps + 1, 1]
+        z_trajectories: Predicted trajectories [n_samples, num_timesteps + 1, 2]
     """
     # Use the new predict_trajectory method to get actual ODE integration trajectories
     z_trajectories = noprop_model.predict_trajectory(
-        params, x, "euler", 1, num_timesteps
+        params, x, "euler", 2, num_timesteps
     )
     
-    return z_trajectories  # [n_samples, num_timesteps + 1, 1]
+    return z_trajectories  # [n_samples, num_timesteps + 1, 2]
 
 
 def plot_results(
@@ -427,10 +442,10 @@ def plot_results(
     # Get final predictions
     key = jr.PRNGKey(42)
     num_steps = 40  # Number of integration steps for prediction
-    z_pred = noprop_model.predict(params, x_val, "euler", 1, num_steps)
+    z_pred = noprop_model.predict(params, x_val, "euler", 2, num_steps)
     
-    # Convert to class predictions (binary: +1 -> class 1, -1 -> class 0)
-    pred_classes = (jnp.sign(z_pred).flatten() + 1) // 2  # Convert +1/-1 to 0/1
+    # Convert to class predictions using z[0] > z[1]
+    pred_classes = (z_pred[:, 0] > z_pred[:, 1]).astype(int)  # z[0] > z[1]
     
     for i in range(2):
         mask = pred_classes == i
@@ -456,16 +471,19 @@ def plot_results(
     for i in range(10):
         ax = axes[i]
         
-        # Plot trajectory - now using actual ODE integration (1D output)
+        # Plot trajectory - now using actual ODE integration (2D output)
         t_points = np.linspace(0, 1, z_trajectories.shape[1])
-        ax.plot(t_points, z_trajectories[i, :, 0], 'b-', label='z(t)', linewidth=2)
+        ax.plot(t_points, z_trajectories[i, :, 0], 'b-', label='z[0](t)', linewidth=2)
+        ax.plot(t_points, z_trajectories[i, :, 1], 'g-', label='z[1](t)', linewidth=2)
         
         # Mark start and end points
-        ax.scatter([0], [z_trajectories[i, 0, 0]], c='red', s=100, marker='o', label='z(0)')
-        ax.scatter([1], [z_trajectories[i, -1, 0]], c='blue', s=100, marker='s', label='z(1)')
+        ax.scatter([0], [z_trajectories[i, 0, 0]], c='red', s=100, marker='o', label='z[0](0)')
+        ax.scatter([0], [z_trajectories[i, 0, 1]], c='orange', s=100, marker='o', label='z[1](0)')
+        ax.scatter([1], [z_trajectories[i, -1, 0]], c='blue', s=100, marker='s', label='z[0](1)')
+        ax.scatter([1], [z_trajectories[i, -1, 1]], c='purple', s=100, marker='s', label='z[1](1)')
         
         # True label
-        true_class = int((jnp.sign(z_val[i, 0]) + 1) // 2)  # Convert +1/-1 to 0/1
+        true_class = int((z_val[i, 0] > z_val[i, 1]))  # z[0] > z[1]
         ax.set_title(f'Sample {i+1} (True: {labels[true_class]})')
         ax.set_xlabel('Time t')
         ax.set_ylabel('z(t)')
@@ -514,7 +532,7 @@ def plot_results(
                           c='orange', s=100, marker='^', alpha=0.8)
         
         # True label
-        true_class = int((jnp.sign(z_val[sample_idx, 0]) + 1) // 2)  # Convert +1/-1 to 0/1
+        true_class = int((z_val[sample_idx, 0] > z_val[sample_idx, 1]))  # z[0] > z[1]
         ax.set_title(f'Sample {sample_idx+1} (True: {labels[true_class]})', fontsize=12)
         ax.set_xlabel('Time t')
         ax.set_ylabel('z(t)')
