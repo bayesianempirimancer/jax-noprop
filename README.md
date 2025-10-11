@@ -121,21 +121,20 @@ The implementation uses a **gamma parameterization** for numerical stability:
 3. **SigmoidNoiseSchedule**: `γ(t) = γ * (t - 0.5)`, `γ'(t) = γ` (constant)
 4. **LearnableNoiseSchedule**: Neural network learns `γ(t)` with guaranteed monotonicity
 
-**⚠️ Important Note on Noise Schedule Singularities**: Care should be taken to ensure that noise schedules do not have singularities at t=0 or t=1. Common schedules like `LinearNoiseSchedule` have this problem where `γ'(t) = 1/(t*(1-t))` becomes infinite at the boundaries. The `CosineNoiseSchedule` and `LearnableNoiseSchedule` are designed to avoid these singularities and are generally recommended for stable training.
+**⚠️ Important Note on Noise Schedule Singularities**: Care should be taken to ensure that noise schedules do not have singularities at t=0 or t=1. Common schedules like Linear and Cosine have this problem because of the particular parameterization we use for the noise scuedules under the hood.  This is because we paramterize `γ(t)` directly and then compute  `α(t) = sigmoid(γ(t))`.  This means that common noise scuedules like  `α(t) = 1-t` are not really accessible.  As a result `CosineNoiseSchedule` and `LinearNoiseSchedule` implemented here are approximate so as to avoid singularities in things like `SRN'(t)`.
 
 ### Training Process
 
 Each NoProp variant implements a different training strategy:
 
-1. **NoProp-DT**: Each layer learns to denoise independently with discrete timesteps
-2. **NoProp-CT**: Learns a vector field `dz/dt = f(z, x, t)` for continuous-time denoising via neural ODEs
-3. **NoProp-FM**: Learns a flow that transforms base distribution to target distribution
+1. **NoProp-DT**: Time steps are associated with a single Resnet layer and each layer learns to denoise independently
+2. **NoProp-CT**: Learns a vector field `dz/dt = f(z, x, t)` for continuous-time denoising via neural ODEs using SNR weighted loss
+3. **NoProp-FM**: Learns a vector field `dz/dt = f(z, x, t)` for continuous-time denoising via neural ODEs using a simple field matching loss
 
 ### Key Implementation Details
 
 - **Efficient computation**: Single `get_gamma_gamma_prime_t()` method computes both `γ(t)` and `γ'(t)` to avoid redundant calculations
-- **Learnable schedules**: Neural network with positive weights and ReLU activations ensures monotonic `γ(t)`
-- **Boundary conditions**: Learnable schedules enforce exact `γ(0) = γ_min` and `γ(1) = γ_max`
+- **Learnable schedules**: Neural network with positive weights and ReLU activations and a terminal rescaling ensures bounded monotonic `γ(t)`
 - **ODE integration**: Built-in Euler, Heun, and Runge-Kutta 4th order methods with scan-based optimization
 - **JIT optimization**: All critical methods are JIT-compiled for maximum performance
 
@@ -147,10 +146,10 @@ The implementation includes several key optimizations:
 - **`compute_loss`**: 3000x+ speedup with JIT compilation
 - **`predict`**: 2-4x speedup with static argument optimization
 - **`predict_trajectory`**: Full trajectory generation with same optimizations
-- **`train_step`**: 50x+ speedup by leveraging optimized `compute_loss`
+- **`train_step`**: slight speedup vs simply JIT compiling `compute_loss`
 
 ### Scan-based Integration
-- All ODE integration uses `jax.lax.scan` instead of Python loops
+- All ODE integration uses `jax.lax.scan` 
 - Enables efficient JIT compilation and vectorization
 - Supports Euler, Heun, and RK4 integration methods
 - Provides trajectory visualization capabilities
