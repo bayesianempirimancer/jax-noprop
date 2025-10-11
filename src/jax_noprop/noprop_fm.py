@@ -15,7 +15,7 @@ from flax import struct
 import optax
 
 from .noise_schedules import NoiseSchedule, LinearNoiseSchedule
-from .ode_integration import euler_step, heun_step, integrate_flow
+from .ode_integration import euler_step, heun_step, integrate_ode
 
 
 @struct.dataclass
@@ -144,14 +144,14 @@ class NoPropFM:
         
         return total_loss, metrics
     
-    def integrate_flow(
+    def integrate_ode(
         self,
         params: Dict[str, Any],
         z0: jnp.ndarray,
         x: jnp.ndarray,
         num_steps: int
     ) -> jnp.ndarray:
-        """Integrate the flow from base distribution to target.
+        """Integrate the ODE from base distribution to target.
         
         Args:
             params: Model parameters
@@ -166,7 +166,7 @@ class NoPropFM:
         def vector_field(params, z, x, t):
             return self.model.apply(params, z, x, t)
         
-        return integrate_flow(
+        return integrate_ode(
             vector_field=vector_field,
             params=params,
             z0=z0,
@@ -251,8 +251,8 @@ class NoPropFM:
         # Start with samples from base distribution
         z0 = self.sample_base_distribution(key, (batch_size, self.model.num_classes))
         
-        # Integrate the flow
-        z_final = self.integrate_flow(params, z0, x, num_steps)
+        # Integrate the ODE
+        z_final = self.integrate_ode(params, z0, x, num_steps)
         
         return z_final
     

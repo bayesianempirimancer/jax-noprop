@@ -31,7 +31,6 @@ class NoPropDT:
 - `compute_loss(params, z_t, x, target, t, key)`: Compute training loss
 - `train_step(params, x, target, key)`: Single training step
 - `generate(params, x, key, num_steps)`: Generate predictions
-- `evaluate(params, x, target, key, num_steps)`: Evaluate model
 
 ### NoPropCT
 
@@ -62,7 +61,6 @@ class NoPropCT:
 - `compute_loss(params, z_t, x, target, t, key)`: Compute training loss
 - `train_step(params, x, target, key)`: Single training step
 - `generate(params, x, key, num_steps)`: Generate predictions
-- `evaluate(params, x, target, key, num_steps)`: Evaluate model
 
 ### NoPropFM
 
@@ -94,7 +92,6 @@ class NoPropFM:
 - `integrate_flow(params, z0, x, num_steps)`: Integrate the flow
 - `train_step(params, x, target, key)`: Single training step
 - `generate(params, x, key, num_steps)`: Generate predictions
-- `evaluate(params, x, target, key, num_steps)`: Evaluate model
 
 ## Model Architectures
 
@@ -304,7 +301,8 @@ noprop = NoPropDT(model, noise_schedule=schedule)
 # Generate predictions
 predictions = noprop.generate(state.params, x, key, num_steps=40)
 
-# Evaluate model
-metrics = noprop.evaluate(state.params, x, y, key, num_steps=40)
-print(f"Accuracy: {metrics['accuracy']:.4f}")
+# Evaluate model manually
+predictions = noprop.predict(state.params, x, "euler", output_dim=2, num_steps=40)
+accuracy = jnp.mean(jnp.argmax(predictions, axis=-1) == jnp.argmax(y, axis=-1))
+print(f"Accuracy: {accuracy:.4f}")
 ```

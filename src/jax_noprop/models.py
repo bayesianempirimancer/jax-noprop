@@ -15,6 +15,50 @@ from flax import struct
 from .embeddings import sinusoidal_time_embedding
 
 
+class SimpleMLP(nn.Module):
+    """Simple 3-layer MLP for NoProp-CT.
+    
+    This is a lightweight model that concatenates z, x, and t_embed
+    and processes them through 3 dense layers.
+    """
+    hidden_dim: int = 64
+    
+    @nn.compact
+    def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
+        """Forward pass of the simple MLP.
+        
+        Args:
+            z: Current state [batch_size, z_dim]
+            x: Input data [batch_size, x_dim]
+            t: Time values [batch_size]
+            
+        Returns:
+            dz/dt prediction [batch_size, z_dim] - same shape as z
+        """
+        # Get the output dimension from the input z shape
+        output_dim = z.shape[-1]
+        
+        # Simple time embedding (just a dense layer)
+        t_embed = nn.Dense(self.hidden_dim)(t[..., None])
+        t_embed = nn.relu(t_embed)
+        
+        # Concatenate z, x, and t_embed
+        combined = jnp.concatenate([z, x, t_embed], axis=-1)
+        
+        # First hidden layer
+        h1 = nn.Dense(self.hidden_dim)(combined)
+        h1 = nn.relu(h1)
+        
+        # Second hidden layer
+        h2 = nn.Dense(self.hidden_dim)(h1)
+        h2 = nn.relu(h2)
+        
+        # Output layer - use the same dimension as input z
+        output = nn.Dense(output_dim)(h2)
+        
+        return output
+
+
 class ResNetBlock(nn.Module):
     """Basic ResNet block."""
     

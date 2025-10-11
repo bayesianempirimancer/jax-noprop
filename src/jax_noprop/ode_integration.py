@@ -188,7 +188,8 @@ def integrate_ode(
     """Integrate an ODE using the specified method.
     
     This function integrates the ODE dz/dt = f(z, x, t) from t_start to t_end
-    using the specified numerical method.
+    using the specified numerical method with scan-based implementation for
+    better JIT compilation.
     
     Args:
         vector_field: Function that computes dz/dt = f(z, x, t)
@@ -202,32 +203,18 @@ def integrate_ode(
     Returns:
         Final state [batch_size, state_dim]
     """
-    t_start, t_end = time_span
-    dt = (t_end - t_start) / num_steps
-    
-    # Initialize
-    z = z0
-    t = jnp.full((z0.shape[0],), t_start)
-    
-    # Choose integration method
+    # Use scan-based JIT-compiled integration functions for better performance
     if method == "euler":
-        step_func = euler_step
+        return _integrate_ode_euler_scan(vector_field, params, z0, x, time_span, num_steps)
     elif method == "heun":
-        step_func = heun_step
+        return _integrate_ode_heun_scan(vector_field, params, z0, x, time_span, num_steps)
     elif method == "rk4":
-        step_func = rk4_step
+        return _integrate_ode_rk4_scan(vector_field, params, z0, x, time_span, num_steps)
     elif method == "adaptive":
         # For adaptive method, we need special handling
         return _integrate_adaptive(vector_field, params, z0, x, time_span, num_steps)
     else:
         raise ValueError(f"Unknown integration method: {method}")
-    
-    # Integrate
-    for i in range(num_steps):
-        z = step_func(vector_field, params, z, x, t, dt)
-        t = t + dt
-    
-    return z
 
 
 def _integrate_adaptive(
@@ -260,33 +247,118 @@ def _integrate_adaptive(
     return z
 
 
-def integrate_flow(
+def _integrate_ode_euler_scan(
     vector_field: Callable,
     params: Dict[str, Any],
     z0: jnp.ndarray,
     x: jnp.ndarray,
     time_span: Tuple[float, float],
-    num_steps: int,
-    method: str = "euler"
+    num_steps: int
 ) -> jnp.ndarray:
-    """Integrate a flow (same as integrate_ode, for compatibility).
+    """JIT-compiled Euler integration using scan."""
+    t_start, t_end = time_span
+    dt = (t_end - t_start) / num_steps
     
-    This is an alias for integrate_ode to maintain compatibility
-    with flow matching terminology.
+    def euler_step_scan(carry, _):
+        z, t = carry
+        dz_dt = vector_field(params, z, x, t)
+        z_new = z + dt * dz_dt
+        t_new = t + dt
+        return (z_new, t_new), z_new
     
-    Args:
-        vector_field: Function that computes dz/dt = f(z, x, t)
-        params: Model parameters
-        z0: Initial state [batch_size, state_dim]
-        x: Input data [batch_size, ...]
-        time_span: Tuple of (start_time, end_time)
-        num_steps: Number of integration steps
-        method: Integration method ("euler", "heun", "rk4", "adaptive")
+    # Initial state
+    t0 = jnp.full((z0.shape[0],), t_start)
+    initial_carry = (z0, t0)
+    
+    # Scan over integration steps
+    (z_final, _), _ = jax.lax.scan(euler_step_scan, initial_carry, None, length=num_steps)
+    
+    return z_final
+
+
+def _integrate_ode_heun_scan(
+    vector_field: Callable,
+    params: Dict[str, Any],
+    z0: jnp.ndarray,
+    x: jnp.ndarray,
+    time_span: Tuple[float, float],
+    num_steps: int
+) -> jnp.ndarray:
+    """JIT-compiled Heun integration using scan."""
+    t_start, t_end = time_span
+    dt = (t_end - t_start) / num_steps
+    
+    def heun_step_scan(carry, _):
+        z, t = carry
+        # First stage
+        k1 = vector_field(params, z, x, t)
         
-    Returns:
-        Final state [batch_size, state_dim]
-    """
-    return integrate_ode(vector_field, params, z0, x, time_span, num_steps, method)
+        # Second stage
+        z_pred = z + dt * k1
+        t_next = t + dt
+        k2 = vector_field(params, z_pred, x, t_next)
+        
+        # Combine stages
+        z_new = z + dt * 0.5 * (k1 + k2)
+        t_new = t + dt
+        
+        return (z_new, t_new), z_new
+    
+    # Initial state
+    t0 = jnp.full((z0.shape[0],), t_start)
+    initial_carry = (z0, t0)
+    
+    # Scan over integration steps
+    (z_final, _), _ = jax.lax.scan(heun_step_scan, initial_carry, None, length=num_steps)
+    
+    return z_final
+
+
+def _integrate_ode_rk4_scan(
+    vector_field: Callable,
+    params: Dict[str, Any],
+    z0: jnp.ndarray,
+    x: jnp.ndarray,
+    time_span: Tuple[float, float],
+    num_steps: int
+) -> jnp.ndarray:
+    """JIT-compiled RK4 integration using scan."""
+    t_start, t_end = time_span
+    dt = (t_end - t_start) / num_steps
+    
+    def rk4_step_scan(carry, _):
+        z, t = carry
+        # Stage 1
+        k1 = vector_field(params, z, x, t)
+        
+        # Stage 2
+        z2 = z + dt * 0.5 * k1
+        t2 = t + dt * 0.5
+        k2 = vector_field(params, z2, x, t2)
+        
+        # Stage 3
+        z3 = z + dt * 0.5 * k2
+        k3 = vector_field(params, z3, x, t2)
+        
+        # Stage 4
+        z4 = z + dt * k3
+        t4 = t + dt
+        k4 = vector_field(params, z4, x, t4)
+        
+        # Combine stages
+        z_new = z + dt * (k1 + 2*k2 + 2*k3 + k4) / 6.0
+        t_new = t + dt
+        
+        return (z_new, t_new), z_new
+    
+    # Initial state
+    t0 = jnp.full((z0.shape[0],), t_start)
+    initial_carry = (z0, t0)
+    
+    # Scan over integration steps
+    (z_final, _), _ = jax.lax.scan(rk4_step_scan, initial_carry, None, length=num_steps)
+    
+    return z_final
 
 
 # Default integration configurations
@@ -301,3 +373,116 @@ DEFAULT_NUM_STEPS = {
     "evaluation": 40,
     "high_precision": 100,
 }
+
+
+def _integrate_ode_euler_scan_trajectory(
+    vector_field: Callable,
+    params: Dict[str, Any],
+    z0: jnp.ndarray,
+    x: jnp.ndarray,
+    time_span: Tuple[float, float],
+    num_steps: int
+) -> jnp.ndarray:
+    """JIT-compiled Euler integration using scan, returning full trajectory."""
+    t_start, t_end = time_span
+    dt = (t_end - t_start) / num_steps
+    
+    def euler_step_scan(carry, _):
+        z, t = carry
+        dz_dt = vector_field(params, z, x, t)
+        z_new = z + dt * dz_dt
+        t_new = t + dt
+        return (z_new, t_new), z_new
+    
+    # Initial state
+    t0 = jnp.full((z0.shape[0],), t_start)
+    initial_carry = (z0, t0)
+    
+    # Scan over integration steps - return full trajectory
+    _, trajectory = jax.lax.scan(euler_step_scan, initial_carry, None, length=num_steps)
+    
+    # Transpose from (num_steps, batch_size, output_dim) to (batch_size, num_steps, output_dim)
+    trajectory = jnp.transpose(trajectory, (1, 0, 2))
+    
+    # Prepend the initial state to get the complete trajectory
+    return jnp.concatenate([z0[:, None, :], trajectory], axis=1)
+
+
+def _integrate_ode_heun_scan_trajectory(
+    vector_field: Callable,
+    params: Dict[str, Any],
+    z0: jnp.ndarray,
+    x: jnp.ndarray,
+    time_span: Tuple[float, float],
+    num_steps: int
+) -> jnp.ndarray:
+    """JIT-compiled Heun integration using scan, returning full trajectory."""
+    t_start, t_end = time_span
+    dt = (t_end - t_start) / num_steps
+    
+    def heun_step_scan(carry, _):
+        z, t = carry
+        # First stage (Euler step)
+        k1 = vector_field(params, z, x, t)
+        z_euler = z + dt * k1
+        t_new = t + dt
+        
+        # Second stage (Heun correction)
+        k2 = vector_field(params, z_euler, x, t_new)
+        z_new = z + dt * (k1 + k2) / 2.0
+        
+        return (z_new, t_new), z_new
+    
+    # Initial state
+    t0 = jnp.full((z0.shape[0],), t_start)
+    initial_carry = (z0, t0)
+    
+    # Scan over integration steps - return full trajectory
+    _, trajectory = jax.lax.scan(heun_step_scan, initial_carry, None, length=num_steps)
+    
+    # Transpose from (num_steps, batch_size, output_dim) to (batch_size, num_steps, output_dim)
+    trajectory = jnp.transpose(trajectory, (1, 0, 2))
+    
+    # Prepend the initial state to get the complete trajectory
+    return jnp.concatenate([z0[:, None, :], trajectory], axis=1)
+
+
+def _integrate_ode_rk4_scan_trajectory(
+    vector_field: Callable,
+    params: Dict[str, Any],
+    z0: jnp.ndarray,
+    x: jnp.ndarray,
+    time_span: Tuple[float, float],
+    num_steps: int
+) -> jnp.ndarray:
+    """JIT-compiled RK4 integration using scan, returning full trajectory."""
+    t_start, t_end = time_span
+    dt = (t_end - t_start) / num_steps
+    
+    def rk4_step_scan(carry, _):
+        z, t = carry
+        
+        # RK4 stages
+        k1 = vector_field(params, z, x, t)
+        k2 = vector_field(params, z + dt * k1 / 2.0, x, t + dt / 2.0)
+        k3 = vector_field(params, z + dt * k2 / 2.0, x, t + dt / 2.0)
+        k4 = vector_field(params, z + dt * k3, x, t + dt)
+        
+        # Combine stages
+        z_new = z + dt * (k1 + 2 * k2 + 2 * k3 + k4) / 6.0
+        t_new = t + dt
+        
+        return (z_new, t_new), z_new
+    
+    # Initial state
+    t0 = jnp.full((z0.shape[0],), t_start)
+    initial_carry = (z0, t0)
+    
+    # Scan over integration steps - return full trajectory
+    _, trajectory = jax.lax.scan(rk4_step_scan, initial_carry, None, length=num_steps)
+    
+    # Transpose from (num_steps, batch_size, output_dim) to (batch_size, num_steps, output_dim)
+    trajectory = jnp.transpose(trajectory, (1, 0, 2))
+    
+    # Prepend the initial state to get the complete trajectory
+    return jnp.concatenate([z0[:, None, :], trajectory], axis=1)
