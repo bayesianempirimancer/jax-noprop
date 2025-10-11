@@ -309,6 +309,7 @@ class LearnableNoiseSchedule(NoiseSchedule):
     
     hidden_dims: Tuple[int, ...] = (64, 64)  # Hidden dimensions for the neural network
     monotonic_network: nn.Module = SimpleMonotonicNetwork
+    gamma_range: Tuple[float, float] = (-3.0, 3.0)
         
     @nn.compact
     def __call__(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -318,8 +319,8 @@ class LearnableNoiseSchedule(NoiseSchedule):
             t: Time values [batch_size]
         """
         scale_logit = self.param('scale_logit', nn.initializers.constant(0.0), ())
-        gamma_min = self.param('gamma_min', nn.initializers.constant(-3.0), ())
-        gamma_max = self.param('gamma_max', nn.initializers.constant(3.0), ())
+        gamma_min = self.param('gamma_min', nn.initializers.constant(self.gamma_range[0]), ())
+        gamma_max = self.param('gamma_max', nn.initializers.constant(self.gamma_range[1]), ())
 
         def gamma_fn(t_input):
             f_t = self.monotonic_network(t_input).squeeze()

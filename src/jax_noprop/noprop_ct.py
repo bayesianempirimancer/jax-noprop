@@ -215,8 +215,7 @@ class NoPropCT(nn.Module):
             "total_loss": total_loss,
             "mse": mse,
             "snr_weighted_loss": snr_weighted_loss,  # Before normalization
-            "snr_prime_mean": jnp.mean(snr_prime),  # SNR derivative
-            "expected_snr_prime": expected_snr_prime,  # Normalization factor
+            "snr_prime_mean": expected_snr_prime,  # SNR derivative
         }
         
         return total_loss, metrics
