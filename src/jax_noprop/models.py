@@ -12,7 +12,27 @@ import jax.numpy as jnp
 import flax.linen as nn
 from flax import struct
 
-from .embeddings import sinusoidal_time_embedding
+from .embeddings import sinusoidal_time_embedding, fourier_time_embedding, linear_time_embedding
+
+
+def swiglu(x: jnp.ndarray) -> jnp.ndarray:
+    """SwiGLU activation function.
+    
+    SwiGLU is a gated activation function that combines Swish and GLU:
+    SwiGLU(x) = Swish(x) * sigmoid(x)
+    where Swish(x) = x * sigmoid(x)
+    
+    This is equivalent to: x * sigmoid(x) * sigmoid(x) = x * sigmoid(x)^2
+    
+    Args:
+        x: Input tensor
+        
+    Returns:
+        SwiGLU activated tensor
+    """
+    # SwiGLU: x * sigmoid(x)^2
+    (x1, x2) = jnp.split(x, 2, axis=-1)
+    return nn.swish(x1) * nn.sigmoid(x2)
 
 
 class SimpleMLP(nn.Module):
@@ -22,7 +42,7 @@ class SimpleMLP(nn.Module):
     and processes them through 4 dense layers.
     """
     hidden_dims: Tuple[int, ...] = (64,)
-    activation: Callable = nn.relu
+    activation: Callable = jax.nn.swish
     
     @nn.compact
     def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:

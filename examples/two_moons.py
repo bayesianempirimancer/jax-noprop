@@ -110,7 +110,7 @@ def train_model(
     key = jr.PRNGKey(random_seed)
     
     # Create model using the new SimpleMLP with multiple hidden layers
-    model = SimpleMLP(hidden_dims=(64, 32))
+    model = SimpleMLP(hidden_dims=(64, 64, 64))
     
     # Create the appropriate NoProp model
     if model_type == "ct":
@@ -219,13 +219,13 @@ def train_model(
         epoch_val_mses = [val_metrics['mse']]
         
         # Compute training accuracy for this epoch
-        z_train_pred = noprop_model.predict(params, x_train, "euler", 2, 10)
+        z_train_pred = noprop_model.predict(params, x_train, 2, 10, "euler")
         train_pred_classes = (z_train_pred[:, 0] > z_train_pred[:, 1]).astype(int)
         train_true_classes = (z_train[:, 0] > z_train[:, 1]).astype(int)
         epoch_train_accuracy = jnp.mean(train_pred_classes == train_true_classes)
         
         # Compute validation accuracy for this epoch
-        z_val_pred = noprop_model.predict(params, x_val, "euler", 2, 10)
+        z_val_pred = noprop_model.predict(params, x_val, 2, 10, "euler")
         val_pred_classes = (z_val_pred[:, 0] > z_val_pred[:, 1]).astype(int)
         val_true_classes = (z_val[:, 0] > z_val[:, 1]).astype(int)
         epoch_val_accuracy = jnp.mean(val_pred_classes == val_true_classes)
@@ -259,7 +259,7 @@ def train_model(
     
     # Measure inference time for training set
     inference_start = time.time()
-    z_train_pred = noprop_model.predict(params, x_train, "euler", 2, 10)
+    z_train_pred = noprop_model.predict(params, x_train, 2, 10, "euler")
     train_inference_time = time.time() - inference_start
     train_pred_classes = (z_train_pred[:, 0] > z_train_pred[:, 1]).astype(int)  # z[0] > z[1]
     train_true_classes = (z_train[:, 0] > z_train[:, 1]).astype(int)  # z[0] > z[1]
@@ -267,7 +267,7 @@ def train_model(
     
     # Measure inference time for validation set
     inference_start = time.time()
-    z_val_pred = noprop_model.predict(params, x_val, "euler", 2, 10)
+    z_val_pred = noprop_model.predict(params, x_val, 2, 10, "euler")
     val_inference_time = time.time() - inference_start
     val_pred_classes = (z_val_pred[:, 0] > z_val_pred[:, 1]).astype(int)  # z[0] > z[1]
     val_true_classes = (z_val[:, 0] > z_val[:, 1]).astype(int)  # z[0] > z[1]
@@ -442,7 +442,7 @@ def plot_results(
     # Get final predictions
     key = jr.PRNGKey(42)
     num_steps = 40  # Number of integration steps for prediction
-    z_pred = noprop_model.predict(params, x_val, "euler", 2, num_steps)
+    z_pred = noprop_model.predict(params, x_val, 2, num_steps, "euler")
     
     # Convert to class predictions using z[0] > z[1]
     pred_classes = (z_pred[:, 0] > z_pred[:, 1]).astype(int)  # z[0] > z[1]

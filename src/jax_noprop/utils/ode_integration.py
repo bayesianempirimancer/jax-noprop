@@ -10,6 +10,88 @@ import jax
 import jax.numpy as jnp
 
 
+# =============================================================================
+# MAIN INTEGRATION FUNCTION AND DEFAULTS
+# =============================================================================
+
+def integrate_ode(
+    vector_field: Callable,
+    params: Dict[str, Any],
+    z0: jnp.ndarray,
+    x: jnp.ndarray,
+    time_span: Tuple[float, float],
+    num_steps: int,
+    method: str = "euler",
+    output_type: str = "end_point"
+) -> jnp.ndarray:
+    """Integrate an ODE using the specified method.
+    
+    This function integrates the ODE dz/dt = f(z, x, t) from t_start to t_end
+    using the specified numerical method with scan-based implementation for
+    better JIT compilation.
+    
+    Args:
+        vector_field: Function that computes dz/dt = f(z, x, t)
+        params: Model parameters
+        z0: Initial state [batch_size, state_dim]
+        x: Input data [batch_size, ...]
+        time_span: Tuple of (start_time, end_time)
+        num_steps: Number of integration steps
+        method: Integration method ("euler", "heun", "rk4", "adaptive")
+        output_type: Type of output ("end_point" or "trajectory")
+        
+    Returns:
+        If output_type="end_point": Final state [batch_size, state_dim]
+        If output_type="trajectory": Full trajectory [num_steps+1, batch_size, state_dim]
+    """
+    # Use scan-based JIT-compiled integration functions for better performance
+    if output_type == "end_point":
+        if method == "euler":
+            return _integrate_ode_euler_scan(vector_field, params, z0, x, time_span, num_steps)
+        elif method == "heun":
+            return _integrate_ode_heun_scan(vector_field, params, z0, x, time_span, num_steps)
+        elif method == "rk4":
+            return _integrate_ode_rk4_scan(vector_field, params, z0, x, time_span, num_steps)
+        elif method == "adaptive":
+            # For adaptive method, we need special handling
+            return _integrate_ode_adaptive_scan(vector_field, params, z0, x, time_span, num_steps)
+        else:
+            raise ValueError(f"Unknown integration method: {method}")
+    
+    elif output_type == "trajectory":
+        if method == "euler":
+            return _integrate_ode_euler_scan_trajectory(vector_field, params, z0, x, time_span, num_steps)
+        elif method == "heun":
+            return _integrate_ode_heun_scan_trajectory(vector_field, params, z0, x, time_span, num_steps)
+        elif method == "rk4":
+            return _integrate_ode_rk4_scan_trajectory(vector_field, params, z0, x, time_span, num_steps)
+        elif method == "adaptive":
+            return _integrate_ode_adaptive_scan_trajectory(vector_field, params, z0, x, time_span, num_steps)
+        else:
+            raise ValueError(f"Unknown integration method: {method}")
+    
+    else:
+        raise ValueError(f"Unknown output_type: {output_type}. Must be 'end_point' or 'trajectory'")
+
+
+# Default integration configurations
+DEFAULT_INTEGRATION_METHODS = {
+    "training": "euler",      # Fast for training
+    "evaluation": "heun",     # More accurate for evaluation
+    "high_precision": "rk4",  # High precision when needed
+}
+
+DEFAULT_NUM_STEPS = {
+    "training": 20,
+    "evaluation": 40,
+    "high_precision": 100,
+}
+
+
+# =============================================================================
+# INDIVIDUAL STEP FUNCTIONS
+# =============================================================================
+
 def euler_step(
     vector_field: Callable,
     params: Dict[str, Any],
@@ -176,76 +258,9 @@ def adaptive_step(
     return z_half2, new_dt
 
 
-def integrate_ode(
-    vector_field: Callable,
-    params: Dict[str, Any],
-    z0: jnp.ndarray,
-    x: jnp.ndarray,
-    time_span: Tuple[float, float],
-    num_steps: int,
-    method: str = "euler"
-) -> jnp.ndarray:
-    """Integrate an ODE using the specified method.
-    
-    This function integrates the ODE dz/dt = f(z, x, t) from t_start to t_end
-    using the specified numerical method with scan-based implementation for
-    better JIT compilation.
-    
-    Args:
-        vector_field: Function that computes dz/dt = f(z, x, t)
-        params: Model parameters
-        z0: Initial state [batch_size, state_dim]
-        x: Input data [batch_size, ...]
-        time_span: Tuple of (start_time, end_time)
-        num_steps: Number of integration steps
-        method: Integration method ("euler", "heun", "rk4", "adaptive")
-        
-    Returns:
-        Final state [batch_size, state_dim]
-    """
-    # Use scan-based JIT-compiled integration functions for better performance
-    if method == "euler":
-        return _integrate_ode_euler_scan(vector_field, params, z0, x, time_span, num_steps)
-    elif method == "heun":
-        return _integrate_ode_heun_scan(vector_field, params, z0, x, time_span, num_steps)
-    elif method == "rk4":
-        return _integrate_ode_rk4_scan(vector_field, params, z0, x, time_span, num_steps)
-    elif method == "adaptive":
-        # For adaptive method, we need special handling
-        return _integrate_adaptive(vector_field, params, z0, x, time_span, num_steps)
-    else:
-        raise ValueError(f"Unknown integration method: {method}")
-
-
-def _integrate_adaptive(
-    vector_field: Callable,
-    params: Dict[str, Any],
-    z0: jnp.ndarray,
-    x: jnp.ndarray,
-    time_span: Tuple[float, float],
-    max_steps: int
-) -> jnp.ndarray:
-    """Internal function for adaptive integration."""
-    t_start, t_end = time_span
-    dt = (t_end - t_start) / max_steps
-    
-    z = z0
-    t = jnp.full((z0.shape[0],), t_start)
-    current_dt = dt
-    
-    for i in range(max_steps):
-        if jnp.all(t >= t_end):
-            break
-            
-        # Ensure we don't overshoot
-        remaining_time = t_end - t
-        step_dt = jnp.minimum(current_dt, remaining_time)
-        
-        z, current_dt = adaptive_step(vector_field, params, z, x, t, step_dt)
-        t = t + step_dt
-    
-    return z
-
+# =============================================================================
+# SCAN-BASED INTEGRATION FUNCTIONS (END-POINT)
+# =============================================================================
 
 def _integrate_ode_euler_scan(
     vector_field: Callable,
@@ -361,19 +376,44 @@ def _integrate_ode_rk4_scan(
     return z_final
 
 
-# Default integration configurations
-DEFAULT_INTEGRATION_METHODS = {
-    "training": "euler",      # Fast for training
-    "evaluation": "heun",     # More accurate for evaluation
-    "high_precision": "rk4",  # High precision when needed
-}
+def _integrate_ode_adaptive_scan(
+    vector_field: Callable,
+    params: Dict[str, Any],
+    z0: jnp.ndarray,
+    x: jnp.ndarray,
+    time_span: Tuple[float, float],
+    max_steps: int
+) -> jnp.ndarray:
+    """JIT-compiled adaptive integration using scan."""
+    t_start, t_end = time_span
+    dt = (t_end - t_start) / max_steps
+    
+    def adaptive_step_scan(carry, _):
+        z, t, current_dt = carry
+        
+        # Check if we've reached the end
+        remaining_time = t_end - t
+        step_dt = jnp.minimum(current_dt, remaining_time)
+        
+        # Use adaptive step
+        z_new, new_dt = adaptive_step(vector_field, params, z, x, t, step_dt)
+        t_new = t + step_dt
+        
+        return (z_new, t_new, new_dt), z_new
+    
+    # Initial state
+    t0 = jnp.full((z0.shape[0],), t_start)
+    initial_carry = (z0, t0, dt)
+    
+    # Scan over integration steps
+    (z_final, _, _), _ = jax.lax.scan(adaptive_step_scan, initial_carry, None, length=max_steps)
+    
+    return z_final
 
-DEFAULT_NUM_STEPS = {
-    "training": 20,
-    "evaluation": 40,
-    "high_precision": 100,
-}
 
+# =============================================================================
+# SCAN-BASED INTEGRATION FUNCTIONS (TRAJECTORY)
+# =============================================================================
 
 def _integrate_ode_euler_scan_trajectory(
     vector_field: Callable,
@@ -482,6 +522,45 @@ def _integrate_ode_rk4_scan_trajectory(
     _, trajectory = jax.lax.scan(rk4_step_scan, initial_carry, None, length=num_steps)
     
     # Transpose from (num_steps, batch_size, output_dim) to (batch_size, num_steps, output_dim)
+    trajectory = jnp.transpose(trajectory, (1, 0, 2))
+    
+    # Prepend the initial state to get the complete trajectory
+    return jnp.concatenate([z0[:, None, :], trajectory], axis=1)
+
+
+def _integrate_ode_adaptive_scan_trajectory(
+    vector_field: Callable,
+    params: Dict[str, Any],
+    z0: jnp.ndarray,
+    x: jnp.ndarray,
+    time_span: Tuple[float, float],
+    max_steps: int
+) -> jnp.ndarray:
+    """JIT-compiled adaptive integration using scan, returning full trajectory."""
+    t_start, t_end = time_span
+    dt = (t_end - t_start) / max_steps
+    
+    def adaptive_step_scan(carry, _):
+        z, t, current_dt = carry
+        
+        # Check if we've reached the end
+        remaining_time = t_end - t
+        step_dt = jnp.minimum(current_dt, remaining_time)
+        
+        # Use adaptive step
+        z_new, new_dt = adaptive_step(vector_field, params, z, x, t, step_dt)
+        t_new = t + step_dt
+        
+        return (z_new, t_new, new_dt), z_new
+    
+    # Initial state
+    t0 = jnp.full((z0.shape[0],), t_start)
+    initial_carry = (z0, t0, dt)
+    
+    # Scan over integration steps - return full trajectory
+    _, trajectory = jax.lax.scan(adaptive_step_scan, initial_carry, None, length=max_steps)
+    
+    # Transpose from (max_steps, batch_size, output_dim) to (batch_size, max_steps, output_dim)
     trajectory = jnp.transpose(trajectory, (1, 0, 2))
     
     # Prepend the initial state to get the complete trajectory

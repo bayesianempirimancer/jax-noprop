@@ -15,7 +15,7 @@ from scipy.integrate import odeint
 import optax
 
 from .noise_schedules import NoiseSchedule, LearnableNoiseSchedule, CosineNoiseSchedule, LinearNoiseSchedule
-from .ode_integration import euler_step, heun_step, integrate_ode, _integrate_ode_euler_scan, _integrate_ode_heun_scan, _integrate_ode_rk4_scan, _integrate_ode_euler_scan_trajectory, _integrate_ode_heun_scan_trajectory, _integrate_ode_rk4_scan_trajectory
+from .utils.ode_integration import integrate_ode
 
 
 class NoPropCT(nn.Module):
@@ -53,8 +53,20 @@ class NoPropCT(nn.Module):
         Returns:
             Model output [batch_size, z_dim]
         """
-        # _get_dz_dt calls both _get_gamma_gamma_prime and _get_model_output and should therefore initialize all paarameters
-        return self._get_dz_dt(z, x, t)
+        # Get model output
+        model_output = self._get_model_output(z, x, t)
+        gamma_t, gamma_prime_t = self._get_gamma_gamma_prime(t)
+        
+        # Compute alpha_t and tau_inverse from gamma values using utility functions
+        alpha_t = self.noise_schedule.get_alpha_from_gamma(gamma_t)
+        tau_inverse = self.noise_schedule.get_tau_inverse_from_gamma(gamma_t, gamma_prime_t)
+        
+        # Reshape for broadcasting: [batch_size] -> [batch_size, 1]
+        alpha_t = alpha_t[..., None]
+        tau_inverse = tau_inverse[..., None]
+        
+        # Compute dz/dt = tau_inverse(t) * (sqrt(alpha(t))*target - (1+alpha(t))/2*z)
+        return tau_inverse * (jnp.sqrt(alpha_t) * model_output - (1 + alpha_t) / 2.0 * z)
     
     @nn.compact
     def _get_model_output(
@@ -70,29 +82,6 @@ class NoPropCT(nn.Module):
     def _get_gamma_gamma_prime(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """Get gamma values - @nn.compact method for parameter initialization."""
         return self.noise_schedule(t)
-    
-    @nn.compact
-    def _get_dz_dt(
-        self,
-        z: jnp.ndarray,
-        x: jnp.ndarray,
-        t: jnp.ndarray
-    ) -> jnp.ndarray:
-        """Get dz/dt - @nn.compact method for parameter initialization and computation."""
-        # Get model output
-        model_output = self._get_model_output(z, x, t)
-        gamma_t, gamma_prime_t = self._get_gamma_gamma_prime(t)
-        
-        # Compute alpha_t and tau_inverse from gamma values using utility functions
-        alpha_t = self.noise_schedule.get_alpha_from_gamma(gamma_t)
-        tau_inverse = self.noise_schedule.get_tau_inverse_from_gamma(gamma_t, gamma_prime_t)
-        
-        # Reshape for broadcasting: [batch_size] -> [batch_size, 1]
-        alpha_t = alpha_t[..., None]
-        tau_inverse = tau_inverse[..., None]
-        
-        # Compute dz/dt = tau_inverse(t) * (sqrt(alpha(t))*target - (1+alpha(t))/2*z)
-        return tau_inverse * (jnp.sqrt(alpha_t) * model_output - (1 + alpha_t) / 2.0 * z)
     
     def dz_dt(
         self,
@@ -112,38 +101,7 @@ class NoPropCT(nn.Module):
         Returns:
             Vector field dz/dt [batch_size, num_classes]
         """
-        return self.apply(params, z, x, t, method=self._get_dz_dt)
-    
-    def integrate_ode(
-        self,
-        params: Dict[str, Any],
-        z0: jnp.ndarray,
-        x: jnp.ndarray,
-        t_span: Tuple[float, float],
-        num_steps: int
-    ) -> jnp.ndarray:
-        """Integrate the neural ODE from t_start to t_end.
-        
-        Args:
-            params: Model parameters
-            z0: Initial state [batch_size, num_classes]
-            x: Input data [batch_size, height, width, channels]
-            t_span: Time span (t_start, t_end)
-            num_steps: Number of integration steps
-            
-        Returns:
-            Final state [batch_size, num_classes]
-        """
-        return integrate_ode(
-            vector_field=self.dz_dt,
-            params=params,
-            z0=z0,
-            x=x,
-            time_span=t_span,
-            num_steps=num_steps,
-            method=self.integration_method
-        )
-    
+        return self.apply(params, z, x, t)
     
     @partial(jax.jit, static_argnums=(0,))  # self is static
     def compute_loss(
@@ -204,6 +162,7 @@ class NoPropCT(nn.Module):
         # Normalize by expected SNR_prime to stabilize learning rate
         expected_snr_prime = jnp.mean(snr_prime)
         ct_loss = snr_weighted_loss / expected_snr_prime
+#        ct_loss = snr_weighted_loss
         
         # total loss
         total_loss = ct_loss + self.reg_weight * reg_loss
@@ -220,6 +179,125 @@ class NoPropCT(nn.Module):
         
         return total_loss, metrics
     
+    def sample_zt(
+        self,
+        key: jax.random.PRNGKey,
+        params: Dict[str, Any],
+        z_target: jnp.ndarray,
+        t: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Sample z_t from the backward process distribution.
+        
+        z_t ~ N(sqrt(ᾱ(t)) * z_target, (1-ᾱ(t)) * I)
+        
+        This is equivalent to:
+        z_t = sqrt(ᾱ(t)) * z_target + sqrt(1-ᾱ(t)) * ε
+        where ε ~ N(0, I)
+        
+        Args:
+            key: Random key
+            z_target: Target/clean data (z_1) [batch_size, ...]
+            t: Time values [batch_size]
+            params: Model parameters
+            
+        Returns:
+            Sampled z_t [batch_size, ...]
+        """
+        # Get gamma_t and compute alpha_t from it
+        gamma_t, _ = self.apply(params, t, method=self._get_gamma_gamma_prime)
+        alpha_t = self.noise_schedule.get_alpha_from_gamma(gamma_t)
+        
+        # Compute z_t = sqrt(ᾱ(t)) * z_target + sqrt(1-ᾱ(t)) * ε
+        alpha_t = alpha_t[..., None]
+        return jnp.sqrt(alpha_t) * z_target + jnp.sqrt(1.0 - alpha_t) * jax.random.normal(key, z_target.shape)
+    
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))  # self, output_dim, num_steps, integration_method, output_type are static arguments    
+    def predict(
+        self,
+        params: Dict[str, Any],
+        x: jnp.ndarray,
+        output_dim: int,
+        num_steps: int,
+        integration_method: str = "euler",
+        output_type: str = "end_point"
+    ) -> jnp.ndarray:
+        """Generate predictions using the trained NoProp-CT neural ODE.
+        
+        This integrates the learned vector field from zeros (t=0)
+        to the final prediction (t=1), following the paper's approach.
+        Uses scan-based integration for better performance.
+        
+        Args:
+            params: Model parameters
+            x: Input data [batch_size, height, width, channels]
+            output_dim: Output dimension
+            num_steps: Number of integration steps
+            integration_method: Integration method to use ("euler", "heun", "rk4", "adaptive")
+            output_type: Type of output ("end_point" or "trajectory")
+            
+        Returns:
+            If output_type="end_point": Final prediction [batch_size, output_dim]
+            If output_type="trajectory": Full trajectory [batch_size, num_steps+1, output_dim]
+        """
+        # Disable gradient tracking through parameters for inference
+        params_no_grad = jax.lax.stop_gradient(params)
+        
+        # Infer batch size from input tensor
+        batch_shape = x.shape[:-1]
+        
+        # Start with zeros at t=0
+        z0 = jnp.zeros(batch_shape + (output_dim,))
+        
+        # Create a static vector field function to avoid recompilation
+        def vector_field(params, z, x, t):
+            return self.dz_dt(params, z, x, t)
+        
+        # Use the main integrate_ode function which handles method dispatch
+        result = integrate_ode(
+            vector_field=vector_field,
+            params=params_no_grad,
+            z0=z0,
+            x=x,
+            time_span=(0.0, 1.0),
+            num_steps=num_steps,
+            method=integration_method,
+            output_type=output_type
+        )
+        
+        return result
+    
+    def predict_trajectory(
+        self,
+        params: Dict[str, Any],
+        x: jnp.ndarray,
+        integration_method: str,
+        output_dim: int,
+        num_steps: int
+    ) -> jnp.ndarray:
+        """Generate prediction trajectories using the trained NoProp-CT neural ODE.
+        
+        This is a wrapper around the predict method with output_type="trajectory".
+        It integrates the learned vector field from zeros (t=0) to the final prediction (t=1),
+        returning the full time course.
+        
+        Args:
+            params: Model parameters
+            x: Input data [batch_size, height, width, channels]
+            integration_method: Integration method to use ("euler", "heun", "rk4", "adaptive")
+            output_dim: Output dimension
+            num_steps: Number of integration steps
+            
+        Returns:
+            Full trajectory [batch_size, num_steps + 1, output_dim] (includes initial state)
+        """
+        return self.predict(
+            params=params,
+            x=x,
+            output_dim=output_dim,
+            num_steps=num_steps,
+            integration_method=integration_method,
+            output_type="trajectory"
+        )
     
     @partial(jax.jit, static_argnums=(0, 6))  # self and optimizer are static arguments
     def train_step(
@@ -255,129 +333,3 @@ class NoPropCT(nn.Module):
         
         return updated_params, updated_opt_state, loss, metrics
     
-    def sample_zt(
-        self,
-        key: jax.random.PRNGKey,
-        params: Dict[str, Any],
-        z_target: jnp.ndarray,
-        t: jnp.ndarray
-    ) -> jnp.ndarray:
-        """Sample z_t from the backward process distribution.
-        
-        z_t ~ N(sqrt(ᾱ(t)) * z_target, (1-ᾱ(t)) * I)
-        
-        This is equivalent to:
-        z_t = sqrt(ᾱ(t)) * z_target + sqrt(1-ᾱ(t)) * ε
-        where ε ~ N(0, I)
-        
-        Args:
-            key: Random key
-            z_target: Target/clean data (z_1) [batch_size, ...]
-            t: Time values [batch_size]
-            params: Model parameters
-            
-        Returns:
-            Sampled z_t [batch_size, ...]
-        """
-        # Get gamma_t and compute alpha_t from it
-        gamma_t, _ = self.apply(params, t, method=self._get_gamma_gamma_prime)
-        alpha_t = self.noise_schedule.get_alpha_from_gamma(gamma_t)
-        
-        # Compute z_t = sqrt(ᾱ(t)) * z_target + sqrt(1-ᾱ(t)) * ε
-        alpha_t = alpha_t[..., None]
-        return jnp.sqrt(alpha_t) * z_target + jnp.sqrt(1.0 - alpha_t) * jax.random.normal(key, z_target.shape)
-    
-    @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, integration_method, output_dim, num_steps are static arguments
-    def predict(
-        self,
-        params: Dict[str, Any],
-        x: jnp.ndarray,
-        integration_method: str,
-        output_dim: int,
-        num_steps: int
-    ) -> jnp.ndarray:
-        """Generate predictions using the trained NoProp-CT neural ODE.
-        
-        This integrates the learned vector field from zeros (t=0)
-        to the final prediction (t=1), following the paper's approach.
-        Uses scan-based integration for better performance.
-        
-        Args:
-            params: Model parameters
-            x: Input data [batch_size, height, width, channels]
-            integration_method: Integration method to use ("euler", "heun", "rk4")
-            output_dim: Output dimension
-            num_steps: Number of integration steps
-            
-        Returns:
-            Final prediction [batch_size, output_dim]
-        """
-        # Infer batch size from input tensor
-        batch_shape = x.shape[:-1]
-        
-        # Start with zeros at t=0
-        z0 = jnp.zeros(batch_shape + (output_dim,))
-        
-        # Create a static vector field function to avoid recompilation
-        def vector_field(p, z, x, t):
-            return self.dz_dt(p, z, x, t)
-        
-        # Use scan-based integration implementation with static dispatch
-        if integration_method == "euler":
-            z_final = _integrate_ode_euler_scan(vector_field, params, z0, x, (0.0, 1.0), num_steps)
-        elif integration_method == "heun":
-            z_final = _integrate_ode_heun_scan(vector_field, params, z0, x, (0.0, 1.0), num_steps)
-        elif integration_method == "rk4":
-            z_final = _integrate_ode_rk4_scan(vector_field, params, z0, x, (0.0, 1.0), num_steps)
-        else:
-            raise ValueError(f"Unknown integration method: {integration_method}")
-        
-        return z_final
-    
-    @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, integration_method, output_dim, num_steps are static arguments
-    def predict_trajectory(
-        self,
-        params: Dict[str, Any],
-        x: jnp.ndarray,
-        integration_method: str,
-        output_dim: int,
-        num_steps: int
-    ) -> jnp.ndarray:
-        """Generate prediction trajectories using the trained NoProp-CT neural ODE.
-        
-        This integrates the learned vector field from zeros (t=0)
-        to the final prediction (t=1), returning the full time course.
-        Uses scan-based integration for better performance.
-        
-        Args:
-            params: Model parameters
-            x: Input data [batch_size, height, width, channels]
-            integration_method: Integration method to use ("euler", "heun", "rk4")
-            output_dim: Output dimension
-            num_steps: Number of integration steps
-            
-        Returns:
-            Full trajectory [batch_size, num_steps + 1, output_dim] (includes initial state)
-        """
-        # Infer batch size from input tensor
-        batch_shape = x.shape[:-1]
-        
-        # Start with zeros at t=0
-        z0 = jnp.zeros(batch_shape + (output_dim,))
-        
-        # Create a static vector field function to avoid recompilation
-        def vector_field(p, z, x, t):
-            return self.dz_dt(p, z, x, t)
-        
-        # Use scan-based integration implementation with static dispatch
-        if integration_method == "euler":
-            trajectory = _integrate_ode_euler_scan_trajectory(vector_field, params, z0, x, (0.0, 1.0), num_steps)
-        elif integration_method == "heun":
-            trajectory = _integrate_ode_heun_scan_trajectory(vector_field, params, z0, x, (0.0, 1.0), num_steps)
-        elif integration_method == "rk4":
-            trajectory = _integrate_ode_rk4_scan_trajectory(vector_field, params, z0, x, (0.0, 1.0), num_steps)
-        else:
-            raise ValueError(f"Unknown integration method: {integration_method}")
-        
-        return trajectory
-

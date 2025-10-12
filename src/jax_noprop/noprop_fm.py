@@ -12,11 +12,11 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from scipy.integrate import odeint
 import optax
 
 # NoProp-FM doesn't use noise schedules
-from .ode_integration import euler_step, heun_step, integrate_ode, _integrate_ode_euler_scan, _integrate_ode_heun_scan, _integrate_ode_rk4_scan, _integrate_ode_euler_scan_trajectory, _integrate_ode_heun_scan_trajectory, _integrate_ode_rk4_scan_trajectory
+from .utils.ode_integration import integrate_ode
+from .utils.jacobian_utils import trace_jacobian
 
 
 class NoPropFM(nn.Module):
@@ -82,37 +82,6 @@ class NoPropFM(nn.Module):
         # For flow matching, dz/dt is just the model output
         return self.apply(params, z, x, t)
     
-    def integrate_ode(
-        self,
-        params: Dict[str, Any],
-        z0: jnp.ndarray,
-        x: jnp.ndarray,
-        t_span: Tuple[float, float],
-        num_steps: int
-    ) -> jnp.ndarray:
-        """Integrate the neural ODE from t_start to t_end.
-        
-        Args:
-            params: Model parameters
-            z0: Initial state [batch_size, num_classes]
-            x: Input data [batch_size, height, width, channels]
-            t_span: Time span (t_start, t_end)
-            num_steps: Number of integration steps
-            
-        Returns:
-            Final state [batch_size, num_classes]
-        """
-        return integrate_ode(
-            vector_field=self.dz_dt,
-            params=params,
-            z0=z0,
-            x=x,
-            time_span=t_span,
-            num_steps=num_steps,
-            method=self.integration_method
-        )
-    
-    
     @partial(jax.jit, static_argnums=(0,))  # self is static
     def compute_loss(
         self,
@@ -175,6 +144,117 @@ class NoPropFM(nn.Module):
         
         return total_loss, metrics
     
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))  # self, integration_method, output_dim, num_steps, output_type are static arguments    
+    def predict(
+        self,
+        params: Dict[str, Any],
+        x: jnp.ndarray,
+        output_dim: int,
+        num_steps: int,
+        integration_method: str = "euler",
+        output_type: str = "end_point"
+    ) -> jnp.ndarray:
+        """
+        Generate predictions using the trained NoProp-FM neural ODE.
+        
+        This integrates the learned vector field from zeros (t=0)
+        to the final prediction (t=1), following the paper's approach.
+        Uses scan-based integration for better performance.
+        
+        Args:
+            params: Model parameters
+            x: Input data [batch_size, height, width, channels]
+            integration_method: Integration method to use ("euler", "heun", "rk4")
+            output_dim: Output dimension
+            num_steps: Number of integration steps
+            
+        Returns:
+            Final prediction [batch_size, output_dim]
+        """
+        # Disable gradient tracking through parameters for inference
+        params_no_grad = jax.lax.stop_gradient(params)
+        
+        # Infer batch size from input tensor
+        batch_shape = x.shape[:-1]
+        
+        # Start with zeros at t=0
+        z0 = jnp.zeros(batch_shape + (output_dim,))
+        
+        # Create a static vector field function to avoid recompilation
+        def vector_field(params, z, x, t):
+            return self.dz_dt(params, z, x, t)
+        
+        # Use the main integrate_ode function which handles method dispatch
+        z_final = integrate_ode(
+            vector_field=vector_field,
+            params=params_no_grad,
+            z0=z0,
+            x=x,
+            time_span=(0.0, 1.0),
+            num_steps=num_steps,
+            method=integration_method,
+            output_type=output_type
+        )
+        
+        return z_final
+
+    
+    def predict_trajectory(
+        self,
+        params: Dict[str, Any],
+        x: jnp.ndarray,
+        integration_method: str,
+        output_dim: int,
+        num_steps: int
+    ) -> jnp.ndarray:
+        """Generate prediction trajectories using the trained NoProp-FM neural ODE.
+        
+        This is a wrapper around the predict method with output_type="trajectory".
+        It integrates the learned vector field from zeros (t=0) to the final prediction (t=1),
+        returning the full time course.
+        
+        Args:
+            params: Model parameters
+            x: Input data [batch_size, height, width, channels]
+            integration_method: Integration method to use ("euler", "heun", "rk4")
+            output_dim: Output dimension
+            num_steps: Number of integration steps
+            
+        Returns:
+            Full trajectory [batch_size, num_steps + 1, output_dim] (includes initial state)
+        """
+        return self.predict(
+            params=params,
+            x=x,
+            output_dim=output_dim,
+            num_steps=num_steps,
+            integration_method=integration_method,
+            output_type="trajectory"
+        )
+    
+    def trace_jacobian(
+        self,
+        params: Dict[str, Any],
+        z: jnp.ndarray,
+        x: jnp.ndarray,
+        t: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Compute the trace of the Jacobian of dz/dt with respect to z.
+        
+        This computes tr(∂f/∂z) where f(z,x,t) = dz/dt.
+        This is useful for computing the divergence of the vector field,
+        which is important for normalizing flows and log-determinant computations.
+        
+        Args:
+            params: Model parameters
+            z: Current state [batch_size, target_dim]
+            x: Input data [batch_size, x_dim]
+            t: Current time [batch_size]
+            
+        Returns:
+            Trace of Jacobian [batch_size]
+        """
+        return trace_jacobian(self.dz_dt, params, z, x, t)
     
     @partial(jax.jit, static_argnums=(0, 6))  # self and optimizer are static arguments
     def train_step(
@@ -209,98 +289,3 @@ class NoPropFM(nn.Module):
         updated_params = optax.apply_updates(params, updates)
         
         return updated_params, updated_opt_state, loss, metrics
-    
-    
-    @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, integration_method, output_dim, num_steps are static arguments
-    def predict(
-        self,
-        params: Dict[str, Any],
-        x: jnp.ndarray,
-        integration_method: str,
-        output_dim: int,
-        num_steps: int
-    ) -> jnp.ndarray:
-        """Generate predictions using the trained NoProp-FM neural ODE.
-        
-        This integrates the learned vector field from zeros (t=0)
-        to the final prediction (t=1), following the paper's approach.
-        Uses scan-based integration for better performance.
-        
-        Args:
-            params: Model parameters
-            x: Input data [batch_size, height, width, channels]
-            integration_method: Integration method to use ("euler", "heun", "rk4")
-            output_dim: Output dimension
-            num_steps: Number of integration steps
-            
-        Returns:
-            Final prediction [batch_size, output_dim]
-        """
-        # Infer batch size from input tensor
-        batch_shape = x.shape[:-1]
-        
-        # Start with zeros at t=0
-        z0 = jnp.zeros(batch_shape + (output_dim,))
-        
-        # Create a static vector field function to avoid recompilation
-        def vector_field(params, z, x, t):
-            return self.dz_dt(params, z, x, t)
-        
-        # Use scan-based integration implementation with static dispatch
-        if integration_method == "euler":
-            z_final = _integrate_ode_euler_scan(vector_field, params, z0, x, (0.0, 1.0), num_steps)
-        elif integration_method == "heun":
-            z_final = _integrate_ode_heun_scan(vector_field, params, z0, x, (0.0, 1.0), num_steps)
-        elif integration_method == "rk4":
-            z_final = _integrate_ode_rk4_scan(vector_field, params, z0, x, (0.0, 1.0), num_steps)
-        else:
-            raise ValueError(f"Unknown integration method: {integration_method}")
-        
-        return z_final
-    
-    @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, integration_method, output_dim, num_steps are static arguments
-    def predict_trajectory(
-        self,
-        params: Dict[str, Any],
-        x: jnp.ndarray,
-        integration_method: str,
-        output_dim: int,
-        num_steps: int
-    ) -> jnp.ndarray:
-        """Generate prediction trajectories using the trained NoProp-FM neural ODE.
-        
-        This integrates the learned vector field from zeros (t=0)
-        to the final prediction (t=1), returning the full time course.
-        Uses scan-based integration for better performance.
-        
-        Args:
-            params: Model parameters
-            x: Input data [batch_size, height, width, channels]
-            integration_method: Integration method to use ("euler", "heun", "rk4")
-            output_dim: Output dimension
-            num_steps: Number of integration steps
-            
-        Returns:
-            Full trajectory [batch_size, num_steps + 1, output_dim] (includes initial state)
-        """
-        # Infer batch size from input tensor
-        batch_shape = x.shape[:-1]
-        
-        # Start with zeros at t=0
-        z0 = jnp.zeros(batch_shape + (output_dim,))
-        
-        # Create a static vector field function to avoid recompilation
-        def vector_field(params, z, x, t):
-            return self.dz_dt(params, z, x, t)
-        
-        # Use scan-based integration implementation with static dispatch
-        if integration_method == "euler":
-            trajectory = _integrate_ode_euler_scan_trajectory(vector_field, params, z0, x, (0.0, 1.0), num_steps)
-        elif integration_method == "heun":
-            trajectory = _integrate_ode_heun_scan_trajectory(vector_field, params, z0, x, (0.0, 1.0), num_steps)
-        elif integration_method == "rk4":
-            trajectory = _integrate_ode_rk4_scan_trajectory(vector_field, params, z0, x, (0.0, 1.0), num_steps)
-        else:
-            raise ValueError(f"Unknown integration method: {integration_method}")
-        
-        return trajectory

@@ -68,29 +68,37 @@ def train_step(
 - `loss`: Training loss
 - `metrics`: Training metrics
 
-#### `predict(params, x, integration_method, output_dim, num_steps)`
+#### `predict(params, x, output_dim, num_steps, integration_method, output_type)`
 Generate predictions by integrating the learned vector field.
 
 ```python
-@partial(jax.jit, static_argnums=(0, 3, 4, 5))
+@partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))
 def predict(
     self,
     params: Dict[str, Any],
     x: jnp.ndarray,
-    integration_method: str,
     output_dim: int,
-    num_steps: int
+    num_steps: int,
+    integration_method: str = "euler",
+    output_type: str = "end_point"
 ) -> jnp.ndarray
 ```
 
+**Parameters:**
+- `params`: Model parameters
+- `x`: Input data `[batch_size, ...]`
+- `output_dim`: Output dimension
+- `num_steps`: Number of integration steps
+- `integration_method`: Integration method ("euler", "heun", "rk4", "adaptive")
+- `output_type`: Output type ("end_point" or "trajectory")
+
 **Returns:**
-- `predictions`: Final predictions `[batch_size, output_dim]`
+- `predictions`: Final predictions `[batch_size, output_dim]` or trajectory `[batch_size, num_steps+1, output_dim]`
 
 #### `predict_trajectory(params, x, integration_method, output_dim, num_steps)`
 Generate full trajectory by integrating the learned vector field.
 
 ```python
-@partial(jax.jit, static_argnums=(0, 3, 4, 5))
 def predict_trajectory(
     self,
     params: Dict[str, Any],
@@ -100,6 +108,8 @@ def predict_trajectory(
     num_steps: int
 ) -> jnp.ndarray
 ```
+
+**Note:** This is a wrapper around the `predict` method with `output_type="trajectory"`.
 
 **Returns:**
 - `trajectory`: Full trajectory `[batch_size, num_steps + 1, output_dim]`
@@ -226,29 +236,37 @@ def train_step(
 - `loss`: Training loss
 - `metrics`: Training metrics
 
-#### `predict(params, x, integration_method, output_dim, num_steps)`
+#### `predict(params, x, output_dim, num_steps, integration_method, output_type)`
 Generate predictions by integrating the learned flow field.
 
 ```python
-@partial(jax.jit, static_argnums=(0, 3, 4, 5))
+@partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))
 def predict(
     self,
     params: Dict[str, Any],
     x: jnp.ndarray,
-    integration_method: str,
     output_dim: int,
-    num_steps: int
+    num_steps: int,
+    integration_method: str = "euler",
+    output_type: str = "end_point"
 ) -> jnp.ndarray
 ```
 
+**Parameters:**
+- `params`: Model parameters
+- `x`: Input data `[batch_size, ...]`
+- `output_dim`: Output dimension
+- `num_steps`: Number of integration steps
+- `integration_method`: Integration method ("euler", "heun", "rk4", "adaptive")
+- `output_type`: Output type ("end_point" or "trajectory")
+
 **Returns:**
-- `predictions`: Final predictions `[batch_size, output_dim]`
+- `predictions`: Final predictions `[batch_size, output_dim]` or trajectory `[batch_size, num_steps+1, output_dim]`
 
 #### `predict_trajectory(params, x, integration_method, output_dim, num_steps)`
 Generate full trajectory by integrating the learned flow field.
 
 ```python
-@partial(jax.jit, static_argnums=(0, 3, 4, 5))
 def predict_trajectory(
     self,
     params: Dict[str, Any],
@@ -258,6 +276,8 @@ def predict_trajectory(
     num_steps: int
 ) -> jnp.ndarray
 ```
+
+**Note:** This is a wrapper around the `predict` method with `output_type="trajectory"`.
 
 **Returns:**
 - `trajectory`: Full trajectory `[batch_size, num_steps + 1, output_dim]`
@@ -390,9 +410,40 @@ class LearnableNoiseSchedule(nn.Module):
 
 ## ODE Integration
 
+### Unified Integration Function
+
+The implementation provides a unified `integrate_ode` function that handles all integration methods and output types:
+
+```python
+def integrate_ode(
+    vector_field: Callable,
+    params: Dict[str, Any],
+    z0: jnp.ndarray,
+    x: jnp.ndarray,
+    time_span: Tuple[float, float],
+    num_steps: int,
+    method: str = "euler",
+    output_type: str = "end_point"
+) -> jnp.ndarray
+```
+
+**Parameters:**
+- `vector_field`: Function that computes dz/dt = f(z, x, t)
+- `params`: Model parameters
+- `z0`: Initial state `[batch_size, state_dim]`
+- `x`: Input data `[batch_size, ...]`
+- `time_span`: Tuple of (start_time, end_time)
+- `num_steps`: Number of integration steps
+- `method`: Integration method ("euler", "heun", "rk4", "adaptive")
+- `output_type`: Output type ("end_point" or "trajectory")
+
+**Returns:**
+- If `output_type="end_point"`: Final state `[batch_size, state_dim]`
+- If `output_type="trajectory"`: Full trajectory `[batch_size, num_steps+1, state_dim]`
+
 ### Integration Methods
 
-The implementation provides three integration methods:
+The implementation provides four integration methods:
 
 #### Euler Method
 ```python
@@ -409,6 +460,11 @@ _integrate_ode_heun_scan(vector_field, params, z0, x, time_span, num_steps)
 _integrate_ode_rk4_scan(vector_field, params, z0, x, time_span, num_steps)
 ```
 
+#### Adaptive Method
+```python
+_integrate_ode_adaptive_scan(vector_field, params, z0, x, time_span, max_steps)
+```
+
 ### Trajectory Integration
 
 For full trajectory visualization:
@@ -417,10 +473,98 @@ For full trajectory visualization:
 _integrate_ode_euler_scan_trajectory(vector_field, params, z0, x, time_span, num_steps)
 _integrate_ode_heun_scan_trajectory(vector_field, params, z0, x, time_span, num_steps)
 _integrate_ode_rk4_scan_trajectory(vector_field, params, z0, x, time_span, num_steps)
+_integrate_ode_adaptive_scan_trajectory(vector_field, params, z0, x, time_span, max_steps)
 ```
 
 **Returns:**
 - `trajectory`: Full trajectory `[batch_size, num_steps + 1, output_dim]`
+
+### Utility Functions
+
+#### Individual Step Functions
+```python
+euler_step(vector_field, params, z, x, t, dt)
+heun_step(vector_field, params, z, x, t, dt)
+rk4_step(vector_field, params, z, x, t, dt)
+adaptive_step(vector_field, params, z, x, t, dt)
+```
+
+**Note:** All ODE integration utilities are located in `src/jax_noprop/utils/ode_integration.py` for better code organization.
+
+## Jacobian Utilities
+
+### Optimized Jacobian Computation
+
+The implementation provides optimized Jacobian computation utilities in `src/jax_noprop/utils/jacobian_utils.py`:
+
+#### `trace_jacobian(apply_fn, params, z, x, t)`
+Compute the trace of the Jacobian matrix efficiently using forward-mode automatic differentiation.
+
+```python
+@partial(jax.jit, static_argnums=(0,))
+def trace_jacobian(
+    apply_fn: Callable,
+    params: Dict[str, Any],
+    z: jnp.ndarray,
+    x: jnp.ndarray,
+    t: jnp.ndarray
+) -> jnp.ndarray
+```
+
+**Parameters:**
+- `apply_fn`: Function that computes the vector field
+- `params`: Model parameters
+- `z`: State tensor `[batch_size, z_dim]`
+- `x`: Input data `[batch_size, ...]`
+- `t`: Time tensor `[batch_size]`
+
+**Returns:**
+- `trace`: Jacobian trace `[batch_size]`
+
+**Key Features:**
+- Uses `jax.vmap` to process batch elements individually
+- Uses `jax.jacfwd` for forward-mode automatic differentiation
+- Avoids computing the full Jacobian matrix for memory efficiency
+- Returns `batch_shape + (target_dim,)` instead of `batch_shape + (target_dim,) + batch_shape + (target_dim,)`
+
+#### `compute_divergence(apply_fn, params, z, x, t)`
+Compute the divergence of the vector field (alias for `trace_jacobian`).
+
+```python
+def compute_divergence(
+    apply_fn: Callable,
+    params: Dict[str, Any],
+    z: jnp.ndarray,
+    x: jnp.ndarray,
+    t: jnp.ndarray
+) -> jnp.ndarray
+```
+
+#### `compute_jacobian_diagonal(apply_fn, params, z, x, t)`
+Compute the diagonal elements of the Jacobian matrix.
+
+```python
+def compute_jacobian_diagonal(
+    apply_fn: Callable,
+    params: Dict[str, Any],
+    z: jnp.ndarray,
+    x: jnp.ndarray,
+    t: jnp.ndarray
+) -> jnp.ndarray
+```
+
+#### `compute_log_det_jacobian(apply_fn, params, z, x, t)`
+Compute the log determinant of the Jacobian matrix.
+
+```python
+def compute_log_det_jacobian(
+    apply_fn: Callable,
+    params: Dict[str, Any],
+    z: jnp.ndarray,
+    x: jnp.ndarray,
+    t: jnp.ndarray
+) -> jnp.ndarray
+```
 
 ## Performance Optimizations
 
@@ -481,7 +625,7 @@ y = jax.nn.one_hot(jax.random.randint(key, (32,), 0, 2), 2)
 params, loss, metrics = noprop_ct.train_step(params, x, y, key)
 
 # Generate predictions
-predictions = noprop_ct.predict(params, x, "euler", 2, 20)
+predictions = noprop_ct.predict(params, x, 2, 20, "euler")
 ```
 
 ### Custom Noise Schedule
@@ -542,7 +686,7 @@ y = jax.nn.one_hot(jax.random.randint(key, (32,), 0, 2), 2)
 params, opt_state, loss, metrics = noprop_fm.train_step(params, opt_state, x, y, key, optimizer)
 
 # Generate predictions
-predictions = noprop_fm.predict(params, x, "euler", 2, 20)
+predictions = noprop_fm.predict(params, x, 2, 20, "euler")
 ```
 
 ### Trajectory Visualization
@@ -564,7 +708,7 @@ plt.show()
 
 ```python
 # Generate predictions
-predictions = noprop_ct.predict(params, x, "euler", 2, 20)
+predictions = noprop_ct.predict(params, x, 2, 20, "euler")
 
 # Compute accuracy
 accuracy = jnp.mean(jnp.argmax(predictions, axis=-1) == jnp.argmax(y, axis=-1))

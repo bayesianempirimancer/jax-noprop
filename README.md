@@ -23,7 +23,7 @@ NoProp is a novel approach for training neural networks without relying on stand
 - **Advanced Noise Scheduling**: Multiple noise schedule types including learnable neural network-based schedules
 - **Efficient Gamma Parameterization**: Uses `γ(t)` parameterization for numerical stability with `α(t) = sigmoid(γ(t))`
 - **JAX/Flax**: High-performance implementation with automatic differentiation
-- **Neural ODE Integration**: Built-in ODE solvers with scan-based optimization
+- **Neural ODE Integration**: Built-in ODE solvers with scan-based optimization (Euler, Heun, RK4, Adaptive)
 - **Comprehensive Examples**: Two moons dataset example with full visualization
 
 ## Installation
@@ -135,8 +135,10 @@ Each NoProp variant implements a different training strategy:
 
 - **Efficient computation**: Single `get_gamma_gamma_prime_t()` method computes both `γ(t)` and `γ'(t)` to avoid redundant calculations
 - **Learnable schedules**: Neural network with positive weights and ReLU activations and a terminal rescaling ensures bounded monotonic `γ(t)`
-- **ODE integration**: Built-in Euler, Heun, and Runge-Kutta 4th order methods with scan-based optimization
+- **ODE integration**: Built-in Euler, Heun, Runge-Kutta 4th order, and Adaptive methods with scan-based optimization
+- **Unified integration interface**: Single `integrate_ode` function with `output_type` parameter for end-point or trajectory outputs
 - **JIT optimization**: All critical methods are JIT-compiled for maximum performance
+- **Modular utilities**: ODE integration and Jacobian utilities are organized in `src/jax_noprop/utils/` for better code organization
 
 ## Performance Optimizations
 
@@ -151,8 +153,9 @@ The implementation includes several key optimizations:
 ### Scan-based Integration
 - All ODE integration uses `jax.lax.scan` 
 - Enables efficient JIT compilation and vectorization
-- Supports Euler, Heun, and RK4 integration methods
+- Supports Euler, Heun, RK4, and Adaptive integration methods
 - Provides trajectory visualization capabilities
+- Unified `integrate_ode` function with `output_type` parameter for end-point or trajectory outputs
 
 ### Memory Efficiency
 - Batch size inference from input tensors
@@ -176,6 +179,13 @@ noprop_ct = NoPropCT(
     reg_weight=0.0
 )
 ```
+
+**Key Methods:**
+- `predict(params, x, output_dim, num_steps, integration_method="euler", output_type="end_point")`: Generate predictions
+- `predict_trajectory(params, x, integration_method, output_dim, num_steps)`: Generate full trajectories (wrapper around `predict`)
+- `compute_loss(params, x, target, key)`: Compute SNR-weighted loss
+- `train_step(params, opt_state, x, target, key, optimizer)`: Single training step
+- `sample_zt(key, params, z_target, t)`: Sample noisy targets from backward process
 
 #### `NoPropDT`
 Discrete-time NoProp implementation.
@@ -203,6 +213,13 @@ noprop_fm = NoPropFM(
     sigma_t=0.05
 )
 ```
+
+**Key Methods:**
+- `predict(params, x, output_dim, num_steps, integration_method="euler", output_type="end_point")`: Generate predictions
+- `predict_trajectory(params, x, integration_method, output_dim, num_steps)`: Generate full trajectories (wrapper around `predict`)
+- `compute_loss(params, x, target, key)`: Compute flow matching loss
+- `train_step(params, opt_state, x, target, key, optimizer)`: Single training step
+- `trace_jacobian(params, z, x, t)`: Compute Jacobian trace for divergence
 
 ### Model Architectures
 
@@ -405,7 +422,7 @@ The implementation achieves excellent performance with the optimizations:
 - **Two Moons Dataset**: 95%+ training accuracy, 100% validation accuracy
 - **JIT Compilation**: 1000x+ speedups on critical methods
 - **Memory Efficiency**: Batch size inference and static argument optimization
-- **ODE Integration**: Scan-based integration with multiple methods (Euler, Heun, RK4)
+- **ODE Integration**: Scan-based integration with multiple methods (Euler, Heun, RK4, Adaptive)
 - **Runtime Comparison**: NoProp-CT is 1.5x faster for training, NoProp-FM is 2.8x faster for inference
 
 ## Examples

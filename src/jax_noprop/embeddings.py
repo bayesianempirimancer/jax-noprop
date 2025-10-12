@@ -9,6 +9,7 @@ from typing import Optional
 
 import jax
 import jax.numpy as jnp
+import flax.linen as nn
 
 
 def sinusoidal_time_embedding(t: jnp.ndarray, dim: int) -> jnp.ndarray:
@@ -32,7 +33,9 @@ def sinusoidal_time_embedding(t: jnp.ndarray, dim: int) -> jnp.ndarray:
         >>> print(emb.shape)  # (3, 64)
     """
     # Ensure t is 2D
-    if t.ndim == 1:
+    if t.ndim == 0:
+        t = jnp.array([t])[:, None] # has shape [1, 1]
+    elif t.ndim == 1:
         t = t[:, None]
     
     # Create frequency bands with logarithmic spacing
@@ -56,95 +59,52 @@ def sinusoidal_time_embedding(t: jnp.ndarray, dim: int) -> jnp.ndarray:
     
     return time_emb
 
-
-def fourier_features(x: jnp.ndarray, num_features: int, scale: float = 1.0) -> jnp.ndarray:
-    """Create Fourier features for input x.
+def linear_time_embedding(t: jnp.ndarray, dim: int) -> jnp.ndarray:
+    """Create linear time embeddings.
     
-    This is an alternative embedding approach that can be used for
-    encoding continuous variables. It projects the input to a higher
-    dimensional space using random Fourier features.
-    
-    Args:
-        x: Input values [batch_size, input_dim]
-        num_features: Number of Fourier features to generate
-        scale: Scaling factor for the random frequencies
-        
-    Returns:
-        Fourier features [batch_size, num_features]
-    """
-    # Generate random frequencies
-    key = jax.random.PRNGKey(42)  # Fixed key for reproducibility
-    freqs = jax.random.normal(key, (x.shape[-1], num_features // 2)) * scale
-    
-    # Apply frequencies
-    x_proj = 2 * jnp.pi * x @ freqs
-    
-    # Create sin and cos features
-    sin_features = jnp.sin(x_proj)
-    cos_features = jnp.cos(x_proj)
-    
-    # Concatenate and return
-    return jnp.concatenate([sin_features, cos_features], axis=-1)
-
-
-def positional_encoding(seq_len: int, dim: int) -> jnp.ndarray:
-    """Create positional encoding for sequences.
-    
-    This implements the standard transformer positional encoding
-    that can be used for sequence-based inputs in NoProp variants.
-    
-    Args:
-        seq_len: Length of the sequence
-        dim: Embedding dimension
-        
-    Returns:
-        Positional encoding [seq_len, dim]
-    """
-    pos = jnp.arange(seq_len)[:, None]
-    dim_indices = jnp.arange(dim)[None, :]
-    
-    # Create frequency bands
-    div_term = jnp.exp(dim_indices // 2 * -jnp.log(10000.0) / dim)
-    
-    # Apply frequencies
-    pe = pos * div_term
-    
-    # Create sin and cos encodings
-    pe = pe.at[:, 0::2].set(jnp.sin(pe[:, 0::2]))
-    pe = pe.at[:, 1::2].set(jnp.cos(pe[:, 1::2]))
-    
-    return pe
-
-
-def learnable_time_embedding(t: jnp.ndarray, dim: int, max_timesteps: int = 1000) -> jnp.ndarray:
-    """Create learnable time embeddings.
-    
-    This is an alternative to sinusoidal embeddings that uses
-    learnable parameters. It can be useful when the time dynamics
-    are complex and need to be learned rather than fixed.
+    This is a simple linear embedding that scales time values to fill
+    the embedding dimension. It's the most basic form of time embedding.
     
     Args:
         t: Time values [batch_size]
         dim: Embedding dimension
-        max_timesteps: Maximum number of timesteps for the lookup table
         
     Returns:
         Time embeddings [batch_size, dim]
-        
-    Note:
-        This function requires a learnable embedding table to be
-        defined in the model. It's provided here as an alternative
-        approach but requires model modifications to use.
     """
-    # This would require a learnable embedding table in the model
-    # For now, we'll use a simple linear projection as a placeholder
-    t_norm = t / max_timesteps
-    t_expanded = jnp.tile(t_norm[:, None], (1, dim))
+    # Ensure t is 2D
+    if t.ndim == 0:
+        t = jnp.array([t])[:, None] # has shape [1, 1]
+    elif t.ndim == 1:
+        t = t[:, None]
     
-    # Apply learnable transformation (this would be a model parameter)
-    # For demonstration, we use a simple scaling
-    return t_expanded * jnp.linspace(0, 1, dim)[None, :]
+    # Create linear scaling across the embedding dimension
+    # Scale time from [0, 1] to [0, dim-1] and create a linear ramp
+    
+    # Create linear embeddings by repeating the scaled time
+    # and adding a linear ramp across the dimension
+    
+    # Add a linear ramp across the embedding dimension
+    ramp = jnp.linspace(0, 1, dim)[None, :]
+    time_emb = nn.relu(t - ramp)
+    
+    return time_emb
 
+def fourier_time_embedding(t: jnp.ndarray, dim: int) -> jnp.ndarray:
+    """Create Fourier time embeddings.
+    
+    This is a Fourier embedding that projects time values to a higher
+    dimensional space using random frequencies.
+    """
+    if t.ndim == 0:
+        t = t[:, None]
+    elif t.ndim == 1:
+        t = t[:, None]
+        
+    freqs = jnp.linspace(0, dim//2, dim)
+    sin_embed = jnp.sin(jnp.pi*t * freqs)
+    cos_embed = jnp.cos(jnp.pi*t * freqs)
+    return jnp.concatenate([sin_embed, cos_embed], axis=-1)
 
 def get_time_embedding(t: jnp.ndarray, dim: int, method: str = "sinusoidal") -> jnp.ndarray:
     """Get time embedding using the specified method.
@@ -155,7 +115,7 @@ def get_time_embedding(t: jnp.ndarray, dim: int, method: str = "sinusoidal") -> 
     Args:
         t: Time values [batch_size]
         dim: Embedding dimension
-        method: Embedding method ("sinusoidal", "fourier", "learnable")
+        method: Embedding method ("sinusoidal", "fourier", "linear", "learnable")
         
     Returns:
         Time embeddings [batch_size, dim]
@@ -166,9 +126,9 @@ def get_time_embedding(t: jnp.ndarray, dim: int, method: str = "sinusoidal") -> 
     if method == "sinusoidal":
         return sinusoidal_time_embedding(t, dim)
     elif method == "fourier":
-        return fourier_features(t[:, None], dim)
-    elif method == "learnable":
-        return learnable_time_embedding(t, dim)
+        return fourier_time_embedding(t[:, None], dim)
+    elif method == "linear":
+        return linear_time_embedding(t, dim)
     else:
         raise ValueError(f"Unsupported embedding method: {method}")
 
