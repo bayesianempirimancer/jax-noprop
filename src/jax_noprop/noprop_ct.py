@@ -288,7 +288,7 @@ class NoPropCT(nn.Module):
             num_steps: Number of integration steps
             
         Returns:
-            Full trajectory [batch_size, num_steps + 1, output_dim] (includes initial state)
+            Full trajectory [num_steps + 1, batch_size, output_dim] (includes initial state)
         """
         return self.predict(
             params=params,

@@ -282,7 +282,8 @@ def _integrate_ode_euler_scan(
         return (z_new, t_new), z_new
     
     # Initial state
-    t0 = jnp.full((z0.shape[0],), t_start)
+    batch_shape = z0.shape[:-1]
+    t0 = jnp.full((1,) * len(batch_shape), t_start)
     initial_carry = (z0, t0)
     
     # Scan over integration steps
@@ -320,7 +321,8 @@ def _integrate_ode_heun_scan(
         return (z_new, t_new), z_new
     
     # Initial state
-    t0 = jnp.full((z0.shape[0],), t_start)
+    batch_shape = z0.shape[:-1]
+    t0 = jnp.full((1,) * len(batch_shape), t_start)
     initial_carry = (z0, t0)
     
     # Scan over integration steps
@@ -367,7 +369,8 @@ def _integrate_ode_rk4_scan(
         return (z_new, t_new), z_new
     
     # Initial state
-    t0 = jnp.full((z0.shape[0],), t_start)
+    batch_shape = z0.shape[:-1]
+    t0 = jnp.full((1,) * len(batch_shape), t_start)
     initial_carry = (z0, t0)
     
     # Scan over integration steps
@@ -402,7 +405,8 @@ def _integrate_ode_adaptive_scan(
         return (z_new, t_new, new_dt), z_new
     
     # Initial state
-    t0 = jnp.full((z0.shape[0],), t_start)
+    batch_shape = z0.shape[:-1]
+    t0 = jnp.full((1,) * len(batch_shape), t_start)
     initial_carry = (z0, t0, dt)
     
     # Scan over integration steps
@@ -435,17 +439,19 @@ def _integrate_ode_euler_scan_trajectory(
         return (z_new, t_new), z_new
     
     # Initial state
-    t0 = jnp.full((z0.shape[0],), t_start)
+    batch_shape = z0.shape[:-1]
+    t0 = jnp.full((1,) * len(batch_shape), t_start)
     initial_carry = (z0, t0)
     
     # Scan over integration steps - return full trajectory
     _, trajectory = jax.lax.scan(euler_step_scan, initial_carry, None, length=num_steps)
     
-    # Transpose from (num_steps, batch_size, output_dim) to (batch_size, num_steps, output_dim)
-    trajectory = jnp.transpose(trajectory, (1, 0, 2))
+    # Keep trajectory in (num_steps, batch_shape, output_dim) format as documented
+    # No transpose needed - scan already returns the correct format
     
     # Prepend the initial state to get the complete trajectory
-    return jnp.concatenate([z0[:, None, :], trajectory], axis=1)
+    # z0 has shape (batch_shape, state_dim), we need (1, batch_shape, state_dim)
+    return jnp.concatenate([z0[None, ...], trajectory], axis=0)
 
 
 def _integrate_ode_heun_scan_trajectory(
@@ -474,17 +480,19 @@ def _integrate_ode_heun_scan_trajectory(
         return (z_new, t_new), z_new
     
     # Initial state
-    t0 = jnp.full((z0.shape[0],), t_start)
+    batch_shape = z0.shape[:-1]
+    t0 = jnp.full((1,) * len(batch_shape), t_start)
     initial_carry = (z0, t0)
     
     # Scan over integration steps - return full trajectory
     _, trajectory = jax.lax.scan(heun_step_scan, initial_carry, None, length=num_steps)
     
-    # Transpose from (num_steps, batch_size, output_dim) to (batch_size, num_steps, output_dim)
-    trajectory = jnp.transpose(trajectory, (1, 0, 2))
+    # Keep trajectory in (num_steps, batch_shape, output_dim) format as documented
+    # No transpose needed - scan already returns the correct format
     
     # Prepend the initial state to get the complete trajectory
-    return jnp.concatenate([z0[:, None, :], trajectory], axis=1)
+    # z0 has shape (batch_shape, state_dim), we need (1, batch_shape, state_dim)
+    return jnp.concatenate([z0[None, ...], trajectory], axis=0)
 
 
 def _integrate_ode_rk4_scan_trajectory(
@@ -515,17 +523,19 @@ def _integrate_ode_rk4_scan_trajectory(
         return (z_new, t_new), z_new
     
     # Initial state
-    t0 = jnp.full((z0.shape[0],), t_start)
+    batch_shape = z0.shape[:-1]
+    t0 = jnp.full((1,) * len(batch_shape), t_start)
     initial_carry = (z0, t0)
     
     # Scan over integration steps - return full trajectory
     _, trajectory = jax.lax.scan(rk4_step_scan, initial_carry, None, length=num_steps)
     
-    # Transpose from (num_steps, batch_size, output_dim) to (batch_size, num_steps, output_dim)
-    trajectory = jnp.transpose(trajectory, (1, 0, 2))
+    # Keep trajectory in (num_steps, batch_shape, output_dim) format as documented
+    # No transpose needed - scan already returns the correct format
     
     # Prepend the initial state to get the complete trajectory
-    return jnp.concatenate([z0[:, None, :], trajectory], axis=1)
+    # z0 has shape (batch_shape, state_dim), we need (1, batch_shape, state_dim)
+    return jnp.concatenate([z0[None, ...], trajectory], axis=0)
 
 
 def _integrate_ode_adaptive_scan_trajectory(
@@ -554,14 +564,16 @@ def _integrate_ode_adaptive_scan_trajectory(
         return (z_new, t_new, new_dt), z_new
     
     # Initial state
-    t0 = jnp.full((z0.shape[0],), t_start)
+    batch_shape = z0.shape[:-1]
+    t0 = jnp.full((1,) * len(batch_shape), t_start)
     initial_carry = (z0, t0, dt)
     
     # Scan over integration steps - return full trajectory
     _, trajectory = jax.lax.scan(adaptive_step_scan, initial_carry, None, length=max_steps)
     
-    # Transpose from (max_steps, batch_size, output_dim) to (batch_size, max_steps, output_dim)
-    trajectory = jnp.transpose(trajectory, (1, 0, 2))
+    # Keep trajectory in (max_steps, batch_shape, output_dim) format as documented
+    # No transpose needed - scan already returns the correct format
     
     # Prepend the initial state to get the complete trajectory
-    return jnp.concatenate([z0[:, None, :], trajectory], axis=1)
+    # z0 has shape (batch_shape, state_dim), we need (1, batch_shape, state_dim)
+    return jnp.concatenate([z0[None, ...], trajectory], axis=0)

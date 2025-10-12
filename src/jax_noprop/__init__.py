@@ -36,8 +36,7 @@ from .utils.ode_integration import (
     adaptive_step,
     integrate_ode,
 )
-# Training utilities are available in the utils module
-# from ...utils.training_utils import create_train_state, train_step, eval_step
+# Training utilities are handled by the built-in train_step methods in the models
 from .utils import (
     trace_jacobian,
     compute_jacobian_diagonal,

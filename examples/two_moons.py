@@ -337,6 +337,8 @@ def predict_trajectories(
     z_trajectories = noprop_model.predict_trajectory(
         params, x, "euler", 2, num_timesteps
     )
+    # Transpose from (num_steps+1, batch_size, output_dim) to (batch_size, num_steps+1, output_dim) for plotting
+    z_trajectories = jnp.transpose(z_trajectories, (1, 0, 2))
     
     return z_trajectories  # [n_samples, num_timesteps + 1, 2]
 

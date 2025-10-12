@@ -157,6 +157,13 @@ The implementation includes several key optimizations:
 - Provides trajectory visualization capabilities
 - Unified `integrate_ode` function with `output_type` parameter for end-point or trajectory outputs
 
+### Tensor Field Integration
+- **`tensor_field_integration.py`**: Wrapper for handling arbitrary tensor shapes (images, 3D data, etc.)
+- Automatically flattens tensor fields to vectors for ODE integration, then reshapes output
+- Supports arbitrary batch shapes: `(batch_dims..., tensor_dims...)`
+- Output shape: `(num_steps+1,) + batch_shape + tensor_shape` for trajectories
+- Use when working with non-vector data (e.g., images, 3D tensors)
+
 ### Memory Efficiency
 - Batch size inference from input tensors
 - Static argument optimization to prevent recompilation
@@ -353,10 +360,22 @@ The implementation uses a **gamma parameterization** for numerical stability:
 The continuous-time variant learns a vector field:
 
 ```
-dz/dt = τ⁻¹(t) * (sqrt(α(t)) * target - (1+α(t))/2 * z)
+dz/dt = τ⁻¹(t) * (sqrt(α(t)) * u(z,x,t) - (1+α(t))/2 * z)
 ```
 
-where `τ⁻¹(t) = γ'(t)` is the inverse time constant.
+where `τ⁻¹(t) = γ'(t)` is the inverse time constant and u(z,x,t) is the output of the neural network.
+
+**Critical Side Note**
+
+The original NoProp paper has a minor mathematical error/omission for the continuous time case which 
+affects inference, but not learning.  In practice it seems to have little effect on performance which 
+is probably why it went unnoticed. The ultimate source of the error was likely a slightly cavalier attitude 
+toward small `dt` limits resulting in incorrect calculation of the effective time constant for the forward
+process.  Fortunately the correct dynamics described above do not differ from the original NoProp dynamics 
+very much for  `α(t)` close to 1 so the last few time steps so despite the error the results it gives are 
+very similiar because the last few denoising steps are largely indistinguishable.  See the hastily written 
+and likely error riddled writeup of my derivation of the forward process in the docs directory.  
+
 
 #### Loss Function
 
