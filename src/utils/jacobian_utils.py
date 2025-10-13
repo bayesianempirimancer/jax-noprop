@@ -5,7 +5,7 @@ This module provides optimized functions for computing Jacobians and their trace
 in the context of neural ODEs and flow matching, with a focus on memory efficiency.
 """
 
-from typing import Any, Dict, Callable
+from typing import Any, Dict, Callable, Tuple
 from functools import partial
 
 import jax
@@ -20,21 +20,20 @@ def trace_jacobian(
     x: jnp.ndarray,
     t: jnp.ndarray
 ) -> jnp.ndarray:
-    """Optimized Jacobian trace computation that processes each batch element separately.
+    """Simple Jacobian trace computation for vector inputs.
     
-    This avoids computing the full batch Jacobian which would have shape
-    [batch_size, target_dim, batch_size, target_dim] and instead computes
-    individual Jacobians of shape [target_dim, target_dim] for each batch element.
+    This implementation expects z to be a batch of vectors (2D array with shape [batch_size, vector_dim]).
+    It computes the Jacobian trace directly without any reshaping.
     
     Args:
         apply_fn: The model apply function
         params: Model parameters
-        z: Current state [batch_size, target_dim]
+        z: Current state [batch_size, vector_dim] (2D array of vectors)
         x: Input data [batch_size, x_dim]
         t: Current time [batch_size]
         
     Returns:
-        Trace of Jacobian [batch_size]
+        Total trace of Jacobian [batch_size]
     """
     def flow_field_single(z_single, x_single, t_single):
         """Flow field for a single batch element."""
@@ -46,8 +45,56 @@ def trace_jacobian(
         return jnp.trace(jacobian)
     
     # Vectorize over batch dimension to compute Jacobian trace for each element
-    # This gives us shape [batch_size] instead of [batch_size, target_dim, batch_size, target_dim]
     trace = jax.vmap(jacobian_trace_single)(z, x, t)
+    
+    return trace
+
+
+@partial(jax.jit, static_argnums=(0, 1))
+def trace_jacobian_tensor(
+    apply_fn: Callable,
+    z_shape: Tuple[int, ...],
+    params: Dict[str, Any],
+    z: jnp.ndarray,
+    x: jnp.ndarray,
+    t: jnp.ndarray
+) -> jnp.ndarray:
+    """Optimized Jacobian trace computation using flattened approach.
+    
+    This implementation flattens the input tensor, computes the Jacobian in flattened space,
+    and then computes the trace. This approach is cleaner and more readable than working
+    with multi-dimensional Jacobians directly.
+    
+    Args:
+        apply_fn: The model apply function
+        z_shape: Shape of z tensor (excluding batch dimension)
+        params: Model parameters
+        z: Current state [batch_size, ...] (can be multi-dimensional)
+        x: Input data [batch_size, x_dim]
+        t: Current time [batch_size]
+        
+    Returns:
+        Total trace of Jacobian [batch_size] - computed in flattened space
+    """
+    def flattened_flow_field_single(z_single_flattened, x_single, t_single):
+        """Flow field that works in flattened space."""
+        # Unflatten z_single_flattened to original shape
+        z_single = z_single_flattened.reshape(z_shape)
+        # Apply the model
+        output = apply_fn(params, z_single[None, :], x_single[None, :], t_single[None])[0]
+        # Flatten the output
+        return output.reshape(-1)
+    
+    def jacobian_trace_single(z_single_flattened, x_single, t_single):
+        """Compute Jacobian trace for a single batch element in flattened space."""
+        jacobian = jax.jacfwd(flattened_flow_field_single)(z_single_flattened, x_single, t_single)
+        return jnp.trace(jacobian)
+    
+    # Flatten z for the computation
+    z_flattened = z.reshape(z.shape[0], -1)
+    
+    # Vectorize over batch dimension to compute Jacobian trace for each element
+    trace = jax.vmap(jacobian_trace_single)(z_flattened, x, t)
     
     return trace
 

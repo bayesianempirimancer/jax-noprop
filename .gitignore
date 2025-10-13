@@ -147,6 +147,15 @@ results/
 *.pdf
 *.svg
 
+# Pretrained models and weights
+# TODO: Remove this line when pretrained models are ready for production
+src/jax_noprop/models/pretrained/
+# Specific weight files (uncomment when ready for production)
+# src/jax_noprop/models/pretrained/big_vision_models/*/pretrained_weights.pkl
+# src/jax_noprop/models/pretrained/big_vision_models/*/weights_metadata.json
+# src/jax_noprop/models/pretrained/*/pretrained_weights.pkl
+# src/jax_noprop/models/pretrained/*/weights_metadata.json
+
 # IDE files
 .vscode/
 .idea/

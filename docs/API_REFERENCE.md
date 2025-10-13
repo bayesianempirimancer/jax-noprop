@@ -2,6 +2,44 @@
 
 This document provides detailed API documentation for the JAX NoProp implementation.
 
+## Import Structure
+
+The codebase uses a clean, modular import structure:
+
+```python
+# Core NoProp implementations
+from src.noprop_ct import NoPropCT
+from src.noprop_fm import NoPropFM
+
+# Model architectures
+from src.no_prop_models import SimpleMLP, SimpleResNet, SimpleTransformer
+from src.models.simple_models import SimpleMLP, SimpleResNet, SimpleTransformer
+
+# Noise schedules and embeddings
+from src.embeddings.noise_schedules import (
+    LinearNoiseSchedule, 
+    CosineNoiseSchedule, 
+    SigmoidNoiseSchedule,
+    LearnableNoiseSchedule
+)
+from src.embeddings.embeddings import (
+    sinusoidal_time_embedding, 
+    fourier_time_embedding,
+    get_time_embedding
+)
+
+# Building blocks
+from src.blocks.image_blocks import ResNet50, EfficientNetB0, VisionTransformer
+from src.blocks.point_cloud_blocks import PointNet, PointNet2, PointCNN
+
+# Utilities
+from src.utils.ode_integration import euler_step, heun_step, rk4_step
+from src.utils.jacobian_utils import trace_jacobian, compute_divergence
+
+# Training
+from src.trainer import NoPropTrainer
+```
+
 ## Core Classes
 
 ### NoPropCT
@@ -12,9 +50,10 @@ Continuous-time NoProp implementation with neural ODE integration.
 class NoPropCT(nn.Module):
     def __init__(
         self,
-        target_dim: int,
+        z_shape: Tuple[int, ...],
+        x_shape: Tuple[int, ...],
         model: nn.Module,
-        noise_schedule: NoiseSchedule = CosineNoiseSchedule(),
+        noise_schedule: NoiseSchedule = LinearNoiseSchedule(),
         num_timesteps: int = 20,
         integration_method: str = "euler",
         reg_weight: float = 0.0
@@ -22,12 +61,15 @@ class NoPropCT(nn.Module):
 ```
 
 **Parameters:**
-- `target_dim`: Dimension of target z (output dimension)
+- `z_shape`: Shape of target z (excluding batch dimensions), e.g., `(2,)` for 1D, `(10, 5)` for 2D
+- `x_shape`: Shape of input x (excluding batch dimensions), e.g., `(2,)` for 1D, `(28, 28, 1)` for images
 - `model`: The neural network model (must take `(z, x, t)` inputs and output same shape as `z`)
-- `noise_schedule`: Noise scheduling strategy (default: CosineNoiseSchedule)
+- `noise_schedule`: Noise scheduling strategy (default: LinearNoiseSchedule)
 - `num_timesteps`: Number of timesteps for continuous time (default: 20)
 - `integration_method`: ODE integration method ("euler", "heun", or "rk4")
 - `reg_weight`: Regularization hyperparameter (default: 0.0)
+
+**Note:** The `z_shape` parameter enables automatic optimization - 1D shapes use efficient `integrate_ode`, while multi-dimensional shapes use `integrate_tensor_ode`.
 
 **Key Methods:**
 
@@ -68,34 +110,34 @@ def train_step(
 - `loss`: Training loss
 - `metrics`: Training metrics
 
-#### `predict(params, x, output_dim, num_steps, integration_method, output_type)`
+#### `predict(params, x, num_steps, integration_method, output_type, key)`
 Generate predictions by integrating the learned vector field.
 
 ```python
-@partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))
+@partial(jax.jit, static_argnums=(0, 3, 4, 5))
 def predict(
     self,
     params: Dict[str, Any],
     x: jnp.ndarray,
-    output_dim: int,
     num_steps: int,
     integration_method: str = "euler",
-    output_type: str = "end_point"
+    output_type: str = "end_point",
+    key: jr.PRNGKey = None
 ) -> jnp.ndarray
 ```
 
 **Parameters:**
 - `params`: Model parameters
 - `x`: Input data `[batch_size, ...]`
-- `output_dim`: Output dimension
 - `num_steps`: Number of integration steps
 - `integration_method`: Integration method ("euler", "heun", "rk4", "adaptive")
 - `output_type`: Output type ("end_point" or "trajectory")
+- `key`: Random key for initialization (default: None for deterministic zeros)
 
 **Returns:**
-- `predictions`: Final predictions `[batch_size, output_dim]` or trajectory `[batch_size, num_steps+1, output_dim]`
+- `predictions`: Final predictions `[batch_size, z_shape]` or trajectory `[batch_size, num_steps+1, z_shape]`
 
-#### `predict_trajectory(params, x, integration_method, output_dim, num_steps)`
+#### `predict_trajectory(params, x, num_steps, integration_method, key)`
 Generate full trajectory by integrating the learned vector field.
 
 ```python
@@ -103,16 +145,23 @@ def predict_trajectory(
     self,
     params: Dict[str, Any],
     x: jnp.ndarray,
-    integration_method: str,
-    output_dim: int,
-    num_steps: int
+    num_steps: int,
+    integration_method: str = "euler",
+    key: jr.PRNGKey = None
 ) -> jnp.ndarray
 ```
+
+**Parameters:**
+- `params`: Model parameters
+- `x`: Input data `[batch_size, ...]`
+- `num_steps`: Number of integration steps
+- `integration_method`: Integration method ("euler", "heun", "rk4", "adaptive")
+- `key`: Random key for initialization (default: None for deterministic zeros)
 
 **Note:** This is a wrapper around the `predict` method with `output_type="trajectory"`.
 
 **Returns:**
-- `trajectory`: Full trajectory `[batch_size, num_steps + 1, output_dim]`
+- `trajectory`: Full trajectory `[batch_size, num_steps + 1, z_shape]`
 
 #### `sample_zt(key, target, timesteps)`
 Sample noisy targets and timesteps for training.
@@ -146,29 +195,6 @@ def dz_dt(
 **Returns:**
 - `dz_dt`: Vector field `[batch_size, target_dim]`
 
-### NoPropDT
-
-Discrete-time NoProp implementation.
-
-```python
-class NoPropDT(nn.Module):
-    def __init__(
-        self,
-        target_dim: int,
-        model: nn.Module,
-        num_timesteps: int = 10,
-        noise_schedule: NoiseSchedule = LinearNoiseSchedule(),
-        eta: float = 0.1
-    )
-```
-
-**Parameters:**
-- `target_dim`: Dimension of target z
-- `model`: The neural network model
-- `num_timesteps`: Number of discrete timesteps (default: 10)
-- `noise_schedule`: Noise scheduling strategy
-- `eta`: Regularization hyperparameter (default: 0.1)
-
 ### NoPropFM
 
 Flow matching NoProp implementation with JIT optimization.
@@ -177,7 +203,8 @@ Flow matching NoProp implementation with JIT optimization.
 class NoPropFM(nn.Module):
     def __init__(
         self,
-        target_dim: int,
+        z_shape: Tuple[int, ...],
+        x_shape: Tuple[int, ...],
         model: nn.Module,
         num_timesteps: int = 20,
         integration_method: str = "euler",
@@ -187,12 +214,15 @@ class NoPropFM(nn.Module):
 ```
 
 **Parameters:**
-- `target_dim`: Dimension of target z
+- `z_shape`: Shape of target z (excluding batch dimensions), e.g., `(2,)` for 1D, `(10, 5)` for 2D
+- `x_shape`: Shape of input x (excluding batch dimensions), e.g., `(2,)` for 1D, `(28, 28, 1)` for images
 - `model`: The neural network model (must take `(z, x, t)` inputs and output same shape as `z`)
 - `num_timesteps`: Number of timesteps for continuous time (default: 20)
 - `integration_method`: Flow integration method ("euler", "heun", or "rk4")
 - `reg_weight`: Regularization hyperparameter (default: 0.0)
 - `sigma_t`: Standard deviation of noise added to z_t (default: 0.05)
+
+**Note:** The `z_shape` parameter enables automatic optimization - 1D shapes use efficient `integrate_ode`, while multi-dimensional shapes use `integrate_tensor_ode`.
 
 **Key Methods:**
 
@@ -236,34 +266,34 @@ def train_step(
 - `loss`: Training loss
 - `metrics`: Training metrics
 
-#### `predict(params, x, output_dim, num_steps, integration_method, output_type)`
+#### `predict(params, x, num_steps, integration_method, output_type, key)`
 Generate predictions by integrating the learned flow field.
 
 ```python
-@partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))
+@partial(jax.jit, static_argnums=(0, 3, 4, 5))
 def predict(
     self,
     params: Dict[str, Any],
     x: jnp.ndarray,
-    output_dim: int,
     num_steps: int,
     integration_method: str = "euler",
-    output_type: str = "end_point"
+    output_type: str = "end_point",
+    key: jr.PRNGKey = None
 ) -> jnp.ndarray
 ```
 
 **Parameters:**
 - `params`: Model parameters
 - `x`: Input data `[batch_size, ...]`
-- `output_dim`: Output dimension
 - `num_steps`: Number of integration steps
 - `integration_method`: Integration method ("euler", "heun", "rk4", "adaptive")
 - `output_type`: Output type ("end_point" or "trajectory")
+- `key`: Random key for initialization (default: None for deterministic zeros)
 
 **Returns:**
-- `predictions`: Final predictions `[batch_size, output_dim]` or trajectory `[batch_size, num_steps+1, output_dim]`
+- `predictions`: Final predictions `[batch_size, z_shape]` or trajectory `[batch_size, num_steps+1, z_shape]`
 
-#### `predict_trajectory(params, x, integration_method, output_dim, num_steps)`
+#### `predict_trajectory(params, x, num_steps, integration_method, key)`
 Generate full trajectory by integrating the learned flow field.
 
 ```python
@@ -271,16 +301,23 @@ def predict_trajectory(
     self,
     params: Dict[str, Any],
     x: jnp.ndarray,
-    integration_method: str,
-    output_dim: int,
-    num_steps: int
+    num_steps: int,
+    integration_method: str = "euler",
+    key: jr.PRNGKey = None
 ) -> jnp.ndarray
 ```
+
+**Parameters:**
+- `params`: Model parameters
+- `x`: Input data `[batch_size, ...]`
+- `num_steps`: Number of integration steps
+- `integration_method`: Integration method ("euler", "heun", "rk4", "adaptive")
+- `key`: Random key for initialization (default: None for deterministic zeros)
 
 **Note:** This is a wrapper around the `predict` method with `output_type="trajectory"`.
 
 **Returns:**
-- `trajectory`: Full trajectory `[batch_size, num_steps + 1, output_dim]`
+- `trajectory`: Full trajectory `[batch_size, num_steps + 1, z_shape]`
 
 #### `dz_dt(params, z, x, t)`
 Compute the vector field dz/dt for the neural ODE.
@@ -591,6 +628,36 @@ All ODE integration uses `jax.lax.scan` for efficient compilation:
 - Enables vectorization across batch dimensions
 - Provides significant speedup over naive implementations
 
+### Conditional Integration Optimization
+
+Both NoProp-CT and NoProp-FM automatically select the most efficient integration method based on `z_shape` complexity:
+
+**1D z_shapes** (e.g., `(10,)`, `(2,)`):
+- Uses optimized `integrate_ode` function
+- Maximum performance for common vector outputs
+- Direct integration without tensor reshaping overhead
+
+**Multi-dimensional z_shapes** (e.g., `(10, 5)`, `(8, 4, 2)`):
+- Uses `integrate_tensor_ode` function
+- Proper handling of arbitrary tensor shapes
+- Automatic flattening and reshaping for ODE integration
+
+**Implementation Details:**
+```python
+# Automatic selection in predict() method
+if len(self.z_shape) > 1:
+    # Use tensor field integrator for multi-dimensional z_shapes
+    result = integrate_tensor_ode(...)
+else:
+    # Use regular integrator for 1D z_shapes (more efficient)
+    result = integrate_ode(...)
+```
+
+**Performance Benefits:**
+- Reduces computational overhead for 1D cases
+- Maintains full compatibility with arbitrary tensor shapes
+- Transparent to users - no API changes required
+
 ## Examples
 
 ### Basic Usage
@@ -605,7 +672,7 @@ from jax_noprop.noise_schedules import CosineNoiseSchedule
 # Create model and NoProp instance
 model = SimpleMLP(hidden_dim=64)
 noprop_ct = NoPropCT(
-    target_dim=2,
+    z_shape=(2,),
     model=model,
     noise_schedule=CosineNoiseSchedule(),
     num_timesteps=20,
@@ -625,7 +692,7 @@ y = jax.nn.one_hot(jax.random.randint(key, (32,), 0, 2), 2)
 params, loss, metrics = noprop_ct.train_step(params, x, y, key)
 
 # Generate predictions
-predictions = noprop_ct.predict(params, x, 2, 20, "euler")
+predictions = noprop_ct.predict(params, x, num_steps=20)
 ```
 
 ### Custom Noise Schedule
@@ -642,7 +709,7 @@ schedule = LearnableNoiseSchedule(
 
 # Use with NoProp-CT
 noprop_ct = NoPropCT(
-    target_dim=2,
+    z_shape=(2,),
     model=model,
     noise_schedule=schedule,
     num_timesteps=20
@@ -661,7 +728,7 @@ from jax_noprop.models import SimpleMLP
 # Create model and NoProp-FM instance
 model = SimpleMLP(hidden_dim=64)
 noprop_fm = NoPropFM(
-    target_dim=2,
+    z_shape=(2,),
     model=model,
     num_timesteps=20,
     integration_method="euler",
@@ -686,14 +753,14 @@ y = jax.nn.one_hot(jax.random.randint(key, (32,), 0, 2), 2)
 params, opt_state, loss, metrics = noprop_fm.train_step(params, opt_state, x, y, key, optimizer)
 
 # Generate predictions
-predictions = noprop_fm.predict(params, x, 2, 20, "euler")
+predictions = noprop_fm.predict(params, x, num_steps=20)
 ```
 
 ### Trajectory Visualization
 
 ```python
 # Generate full trajectory
-trajectory = noprop_ct.predict_trajectory(params, x, "euler", 2, 20)
+trajectory = noprop_ct.predict_trajectory(params, x, num_steps=20)
 # trajectory shape: [batch_size, 21, 2] (includes initial state)
 
 # Plot trajectory evolution
@@ -708,7 +775,7 @@ plt.show()
 
 ```python
 # Generate predictions
-predictions = noprop_ct.predict(params, x, 2, 20, "euler")
+predictions = noprop_ct.predict(params, x, num_steps=20)
 
 # Compute accuracy
 accuracy = jnp.mean(jnp.argmax(predictions, axis=-1) == jnp.argmax(y, axis=-1))

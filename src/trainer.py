@@ -31,10 +31,10 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from src.jax_noprop.noprop_ct import NoPropCT
-from src.jax_noprop.noprop_fm import NoPropFM
-from src.jax_noprop.models import SimpleMLP
-from src.jax_noprop.noise_schedules import LinearNoiseSchedule, CosineNoiseSchedule
+from .noprop_ct import NoPropCT
+from .noprop_fm import NoPropFM
+from .no_prop_models import SimpleMLP
+from .embeddings.noise_schedules import LinearNoiseSchedule, CosineNoiseSchedule
 
 
 class NoPropTrainer:
@@ -76,15 +76,17 @@ class NoPropTrainer:
                 raise ValueError(f"Unknown noise schedule: {noise_schedule}")
             
             self.model = NoPropCT(
+                z_shape=(target_dim,),
+                x_shape=(input_dim,),
                 model=SimpleMLP(hidden_dims=hidden_dims),
-                noise_schedule=noise_sched,
-                target_dim=target_dim
+                noise_schedule=noise_sched
             )
         elif model_type == "fm":
             self.model = NoPropFM(
+                z_shape=(target_dim,),
+                x_shape=(input_dim,),
                 model=SimpleMLP(hidden_dims=hidden_dims),
-                sigma_t=sigma_t,
-                target_dim=target_dim
+                sigma_t=sigma_t
             )
         else:
             raise ValueError(f"Unknown model type: {model_type}")
@@ -218,7 +220,7 @@ class NoPropTrainer:
             if self.model_type == "ct":
                 # For CT, we need to predict and compare
                 z_train_pred = self.model.predict(
-                    self.params, x_train, self.target_dim, self.num_steps, self.integration_method
+                    self.params, x_train, self.num_steps, self.integration_method
                 )
                 train_pred_classes = jnp.argmax(z_train_pred, axis=-1)
                 train_true_classes = jnp.argmax(z_train, axis=-1)
@@ -226,7 +228,7 @@ class NoPropTrainer:
                 
                 if x_val is not None:
                     z_val_pred = self.model.predict(
-                        self.params, x_val, self.target_dim, self.num_steps, self.integration_method
+                        self.params, x_val, self.num_steps, self.integration_method
                     )
                     val_pred_classes = jnp.argmax(z_val_pred, axis=-1)
                     val_true_classes = jnp.argmax(z_val, axis=-1)
@@ -281,7 +283,7 @@ class NoPropTrainer:
         x, _ = self._prepare_data(x_data, np.zeros(len(x_data)))
         
         return self.model.predict(
-            self.params, x, self.target_dim, self.num_steps, self.integration_method
+            self.params, x, self.num_steps, self.integration_method
         )
     
     def evaluate(self, x_data, y_data) -> Tuple[float, float]:
@@ -293,7 +295,7 @@ class NoPropTrainer:
         
         # Get predictions
         z_pred = self.model.predict(
-            self.params, x, self.target_dim, self.num_steps, self.integration_method
+            self.params, x, self.num_steps, self.integration_method
         )
         
         # Compute accuracy

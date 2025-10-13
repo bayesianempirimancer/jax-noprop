@@ -56,7 +56,9 @@ def integrate_tensor_ode(
         z_vec_dim *= dim
     z0 = z0.reshape(batch_shape + (z_vec_dim,))
     def vector_field(params, z, x, t):
-        return tensor_field(params, z.reshape(batch_shape + tensor_shape), x, t).reshape(batch_shape + (z_vec_dim,))
+        z_reshaped = z.reshape(batch_shape + tensor_shape)
+        result = tensor_field(params, z_reshaped, x, t)
+        return result.reshape(batch_shape + (z_vec_dim,))
     
     result = integrate_ode_vec(vector_field, params, z0, x, time_span, num_steps, method, output_type)
     if output_type == 'end_point':

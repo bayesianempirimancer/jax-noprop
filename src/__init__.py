@@ -1,33 +1,39 @@
 """
 JAX/Flax implementation of NoProp algorithm.
 
-This package provides implementations of the three NoProp variants:
-- NoProp-DT: Discrete-time
+This package provides implementations of the NoProp variants:
 - NoProp-CT: Continuous-time with neural ODEs  
 - NoProp-FM: Flow matching
 """
 
-from .noprop_dt import NoPropDT
 from .noprop_ct import NoPropCT
 from .noprop_fm import NoPropFM
-from .models import (
+from .no_prop_models import (
     SimpleMLP,
     ResNetBlock,
     ResNet,
     ConditionalResNet,
     SimpleCNN,
 )
-from .noise_schedules import (
+from .embeddings.noise_schedules import (
     LinearNoiseSchedule,
     CosineNoiseSchedule,
     SigmoidNoiseSchedule,
     LearnableNoiseSchedule,
 )
-from .embeddings import (
+from .embeddings.embeddings import (
     sinusoidal_time_embedding,
     fourier_time_embedding,
     linear_time_embedding,
+    learnable_time_embedding,
+    gaussian_time_embedding,
     get_time_embedding,
+)
+from .embeddings.positional_encoding import (
+    positional_encoding,
+    relative_positional_encoding,
+    rotary_positional_encoding,
+    get_positional_encoding,
 )
 from .utils.ode_integration import (
     euler_step,
@@ -37,17 +43,25 @@ from .utils.ode_integration import (
     integrate_ode,
 )
 # Training utilities are handled by the built-in train_step methods in the models
-from .utils import (
+from .utils.jacobian_utils import (
     trace_jacobian,
     compute_jacobian_diagonal,
     compute_divergence,
     compute_log_det_jacobian,
 )
+# Note: VitSmallFeatureExtractor is not available in current structure
+# from .models.pretrained.vit_small_feature_extractor import (
+#     VitSmallFeatureExtractor,
+#     create_vit_gradient_stop_fn,
+# )
+from .models.vit_crn import (
+    ViTCRN,
+    create_vit_crn_model,
+)
 
 __version__ = "0.1.0"
 __all__ = [
     # NoProp implementations
-    "NoPropDT",
     "NoPropCT", 
     "NoPropFM",
     # Model architectures
@@ -65,7 +79,14 @@ __all__ = [
     "sinusoidal_time_embedding",
     "fourier_time_embedding",
     "linear_time_embedding",
+    "learnable_time_embedding",
+    "gaussian_time_embedding",
     "get_time_embedding",
+    # Positional encodings
+    "positional_encoding",
+    "relative_positional_encoding",
+    "rotary_positional_encoding",
+    "get_positional_encoding",
     # ODE integration
     "euler_step",
     "heun_step",
@@ -81,4 +102,10 @@ __all__ = [
     "compute_jacobian_diagonal",
     "compute_divergence",
     "compute_log_det_jacobian",
+    # ViT feature extractor and utilities (not available in current structure)
+    # "VitSmallFeatureExtractor",
+    # "create_vit_gradient_stop_fn",
+    # ViT-based Conditional ResNet
+    "ViTCRN",
+    "create_vit_crn_model",
 ]

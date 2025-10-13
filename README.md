@@ -11,13 +11,13 @@ A JAX/Flax implementation of the NoProp algorithm from the paper "NoProp: Traini
 
 NoProp is a novel approach for training neural networks without relying on standard back-propagation or forward-propagation steps, taking inspiration from diffusion and flow matching methods. This repository provides:
 
-- **NoProp-DT**: Discrete-time implementation (Currently Broken)
 - **NoProp-CT**: Continuous-time implementation with neural ODEs (fully optimized)
 - **NoProp-FM**: Flow matching variant (fully optimized)
 
 ## Key Features
 
 - **Highly Optimized**: JIT-compiled implementations with 1000x+ speedups
+- **Smart Integration**: Conditional integration optimization automatically selects the most efficient method based on tensor shape complexity
 - **Modular Design**: Easy to extend with different model architectures
 - **Flexible Model Interface**: Works with any model that takes `(z, x, t)` inputs and outputs `z'` with same shape as `z`
 - **Advanced Noise Scheduling**: Multiple noise schedule types including learnable neural network-based schedules
@@ -57,16 +57,17 @@ pip install -e ".[dev]"
 ```python
 import jax
 import jax.numpy as jnp
-from jax_noprop import NoPropCT
-from jax_noprop.models import SimpleMLP
-from jax_noprop.noise_schedules import CosineNoiseSchedule, LearnableNoiseSchedule
+from src.noprop_ct import NoPropCT
+from src.no_prop_models import SimpleMLP
+from src.embeddings.noise_schedules import CosineNoiseSchedule, LearnableNoiseSchedule
 
 # Create a model that takes (z, x, t) inputs and outputs z' with same shape as z
-model = SimpleMLP(hidden_dim=64)
+model = SimpleMLP(hidden_dims=(64, 64))
 
 # Initialize NoProp-CT with different noise schedules
 noprop_ct = NoPropCT(
-    target_dim=2,
+    z_shape=(2,),
+    x_shape=(2,),
     model=model, 
     noise_schedule=CosineNoiseSchedule(),  # or LearnableNoiseSchedule()
     num_timesteps=20,
@@ -77,14 +78,105 @@ noprop_ct = NoPropCT(
 # ... (see examples/)
 ```
 
+## Homogenized API
+
+Both NoProp-CT and NoProp-FM now use a **consistent, clean API** where the `key` parameter defaults to `None` for deterministic inference:
+
+### Method Signatures
+
+```python
+# Both NoProp-CT and NoProp-FM use the same interface
+predictions = model.predict(params, x, num_steps=20)  # key=None (deterministic)
+predictions = model.predict(params, x, num_steps=20, key=jr.PRNGKey(42))  # stochastic
+
+trajectory = model.predict_trajectory(params, x, num_steps=20)  # key=None (deterministic)
+trajectory = model.predict_trajectory(params, x, num_steps=20, key=jr.PRNGKey(42))  # stochastic
+
+# Training still requires a key
+loss, metrics = model.compute_loss(params, x, target, key=jr.PRNGKey(42))
+```
+
+### Key Behavior
+
+- **`key=None`** (default): Uses deterministic initialization (zeros) for reproducible inference
+- **`key=jr.PRNGKey(...)`**: Uses random initialization for sensitivity analysis and stochastic inference
+- **`compute_loss`**: Still requires a key for training (as it should)
+
+This makes the codebase much more maintainable and user-friendly! 🎉
+
 ### Run Examples
 
 ```bash
 # Two moons dataset example (fully functional)
-python examples/two_moons.py --epochs 50 --noise-schedule cosine
+python examples/two_moons.py
 
-# Try learnable noise schedule
-python examples/two_moons.py --epochs 50 --noise-schedule learnable
+# The example will train both NoProp-CT and NoProp-FM models
+```
+
+## Directory Structure
+
+The codebase is organized into a clean, modular structure:
+
+```
+jax-noprop/
+├── src/                          # Main source code
+│   ├── noprop_ct.py             # NoProp-CT implementation
+│   ├── noprop_fm.py             # NoProp-FM implementation
+│   ├── no_prop_models.py        # Simple model architectures (MLP, ResNet, Transformer)
+│   ├── trainer.py               # Training utilities and trainer class
+│   ├── embeddings/              # Time and positional embeddings
+│   │   ├── embeddings.py        # Time embedding functions
+│   │   ├── noise_schedules.py   # Noise scheduling strategies
+│   │   └── positional_encoding.py # Positional encoding functions
+│   ├── blocks/                  # Building block architectures
+│   │   ├── image_blocks.py      # Image processing blocks (ResNet, EfficientNet, ViT)
+│   │   └── point_cloud_blocks.py # Point cloud processing blocks (PointNet, PointNet2, etc.)
+│   ├── layers/                  # Layer implementations
+│   │   ├── concatsquash.py      # ConcatSquash layer for time conditioning
+│   │   └── image_models.py      # Image model layers
+│   ├── models/                  # Model architectures
+│   │   ├── simple_models.py     # Simple MLP/ResNet/Transformer models
+│   │   └── vit_crn.py          # Vision Transformer CRN
+│   └── utils/                   # Utility functions
+│       ├── jacobian_utils.py    # Jacobian computation utilities
+│       ├── ode_integration.py   # ODE integration methods
+│       └── tensor_field_integration.py # Tensor field integration
+├── examples/                    # Example scripts
+│   ├── two_moons.py            # Two moons dataset example
+│   └── two_moons_swapped.py    # Swapped two moons example
+├── docs/                       # Documentation
+│   ├── API_REFERENCE.md        # API documentation
+│   └── NoPropCT_Forward_Fix.pdf # Technical notes
+└── artifacts/                  # Generated outputs (plots, results)
+```
+
+### Import Structure
+
+The new structure uses clean, logical imports:
+
+```python
+# Core NoProp implementations
+from src.noprop_ct import NoPropCT
+from src.noprop_fm import NoPropFM
+
+# Model architectures
+from src.no_prop_models import SimpleMLP, SimpleResNet, SimpleTransformer
+from src.models.simple_models import SimpleMLP, SimpleResNet, SimpleTransformer
+
+# Noise schedules and embeddings
+from src.embeddings.noise_schedules import LinearNoiseSchedule, CosineNoiseSchedule
+from src.embeddings.embeddings import sinusoidal_time_embedding, fourier_time_embedding
+
+# Building blocks
+from src.blocks.image_blocks import ResNet50, EfficientNetB0, VisionTransformer
+from src.blocks.point_cloud_blocks import PointNet, PointNet2, PointCNN
+
+# Utilities
+from src.utils.ode_integration import euler_step, heun_step, rk4_step
+from src.utils.jacobian_utils import trace_jacobian, compute_divergence
+
+# Training
+from src.trainer import NoPropTrainer
 ```
 
 ## Architecture
@@ -127,9 +219,8 @@ The implementation uses a **gamma parameterization** for numerical stability:
 
 Each NoProp variant implements a different training strategy:
 
-1. **NoProp-DT**: Time steps are associated with a single Resnet layer and each layer learns to denoise independently
-2. **NoProp-CT**: Learns a vector field `dz/dt = f(z, x, t)` for continuous-time denoising via neural ODEs using SNR weighted loss
-3. **NoProp-FM**: Learns a vector field `dz/dt = f(z, x, t)` for continuous-time denoising via neural ODEs using a simple field matching loss
+1. **NoProp-CT**: Learns a vector field `dz/dt = f(z, x, t)` for continuous-time denoising via neural ODEs using SNR weighted loss
+2. **NoProp-FM**: Learns a vector field `dz/dt = f(z, x, t)` for continuous-time denoising via neural ODEs using a simple field matching loss
 
 ### Key Implementation Details
 
@@ -164,6 +255,12 @@ The implementation includes several key optimizations:
 - Output shape: `(num_steps+1,) + batch_shape + tensor_shape` for trajectories
 - Use when working with non-vector data (e.g., images, 3D tensors)
 
+### Conditional Integration Optimization
+- **Smart Integration Selection**: Automatically chooses the most efficient integration method based on `z_shape` complexity
+- **1D z_shapes** (e.g., `(10,)`, `(2,)`): Uses optimized `integrate_ode` for maximum performance
+- **Multi-dimensional z_shapes** (e.g., `(10, 5)`, `(8, 4, 2)`): Uses `integrate_tensor_ode` for proper tensor handling
+- **Performance Benefit**: Reduces overhead for common 1D cases while maintaining full compatibility with arbitrary tensor shapes
+
 ### Memory Efficiency
 - Batch size inference from input tensors
 - Static argument optimization to prevent recompilation
@@ -178,7 +275,7 @@ Continuous-time NoProp with neural ODE integration.
 
 ```python
 noprop_ct = NoPropCT(
-    target_dim=2,
+    z_shape=(2,),
     model=SimpleMLP(hidden_dim=64),
     noise_schedule=CosineNoiseSchedule(),
     num_timesteps=20,
@@ -188,31 +285,18 @@ noprop_ct = NoPropCT(
 ```
 
 **Key Methods:**
-- `predict(params, x, output_dim, num_steps, integration_method="euler", output_type="end_point")`: Generate predictions
-- `predict_trajectory(params, x, integration_method, output_dim, num_steps)`: Generate full trajectories (wrapper around `predict`)
+- `predict(params, x, num_steps, integration_method="euler", output_type="end_point", key=None)`: Generate predictions
+- `predict_trajectory(params, x, num_steps, integration_method="euler", key=None)`: Generate full trajectories (wrapper around `predict`)
 - `compute_loss(params, x, target, key)`: Compute SNR-weighted loss
 - `train_step(params, opt_state, x, target, key, optimizer)`: Single training step
 - `sample_zt(key, params, z_target, t)`: Sample noisy targets from backward process
-
-#### `NoPropDT`
-Discrete-time NoProp implementation.
-
-```python
-noprop_dt = NoPropDT(
-    target_dim=2,
-    model=SimpleMLP(hidden_dim=64),
-    num_timesteps=10,
-    noise_schedule=LinearNoiseSchedule(),
-    eta=0.1
-)
-```
 
 #### `NoPropFM`
 Flow matching NoProp implementation.
 
 ```python
 noprop_fm = NoPropFM(
-    target_dim=2,
+    z_shape=(2,),
     model=SimpleMLP(hidden_dim=64),
     num_timesteps=20,
     integration_method="euler",
@@ -222,8 +306,8 @@ noprop_fm = NoPropFM(
 ```
 
 **Key Methods:**
-- `predict(params, x, output_dim, num_steps, integration_method="euler", output_type="end_point")`: Generate predictions
-- `predict_trajectory(params, x, integration_method, output_dim, num_steps)`: Generate full trajectories (wrapper around `predict`)
+- `predict(params, x, num_steps, integration_method="euler", output_type="end_point", key=None)`: Generate predictions
+- `predict_trajectory(params, x, num_steps, integration_method="euler", key=None)`: Generate full trajectories (wrapper around `predict`)
 - `compute_loss(params, x, target, key)`: Compute flow matching loss
 - `train_step(params, opt_state, x, target, key, optimizer)`: Single training step
 - `trace_jacobian(params, z, x, t)`: Compute Jacobian trace for divergence
@@ -259,7 +343,7 @@ model = ConditionalResNet(
 ### Noise Schedules
 
 ```python
-from jax_noprop.noise_schedules import (
+from src.embeddings.noise_schedules import (
     LinearNoiseSchedule, 
     CosineNoiseSchedule, 
     SigmoidNoiseSchedule,
@@ -297,14 +381,15 @@ schedule = LearnableNoiseSchedule(
 import jax
 import jax.numpy as jnp
 import optax
-from jax_noprop.models import SimpleMLP
-from jax_noprop.noprop_ct import NoPropCT
-from jax_noprop.noise_schedules import CosineNoiseSchedule
+from src.no_prop_models import SimpleMLP
+from src.noprop_ct import NoPropCT
+from src.embeddings.noise_schedules import CosineNoiseSchedule
 
 # Create model and NoProp instance
-model = SimpleMLP(hidden_dim=64)
+model = SimpleMLP(hidden_dims=(64, 64))
 noprop_ct = NoPropCT(
-    target_dim=2,
+    z_shape=(2,),
+    x_shape=(2,),
     model=model,
     noise_schedule=CosineNoiseSchedule(),
     num_timesteps=20
@@ -385,7 +470,7 @@ The NoProp-CT loss is weighted by the SNR derivative and normalized by batch mea
 L = E[SNR'(t) * ||model(z_t, x, t) - target||²] / E[SNR'(t)] + λ * E[||model(z_t, x, t)||²]
 ```
 
-This ensures the model learns to denoise more aggressively when the SNR changes rapidly, while the normalization prevents large SNR' values from dominating the learning rate.
+This ensures the model learns to denoise more aggressively when the SNR changes rapidly, while the normalization prevents large SNR' values from destabilizing learning allowing for the use of typical learning rate.
 
 ### Hyperparameters
 
@@ -393,12 +478,10 @@ The paper suggests the following hyperparameters:
 
 | Dataset | Method | Epochs | Learning Rate | Batch Size | Timesteps | Reg Weight |
 |---------|--------|--------|---------------|------------|-----------|------------|
-| MNIST | NoProp-DT | 100 | 1e-3 | 128 | 10 | - |
-| MNIST | NoProp-CT | 100 | 1e-3 | 128 | 1000 | 1.0 |
-| MNIST | NoProp-FM | 100 | 1e-3 | 128 | 1000 | - |
-| CIFAR-10 | NoProp-DT | 150 | 1e-3 | 128 | 10 | - |
-| CIFAR-10 | NoProp-CT | 500 | 1e-3 | 128 | 1000 | 1.0 |
-| CIFAR-10 | NoProp-FM | 500 | 1e-3 | 128 | 1000 | - |
+| MNIST | NoProp-CT | 100 | 1e-3 | 128 | 20 | 1.0 |
+| MNIST | NoProp-FM | 100 | 1e-3 | 128 | 20 | - |
+| CIFAR-10 | NoProp-CT | 500 | 1e-3 | 128 | 20 | 1.0 |
+| CIFAR-10 | NoProp-FM | 500 | 1e-3 | 128 | 20 | - |
 
 ## Implementation Details
 
@@ -433,6 +516,7 @@ The noise schedules are implemented as `nn.Module` instances with the following 
 5. **Shape Consistency**: Always verify that model output has the same shape as input `z`
 6. **JIT Optimization**: The implementation is already highly optimized - no additional JIT needed
 7. **NoProp-FM**: Use for applications where inference speed is critical, as it's faster than NoProp-CT for prediction
+8. **Tensor Shapes**: The conditional integration optimization automatically handles both 1D and multi-dimensional `z_shapes` efficiently
 
 ## Performance
 
@@ -442,6 +526,7 @@ The implementation achieves excellent performance with the optimizations:
 - **JIT Compilation**: 1000x+ speedups on critical methods
 - **Memory Efficiency**: Batch size inference and static argument optimization
 - **ODE Integration**: Scan-based integration with multiple methods (Euler, Heun, RK4, Adaptive)
+- **Conditional Integration**: Automatic optimization for 1D vs multi-dimensional tensor shapes
 - **Runtime Comparison**: NoProp-CT is 1.5x faster for training, NoProp-FM is 2.8x faster for inference
 
 ## Examples

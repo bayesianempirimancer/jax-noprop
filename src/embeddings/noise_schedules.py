@@ -7,7 +7,7 @@ This module provides different noise scheduling strategies used in the NoProp pa
 - Sigmoid schedule
 """
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from typing import Any, Dict, Optional, Tuple
 
 import jax

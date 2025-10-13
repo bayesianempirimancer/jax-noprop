@@ -10,12 +10,14 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import jax.random as jr
 import flax.linen as nn
 from scipy.integrate import odeint
 import optax
 
-from .noise_schedules import NoiseSchedule, LearnableNoiseSchedule, CosineNoiseSchedule, LinearNoiseSchedule
+from .embeddings.noise_schedules import NoiseSchedule, LearnableNoiseSchedule, CosineNoiseSchedule, LinearNoiseSchedule
 from .utils.ode_integration import integrate_ode
+from .utils.jacobian_utils import trace_jacobian
 
 
 class NoPropCT(nn.Module):
@@ -26,13 +28,35 @@ class NoPropCT(nn.Module):
     that transforms noisy targets to clean ones over continuous time.
     """
     
-    target_dim: int  # Dimension of target z
+    z_shape: Tuple[int, ...]  # Shape of target z (excluding batch dimensions)
+    x_shape: Tuple[int, ...]  # Shape of input x (excluding batch dimensions)
     model: nn.Module
     noise_schedule: NoiseSchedule = LinearNoiseSchedule()
     num_timesteps: int = 20
     integration_method: str = "euler"  # "euler" or "heun"
     reg_weight: float = 0.0  # Hyperparameter from the paper
-        
+
+    def _get_z_dim(self) -> int:
+        """Calculate the flattened dimension from z_shape."""
+        z_dim = 1
+        for dim in self.z_shape:
+            z_dim *= dim
+        return z_dim
+
+    def _flatten_z(self, z: jnp.ndarray) -> jnp.ndarray:
+        """Flatten the z tensor."""
+        if len(self.z_shape)>1:
+            return z.reshape(z.shape[:-1] + (self._get_z_dim(),))
+        else:
+            return z
+
+    def _unflatten_z(self, z: jnp.ndarray) -> jnp.ndarray:
+        """Unflatten the z tensor."""
+        if len(self.z_shape)>1:
+            return z.reshape(z.shape[:-1] + self.z_shape)
+        else:
+            return z
+
     @nn.compact
     def __call__(
         self, 
@@ -46,27 +70,29 @@ class NoPropCT(nn.Module):
         During training, we use apply(params, method=...) to call specific methods.
         
         Args:
-            z: Noisy target [batch_size, z_dim]
-            x: Input data [batch_size, height, width, channels]
-            t: Time step [batch_size]
+            z: Noisy target [batch_shape + z_shape]
+            x: Input data [batch_shape, ...]
+            t: Time step [batch_shape]
             
         Returns:
-            Model output [batch_size, z_dim]
+            Model output [batch_shape + z_shape]
         """
         # Get model output
+        z = self._unflatten_z(z)
         model_output = self._get_model_output(z, x, t)
+        model_output = self._flatten_z(model_output)
         gamma_t, gamma_prime_t = self._get_gamma_gamma_prime(t)
         
         # Compute alpha_t and tau_inverse from gamma values using utility functions
         alpha_t = self.noise_schedule.get_alpha_from_gamma(gamma_t)
         tau_inverse = self.noise_schedule.get_tau_inverse_from_gamma(gamma_t, gamma_prime_t)
         
-        # Reshape for broadcasting: [batch_size] -> [batch_size, 1]
-        alpha_t = alpha_t[..., None]
-        tau_inverse = tau_inverse[..., None]
-        
-        # Compute dz/dt = tau_inverse(t) * (sqrt(alpha(t))*target - (1+alpha(t))/2*z)
-        return tau_inverse * (jnp.sqrt(alpha_t) * model_output - (1 + alpha_t) / 2.0 * z)
+        # Broadcast to the correct shape for tensor operations
+        batch_shape = x.shape[:-len(self.x_shape)]
+                
+        # Compute dz/dt = tau_inverse(t) * (sqrt(alpha(t))*model_output - (1+alpha(t))/2*z)
+        # The model_output should predict the target, so we use it in place of target
+        return tau_inverse[...,None] * (jnp.sqrt(alpha_t[...,None]) * model_output - 0.5*(1 + alpha_t[...,None]) * z)
     
     @nn.compact
     def _get_model_output(
@@ -109,7 +135,7 @@ class NoPropCT(nn.Module):
         params: Dict[str, Any],
         x: jnp.ndarray,
         target: jnp.ndarray,
-        key: jax.random.PRNGKey
+        key: jr.PRNGKey
     ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
         """Compute the NoProp-CT loss according to the paper and PyTorch implementation.
         
@@ -120,36 +146,32 @@ class NoPropCT(nn.Module):
         
         Args:
             params: Model parameters
-            x: Input data [batch_size, height, width, channels]
-            target: Clean target [batch_size, num_classes]
+            x: Input data [batch_shape, ...]
+            target: Clean target [batch_shape + z_shape]
             key: Random key for sampling t and z_t
             
         Returns:
             Tuple of (loss, metrics)
         """
         # Infer batch size from input tensor
-        batch_shape = x.shape[:-1]
-        
+        batch_shape = x.shape[:-len(self.x_shape)]
+        target = self._flatten_z(target)
+
         # Sample random timesteps
-        key, t_key = jax.random.split(key)
-        t = jax.random.uniform(t_key, batch_shape, minval=0.0, maxval=1.0)
+        key, t_key, z_t_key = jr.split(key, 3)
+        t = jr.uniform(t_key, batch_shape, minval=0.0, maxval=1.0)
+
+        gamma_t, gamma_prime_t = self.apply(params, t, method=self._get_gamma_gamma_prime)
+        alpha_t = self.noise_schedule.get_alpha_from_gamma(gamma_t)
+        z_t = jnp.sqrt(alpha_t[...,None]) * target + jnp.sqrt(1.0 - alpha_t[...,None]) * jr.normal(key, target.shape)
         
         # Sample z_t from backward process
-        key, noise_key = jax.random.split(key)
-        z_t = self.sample_zt(noise_key, params, target, t)
-        # Get model output using apply with method
         model_output = self.apply(params, z_t, x, t, method=self._get_model_output)
-        
-        # Get gamma values using apply with method
-        gamma_t, gamma_prime_t = self.apply(params, t, method=self._get_gamma_gamma_prime)
-        
+
         # Compute SNR and SNR derivative from gamma values
         snr = jnp.exp(gamma_t)  # SNR = exp(γ(t))
         snr_prime = gamma_prime_t * snr  # SNR' = γ'(t) * exp(γ(t))
-        
-        # Reshape for broadcasting: [batch_size] -> [batch_size, 1]
-        snr_prime = snr_prime[..., None]
-        
+
         # Main loss: SNR-weighted MSE between model output and noisy input
         # This follows the NoProp paper where loss is weighted by SNR derivative
         reg_loss = jnp.mean(model_output ** 2)
@@ -157,7 +179,7 @@ class NoPropCT(nn.Module):
         mse = jnp.mean(squared_error)
 
         # Compute SNR-weighted loss
-        snr_weighted_loss = jnp.mean(snr_prime * squared_error)
+        snr_weighted_loss = jnp.mean(snr_prime[...,None] * squared_error)
         
         # Normalize by expected SNR_prime to stabilize learning rate
         expected_snr_prime = jnp.mean(snr_prime)
@@ -178,48 +200,17 @@ class NoPropCT(nn.Module):
         }
         
         return total_loss, metrics
-    
-    def sample_zt(
-        self,
-        key: jax.random.PRNGKey,
-        params: Dict[str, Any],
-        z_target: jnp.ndarray,
-        t: jnp.ndarray
-    ) -> jnp.ndarray:
-        """Sample z_t from the backward process distribution.
         
-        z_t ~ N(sqrt(ᾱ(t)) * z_target, (1-ᾱ(t)) * I)
-        
-        This is equivalent to:
-        z_t = sqrt(ᾱ(t)) * z_target + sqrt(1-ᾱ(t)) * ε
-        where ε ~ N(0, I)
-        
-        Args:
-            key: Random key
-            z_target: Target/clean data (z_1) [batch_size, ...]
-            t: Time values [batch_size]
-            params: Model parameters
-            
-        Returns:
-            Sampled z_t [batch_size, ...]
-        """
-        # Get gamma_t and compute alpha_t from it
-        gamma_t, _ = self.apply(params, t, method=self._get_gamma_gamma_prime)
-        alpha_t = self.noise_schedule.get_alpha_from_gamma(gamma_t)
-        
-        # Compute z_t = sqrt(ᾱ(t)) * z_target + sqrt(1-ᾱ(t)) * ε
-        alpha_t = alpha_t[..., None]
-        return jnp.sqrt(alpha_t) * z_target + jnp.sqrt(1.0 - alpha_t) * jax.random.normal(key, z_target.shape)
-    
-    @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))  # self, output_dim, num_steps, integration_method, output_type are static arguments    
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))  # self, num_steps, integration_method, output_type, with_logp are static arguments    
     def predict(
         self,
         params: Dict[str, Any],
         x: jnp.ndarray,
-        output_dim: int,
         num_steps: int,
         integration_method: str = "euler",
-        output_type: str = "end_point"
+        output_type: str = "end_point",
+        with_logp: bool = False,
+        key: jr.PRNGKey = None
     ) -> jnp.ndarray:
         """Generate predictions using the trained NoProp-CT neural ODE.
         
@@ -229,76 +220,71 @@ class NoPropCT(nn.Module):
         
         Args:
             params: Model parameters
-            x: Input data [batch_size, height, width, channels]
-            output_dim: Output dimension
+            x: Input data [batch_shape, ...]
             num_steps: Number of integration steps
             integration_method: Integration method to use ("euler", "heun", "rk4", "adaptive")
             output_type: Type of output ("end_point" or "trajectory")
+            key: Random key
             
         Returns:
-            If output_type="end_point": Final prediction [batch_size, output_dim]
-            If output_type="trajectory": Full trajectory [batch_size, num_steps+1, output_dim]
+            If output_type="end_point": Final prediction [batch_shape + z_shape]
+            If output_type="trajectory": Full trajectory [num_steps+1, batch_shape + z_shape]
         """
         # Disable gradient tracking through parameters for inference
         params_no_grad = jax.lax.stop_gradient(params)
         
         # Infer batch size from input tensor
-        batch_shape = x.shape[:-1]
+        batch_shape = x.shape[:-len(self.x_shape)]
+        if key is None:
+            z0 = jnp.zeros(batch_shape + self.z_shape)
+        else:
+            z0 = jr.normal(key, batch_shape + self.z_shape)  # check for sensitivity to initial conditions
         
-        # Start with zeros at t=0
-        z0 = jnp.zeros(batch_shape + (output_dim,))
-        
-        # Create a static vector field function to avoid recompilation
-        def vector_field(params, z, x, t):
-            return self.dz_dt(params, z, x, t)
-        
-        # Use the main integrate_ode function which handles method dispatch
-        result = integrate_ode(
-            vector_field=vector_field,
-            params=params_no_grad,
-            z0=z0,
-            x=x,
-            time_span=(0.0, 1.0),
-            num_steps=num_steps,
-            method=integration_method,
-            output_type=output_type
-        )
+        if with_logp:
+            # Combined vector field for z and logp integration
+            def vector_field(params, state, x, t):
+                z = state[..., :-1]  # All but last dimension
+                logp = state[..., -1:]  # Last dimension
+                dz_dt = self.dz_dt(params, z, x, t)
+                # Compute Jacobian trace for logp evolution
+                # Broadcast t to match batch size
+                t_broadcast = jnp.broadcast_to(t, z.shape[:-1])
+                trace_jac = trace_jacobian(self.dz_dt, params, z, x, t_broadcast)
+                dlogp_dt = trace_jac
+                return jnp.concatenate([dz_dt, dlogp_dt[..., None]], axis=-1)
+            
+            # Initialize combined state
+            logp0 = jnp.zeros(batch_shape)
+            state0 = jnp.concatenate([z0, logp0[..., None]], axis=-1)
+            
+            result = integrate_ode(
+                vector_field=vector_field,
+                params=params_no_grad,
+                z0=state0,
+                x=x,
+                time_span=(0.0, 1.0),
+                num_steps=num_steps,
+                method=integration_method,
+                output_type=output_type
+            )
+        else:
+            # Standard vector field for z only
+            def vector_field(params, z, x, t):
+                return self.dz_dt(params, z, x, t)
+
+            result = integrate_ode(
+                vector_field=vector_field,
+                params=params_no_grad,
+                z0=z0,
+                x=x,
+                time_span=(0.0, 1.0),
+                num_steps=num_steps,
+                method=integration_method,
+                output_type=output_type
+            )
         
         return result
-    
-    def predict_trajectory(
-        self,
-        params: Dict[str, Any],
-        x: jnp.ndarray,
-        integration_method: str,
-        output_dim: int,
-        num_steps: int
-    ) -> jnp.ndarray:
-        """Generate prediction trajectories using the trained NoProp-CT neural ODE.
-        
-        This is a wrapper around the predict method with output_type="trajectory".
-        It integrates the learned vector field from zeros (t=0) to the final prediction (t=1),
-        returning the full time course.
-        
-        Args:
-            params: Model parameters
-            x: Input data [batch_size, height, width, channels]
-            integration_method: Integration method to use ("euler", "heun", "rk4", "adaptive")
-            output_dim: Output dimension
-            num_steps: Number of integration steps
-            
-        Returns:
-            Full trajectory [num_steps + 1, batch_size, output_dim] (includes initial state)
-        """
-        return self.predict(
-            params=params,
-            x=x,
-            output_dim=output_dim,
-            num_steps=num_steps,
-            integration_method=integration_method,
-            output_type="trajectory"
-        )
-    
+
     @partial(jax.jit, static_argnums=(0, 6))  # self and optimizer are static arguments
     def train_step(
         self,
@@ -306,7 +292,7 @@ class NoPropCT(nn.Module):
         opt_state: optax.OptState,
         x: jnp.ndarray,
         target: jnp.ndarray,
-        key: jax.random.PRNGKey,
+        key: jr.PRNGKey,
         optimizer: optax.GradientTransformation
     ) -> Tuple[Dict[str, Any], optax.OptState, jnp.ndarray, Dict[str, jnp.ndarray]]:
         """Single training step for NoProp-CT.
@@ -327,7 +313,7 @@ class NoPropCT(nn.Module):
         (loss, metrics), grads = jax.value_and_grad(
             self.compute_loss, has_aux=True)(params, x, target, key)
         
-        # Update parameters using optimizer
+        # Update parameters using optimizer (outside JIT)
         updates, updated_opt_state = optimizer.update(grads, opt_state, params)
         updated_params = optax.apply_updates(params, updates)
         

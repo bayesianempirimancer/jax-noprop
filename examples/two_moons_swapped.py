@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Two Moons NoProp-CT Example
+Two Moons NoProp-CT Example (Swapped Roles)
 
-This example demonstrates NoProp-CT on the classic two moons dataset:
-- x: 2D coordinates from the two moons dataset
-- z: One-hot encoded labels (which moon the point belongs to)
-- Training: Learn to predict z from x using NoProp-CT
+This example demonstrates NoProp-CT on the classic two moons dataset with SWAPPED roles:
+- x: One-hot encoded labels (which moon the point belongs to) - NOW INPUT
+- z: 2D coordinates from the two moons dataset - NOW TARGET
+- Training: Learn to predict z from x using NoProp-CT (generate positions from labels)
 - Visualization: Show learning curves, MSE, and z(t) trajectories
 
 The two moons dataset is perfect for visualizing:
-1. How the model learns to separate the two classes
+1. How the model learns to generate positions from class labels
 2. The continuous-time evolution of predictions z(t)
 3. The effect of different noise schedules
 """
@@ -44,7 +44,7 @@ from src.embeddings.noise_schedules import (
 
 
 def generate_two_moons_data(n_samples: int = 1000, noise: float = 0.1, random_state: int = 42) -> Tuple[np.ndarray, np.ndarray]:
-    """Generate two moons dataset.
+    """Generate two moons dataset with SWAPPED roles.
     
     Args:
         n_samples: Number of samples to generate
@@ -52,21 +52,21 @@ def generate_two_moons_data(n_samples: int = 1000, noise: float = 0.1, random_st
         random_state: Random seed for reproducibility
         
     Returns:
-        x: 2D coordinates [n_samples, 2]
-        z: One-hot encoded labels [n_samples, 2]
+        x: One-hot encoded labels [n_samples, 2] - NOW INPUT
+        z: 2D coordinates [n_samples, 2] - NOW TARGET
     """
-    x, y = make_moons(n_samples=n_samples, noise=noise, random_state=random_state)
+    positions, y = make_moons(n_samples=n_samples, noise=noise, random_state=random_state)
     
-    # Standardize the features
+    # Standardize the features (positions)
     scaler = StandardScaler()
-    x = scaler.fit_transform(x)
+    z = scaler.fit_transform(positions)
     
     # Convert to 2D binary labels: class 0 = [-1, 1], class 1 = [1, -1]
-    z = np.zeros((n_samples, 2), dtype=np.float32)
-    z[y == 0, 0] = -1.0  # Class 0: [-1, 1]
-    z[y == 0, 1] = 1.0
-    z[y == 1, 0] = 1.0   # Class 1: [1, -1]
-    z[y == 1, 1] = -1.0
+    x = np.zeros((n_samples, 2), dtype=np.float32)
+    x[y == 0, 0] = -1.0  # Class 0: [-1, 1]
+    x[y == 0, 1] = 1.0
+    x[y == 1, 0] = 1.0   # Class 1: [1, -1]
+    x[y == 1, 1] = -1.0
     
     return x.astype(np.float32), z.astype(np.float32)
 
@@ -81,8 +81,8 @@ def train_model(
     model_type: str = "ct",
     noise_schedule_name: str = "cosine",
     learning_rate: float = 1e-3,
-    num_epochs: int = 100,
-    batch_size: int = 64,
+    num_epochs: int = 1000,
+    batch_size: int = 800,  # Use full training dataset as one batch
     random_seed: int = 42,
     sigma_t: float = 0.05,
     reg_weight: float = 0.0
@@ -219,17 +219,15 @@ def train_model(
         epoch_val_losses = [val_loss]
         epoch_val_mses = [val_metrics['mse']]
         
-        # Compute training accuracy for this epoch
-        z_train_pred = noprop_model.predict(params, x_train, num_steps=20)
-        train_pred_classes = (z_train_pred[:, 0] > z_train_pred[:, 1]).astype(int)
-        train_true_classes = (z_train[:, 0] > z_train[:, 1]).astype(int)
-        epoch_train_accuracy = jnp.mean(train_pred_classes == train_true_classes)
+        # For generative modeling, compute position-based accuracy
+        # We'll use a simple distance threshold to determine if generated positions are "correct"
+        z_train_pred = noprop_model.predict(params, x_train, num_steps=10, integration_method="euler", key=key)
+        train_distances = jnp.sqrt(jnp.sum((z_train_pred - z_train) ** 2, axis=1))
+        epoch_train_accuracy = jnp.mean(train_distances < 0.5)  # Threshold for "correct" generation
         
-        # Compute validation accuracy for this epoch
-        z_val_pred = noprop_model.predict(params, x_val, num_steps=20)
-        val_pred_classes = (z_val_pred[:, 0] > z_val_pred[:, 1]).astype(int)
-        val_true_classes = (z_val[:, 0] > z_val[:, 1]).astype(int)
-        epoch_val_accuracy = jnp.mean(val_pred_classes == val_true_classes)
+        z_val_pred = noprop_model.predict(params, x_val, num_steps=10, integration_method="euler", key=key)
+        val_distances = jnp.sqrt(jnp.sum((z_val_pred - z_val) ** 2, axis=1))
+        epoch_val_accuracy = jnp.mean(val_distances < 0.5)  # Threshold for "correct" generation
         
         epoch_val_accuracies = [epoch_val_accuracy]
         
@@ -260,19 +258,17 @@ def train_model(
     
     # Measure inference time for training set
     inference_start = time.time()
-    z_train_pred = noprop_model.predict(params, x_train, num_steps=20)
+    z_train_pred = noprop_model.predict(params, x_train, num_steps=10, integration_method="euler", key=key)
     train_inference_time = time.time() - inference_start
-    train_pred_classes = (z_train_pred[:, 0] > z_train_pred[:, 1]).astype(int)  # z[0] > z[1]
-    train_true_classes = (z_train[:, 0] > z_train[:, 1]).astype(int)  # z[0] > z[1]
-    final_train_accuracy = jnp.mean(train_pred_classes == train_true_classes)
+    train_distances = jnp.sqrt(jnp.sum((z_train_pred - z_train) ** 2, axis=1))
+    final_train_accuracy = jnp.mean(train_distances < 0.5)  # Threshold for "correct" generation
     
     # Measure inference time for validation set
     inference_start = time.time()
-    z_val_pred = noprop_model.predict(params, x_val, num_steps=20)
+    z_val_pred = noprop_model.predict(params, x_val, num_steps=10, integration_method="euler", key=key)
     val_inference_time = time.time() - inference_start
-    val_pred_classes = (z_val_pred[:, 0] > z_val_pred[:, 1]).astype(int)  # z[0] > z[1]
-    val_true_classes = (z_val[:, 0] > z_val[:, 1]).astype(int)  # z[0] > z[1]
-    final_val_accuracy = jnp.mean(val_pred_classes == val_true_classes)
+    val_distances = jnp.sqrt(jnp.sum((z_val_pred - z_val) ** 2, axis=1))
+    final_val_accuracy = jnp.mean(val_distances < 0.5)  # Threshold for "correct" generation
     
     # Calculate total training time
     total_train_time = time.time() - total_train_start
@@ -334,9 +330,12 @@ def predict_trajectories(
     Returns:
         z_trajectories: Predicted trajectories [n_samples, num_timesteps + 1, 2]
     """
+    # Create PRNG key for sampling
+    key = jr.PRNGKey(random_seed)
+    
     # Use predict with output_type="trajectory" to get actual ODE integration trajectories
     z_trajectories = noprop_model.predict(
-        params, x, num_steps=num_timesteps, output_type="trajectory"
+        params, x, num_steps=num_timesteps, integration_method="euler", output_type="trajectory", key=key
     )
     # Transpose from (num_steps+1, batch_size, output_dim) to (batch_size, num_steps+1, output_dim) for plotting
     z_trajectories = jnp.transpose(z_trajectories, (1, 0, 2))
@@ -352,13 +351,18 @@ def plot_results(
     results: Dict[str, Any],
     save_dir: str = "artifacts"
 ):
-    """Plot training results and trajectories.
+    """Plot training results and trajectories for generative flow matching.
+    
+    In the swapped version:
+    - x_train/x_val: One-hot encoded labels [batch, 2] (input)
+    - z_train/z_val: 2D positions [batch, 2] (target)
+    - Model generates 2D positions from labels
     
     Args:
-        x_train: Training features
-        z_train: Training targets
-        x_val: Validation features
-        z_val: Validation targets
+        x_train: Training labels (one-hot encoded)
+        z_train: Training positions (2D coordinates)
+        x_val: Validation labels (one-hot encoded)
+        z_val: Validation positions (2D coordinates)
         results: Training results dictionary
         save_dir: Directory to save plots
     """
@@ -420,52 +424,73 @@ def plot_results(
     plt.savefig(f'{save_dir}/learning_curves_{plot_suffix}.png', dpi=300, bbox_inches='tight')
     plt.close()
     
-    # 2. Plot data and predictions
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    # 2. Plot generative results: True vs Generated Two Moons
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
     
-    # True labels
+    # Colors for the two moons
     colors = ['red', 'blue']
     labels = ['Moon 0', 'Moon 1']
     
-    # Plot true labels (binary: +1 for class 1, -1 for class 0)
-    mask_class0 = z_train[:, 0] == -1  # Class 0 (Moon 0)
-    mask_class1 = z_train[:, 0] == 1   # Class 1 (Moon 1)
-    ax1.scatter(x_train[mask_class0, 0], x_train[mask_class0, 1], c=colors[0], label=labels[0], alpha=0.6, s=20)
-    ax1.scatter(x_train[mask_class1, 0], x_train[mask_class1, 1], c=colors[1], label=labels[1], alpha=0.6, s=20)
+    # Plot 1: True Two Moons Dataset (positions)
+    # Convert one-hot labels back to class indices for coloring
+    true_classes = np.argmax(x_train, axis=1)  # Convert one-hot to class indices
+    for i in range(2):
+        mask = true_classes == i
+        ax1.scatter(z_train[mask, 0], z_train[mask, 1], c=colors[i], label=labels[i], alpha=0.6, s=20)
     
-    ax1.set_xlabel('Feature 1')
-    ax1.set_ylabel('Feature 2')
+    ax1.set_xlabel('X Position')
+    ax1.set_ylabel('Y Position')
     ax1.set_title('True Two Moons Dataset')
     ax1.legend()
     ax1.grid(True)
+    ax1.set_aspect('equal')
     
-    # Predictions
+    # Plot 2: Generated Two Moons (model predictions)
     params = results['params']
     
-    # Get final predictions
+    # Get final predictions - model generates 2D positions from labels
     key = jr.PRNGKey(42)
     num_steps = 40  # Number of integration steps for prediction
-    z_pred = noprop_model.predict(params, x_val, num_steps=num_steps)
+    z_pred = noprop_model.predict(params, x_val, num_steps=num_steps, integration_method="euler", key=key)
     
-    # Convert to class predictions using z[0] > z[1]
-    pred_classes = (z_pred[:, 0] > z_pred[:, 1]).astype(int)  # z[0] > z[1]
-    
+    # Color generated points by their input labels
+    val_classes = np.argmax(x_val, axis=1)  # Convert one-hot to class indices
     for i in range(2):
-        mask = pred_classes == i
-        ax2.scatter(x_val[mask, 0], x_val[mask, 1], c=colors[i], label=f'Predicted {labels[i]}', alpha=0.6, s=20)
+        mask = val_classes == i
+        ax2.scatter(z_pred[mask, 0], z_pred[mask, 1], c=colors[i], label=f'Generated {labels[i]}', alpha=0.6, s=20)
     
-    ax2.set_xlabel('Feature 1')
-    ax2.set_ylabel('Feature 2')
-    ax2.set_title(f'{model_name} Predictions')
+    ax2.set_xlabel('X Position')
+    ax2.set_ylabel('Y Position')
+    ax2.set_title(f'{model_name} Generated Two Moons')
     ax2.legend()
     ax2.grid(True)
+    ax2.set_aspect('equal')
+    
+    # Plot 3: Overlay comparison
+    # Plot true data as background (lighter)
+    for i in range(2):
+        mask = true_classes == i
+        ax3.scatter(z_train[mask, 0], z_train[mask, 1], c=colors[i], alpha=0.3, s=15, label=f'True {labels[i]}')
+    
+    # Plot generated data on top (darker)
+    for i in range(2):
+        mask = val_classes == i
+        ax3.scatter(z_pred[mask, 0], z_pred[mask, 1], c=colors[i], alpha=0.8, s=25, 
+                   marker='x', linewidth=2, label=f'Generated {labels[i]}')
+    
+    ax3.set_xlabel('X Position')
+    ax3.set_ylabel('Y Position')
+    ax3.set_title('True vs Generated Comparison')
+    ax3.legend()
+    ax3.grid(True)
+    ax3.set_aspect('equal')
     
     plt.tight_layout()
     plt.savefig(f'{save_dir}/predictions_{plot_suffix}.png', dpi=300, bbox_inches='tight')
     plt.close()
     
-    # 3. Plot z(t) trajectories for a few samples
-    print("Computing z(t) trajectories...")
+    # 3. Plot 2D position trajectories for a few samples
+    print("Computing 2D position trajectories...")
     z_trajectories = predict_trajectories(noprop_model, params, x_val[:10], num_timesteps=20)
     
     fig, axes = plt.subplots(2, 5, figsize=(20, 8))
@@ -474,26 +499,35 @@ def plot_results(
     for i in range(10):
         ax = axes[i]
         
-        # Plot trajectory - now using actual ODE integration (2D output)
+        # Plot 2D trajectory in position space
         t_points = np.linspace(0, 1, z_trajectories.shape[1])
-        ax.plot(t_points, z_trajectories[i, :, 0], 'b-', label='z[0](t)', linewidth=2)
-        ax.plot(t_points, z_trajectories[i, :, 1], 'g-', label='z[1](t)', linewidth=2)
+        ax.plot(z_trajectories[i, :, 0], z_trajectories[i, :, 1], 'k-', alpha=0.7, linewidth=2, label='Trajectory')
+        
+        # Color trajectory points by time
+        colors = plt.cm.viridis(np.linspace(0, 1, len(t_points)))
+        for j, (x, y) in enumerate(zip(z_trajectories[i, :, 0], z_trajectories[i, :, 1])):
+            ax.scatter(x, y, c=[colors[j]], s=20, alpha=0.8)
         
         # Mark start and end points
-        ax.scatter([0], [z_trajectories[i, 0, 0]], c='red', s=100, marker='o', label='z[0](0)')
-        ax.scatter([0], [z_trajectories[i, 0, 1]], c='orange', s=100, marker='o', label='z[1](0)')
-        ax.scatter([1], [z_trajectories[i, -1, 0]], c='blue', s=100, marker='s', label='z[0](1)')
-        ax.scatter([1], [z_trajectories[i, -1, 1]], c='purple', s=100, marker='s', label='z[1](1)')
+        ax.scatter(z_trajectories[i, 0, 0], z_trajectories[i, 0, 1], c='red', s=150, marker='o', 
+                  label='Start (t=0)', edgecolors='black', linewidth=2)
+        ax.scatter(z_trajectories[i, -1, 0], z_trajectories[i, -1, 1], c='blue', s=150, marker='s', 
+                  label='End (t=1)', edgecolors='black', linewidth=2)
         
-        # True label
-        true_class = int((z_val[i, 0] > z_val[i, 1]))  # z[0] > z[1]
-        ax.set_title(f'Sample {i+1} (True: {labels[true_class]})')
-        ax.set_xlabel('Time t')
-        ax.set_ylabel('z(t)')
+        # True target position
+        ax.scatter(z_val[i, 0], z_val[i, 1], c='green', s=100, marker='*', 
+                  label='True Target', edgecolors='black', linewidth=2)
+        
+        # Input label
+        input_class = np.argmax(x_val[i])  # Convert one-hot to class index
+        ax.set_title(f'Sample {i+1} (Input: {labels[input_class]})')
+        ax.set_xlabel('X Position')
+        ax.set_ylabel('Y Position')
         ax.grid(True)
         ax.legend(fontsize=8)
+        ax.set_aspect('equal')
     
-    plt.suptitle(f'z(t) Trajectories - {model_name}', fontsize=16)
+    plt.suptitle(f'2D Position Trajectories - {model_name}', fontsize=16)
     plt.tight_layout()
     plt.savefig(f'{save_dir}/trajectories_{plot_suffix}.png', dpi=300, bbox_inches='tight')
     plt.close()
@@ -510,42 +544,46 @@ def plot_results(
     for i, sample_idx in enumerate(sample_indices):
         ax = axes[i]
         
-        # Plot the full trajectory in 2D space
-        trajectory_1d = z_trajectories[sample_idx, :, 0]  # [num_timesteps+1] - 1D output
-        t_points = np.linspace(0, 1, len(trajectory_1d))
+        # Plot the full 2D trajectory in position space
+        trajectory_2d = z_trajectories[sample_idx, :, :]  # [num_timesteps+1, 2] - 2D positions
+        t_points = np.linspace(0, 1, len(trajectory_2d))
         
-        # Plot trajectory line
-        ax.plot(t_points, trajectory_1d, 'k-', alpha=0.3, linewidth=1)
+        # Plot trajectory line in 2D position space
+        ax.plot(trajectory_2d[:, 0], trajectory_2d[:, 1], 'k-', alpha=0.3, linewidth=1)
         
-        # Plot trajectory points with color gradient
-        colors = plt.cm.viridis(np.linspace(0, 1, len(trajectory_1d)))
-        for j, (t, z) in enumerate(zip(t_points, trajectory_1d)):
-            ax.scatter(t, z, c=[colors[j]], s=30, alpha=0.7)
+        # Plot trajectory points with color gradient (time-based)
+        colors = plt.cm.viridis(np.linspace(0, 1, len(trajectory_2d)))
+        for j, (x, y) in enumerate(zip(trajectory_2d[:, 0], trajectory_2d[:, 1])):
+            ax.scatter(x, y, c=[colors[j]], s=30, alpha=0.7)
         
         # Mark start and end points
-        ax.scatter(t_points[0], trajectory_1d[0], c='red', s=200, marker='o', 
+        ax.scatter(trajectory_2d[0, 0], trajectory_2d[0, 1], c='red', s=200, marker='o', 
                   label='Start (t=0)', edgecolors='black', linewidth=2)
-        ax.scatter(t_points[-1], trajectory_1d[-1], c='blue', s=200, marker='s', 
+        ax.scatter(trajectory_2d[-1, 0], trajectory_2d[-1, 1], c='blue', s=200, marker='s', 
                   label='End (t=1)', edgecolors='black', linewidth=2)
         
         # Mark intermediate time points
         for t_idx in time_indices[1:-1]:  # Skip start and end
-            if t_idx < len(trajectory_1d):
-                ax.scatter(t_points[t_idx], trajectory_1d[t_idx], 
+            if t_idx < len(trajectory_2d):
+                ax.scatter(trajectory_2d[t_idx, 0], trajectory_2d[t_idx, 1], 
                           c='orange', s=100, marker='^', alpha=0.8)
         
-        # True label
-        true_class = int((z_val[sample_idx, 0] > z_val[sample_idx, 1]))  # z[0] > z[1]
-        ax.set_title(f'Sample {sample_idx+1} (True: {labels[true_class]})', fontsize=12)
-        ax.set_xlabel('Time t')
-        ax.set_ylabel('z(t)')
+        # True target position
+        ax.scatter(z_val[sample_idx, 0], z_val[sample_idx, 1], c='green', s=150, marker='*', 
+                  label='True Target', edgecolors='black', linewidth=2)
+        
+        # Input label
+        input_class = np.argmax(x_val[sample_idx])  # Convert one-hot to class index
+        ax.set_title(f'Sample {sample_idx+1} (Input: {labels[input_class]})', fontsize=12)
+        ax.set_xlabel('X Position')
+        ax.set_ylabel('Y Position')
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=8)
         
         # Set equal aspect ratio
         ax.set_aspect('equal', adjustable='box')
     
-    plt.suptitle(f'2D Trajectory Evolution - {model_name}', fontsize=16)
+    plt.suptitle(f'2D Position Evolution - {model_name}', fontsize=16)
     plt.tight_layout()
     plt.savefig(f'{save_dir}/trajectory_evolution_{plot_suffix}.png', dpi=300, bbox_inches='tight')
     plt.close()
@@ -553,11 +591,11 @@ def plot_results(
 
 def main():
     """Main function to run the two moons example."""
-    print("🌙 Two Moons NoProp Comparison Example")
+    print("🌙 Two Moons NoProp Comparison Example (SWAPPED ROLES)")
     print("=" * 50)
     
     # Generate data
-    print("Generating two moons dataset...")
+    print("Generating two moons dataset with swapped roles...")
     x, z = generate_two_moons_data(n_samples=1000, noise=0.1, random_state=42)
     
     # Split into train/val with random shuffling
@@ -574,6 +612,8 @@ def main():
     print(f"Dataset: {len(x)} samples")
     print(f"Training: {len(x_train)} samples")
     print(f"Validation: {len(x_val)} samples")
+    print(f"Input (x): One-hot encoded labels [batch, 2]")
+    print(f"Target (z): 2D positions [batch, 2]")
     
     # Train both models for runtime comparison
     models_to_train = [
@@ -598,8 +638,8 @@ def main():
                 model_type="ct",
                 noise_schedule_name=model_config["noise_schedule"],
                 learning_rate=1e-3,
-                num_epochs=50,
-                batch_size=32,
+                num_epochs=1000,
+                batch_size=800,  # Use full training dataset as one batch
                 random_seed=42
             )
         elif model_config["type"] == "fm":
@@ -610,8 +650,8 @@ def main():
                 z_val=z_val,
                 model_type="fm",
                 learning_rate=1e-3,
-                num_epochs=50,
-                batch_size=32,
+                num_epochs=1000,
+                batch_size=800,  # Use full training dataset as one batch
                 random_seed=42,
                 sigma_t=model_config["sigma_t"],
                 reg_weight=model_config["reg_weight"]

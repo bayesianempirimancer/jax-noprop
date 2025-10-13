@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import flax.linen as nn
 from flax import struct
 
-from .embeddings import sinusoidal_time_embedding, fourier_time_embedding, linear_time_embedding
+from .embeddings.embeddings import sinusoidal_time_embedding, fourier_time_embedding, linear_time_embedding
 
 
 def swiglu(x: jnp.ndarray) -> jnp.ndarray:
@@ -20,9 +20,6 @@ def swiglu(x: jnp.ndarray) -> jnp.ndarray:
     
     SwiGLU is a gated activation function that combines Swish and GLU:
     SwiGLU(x) = Swish(x) * sigmoid(x)
-    where Swish(x) = x * sigmoid(x)
-    
-    This is equivalent to: x * sigmoid(x) * sigmoid(x) = x * sigmoid(x)^2
     
     Args:
         x: Input tensor
@@ -306,3 +303,73 @@ class SimpleCNN(nn.Module):
         fused_features = x_features + fusion_layer(combined_features)
         
         return fused_features
+
+
+class ImageNoPropModel(nn.Module):
+    """Image-based model for NoProp that handles image-like inputs and outputs.
+    
+    This model is designed to work with z and x that have image-like shapes:
+    - z: [batch_shape, height, width, channels]
+    - x: [batch_shape, height, width, channels] 
+    - t: [batch_shape]
+    
+    The model outputs the same shape as z.
+    """
+    
+    hidden_dims: Tuple[int, ...] = (64, 64, 64)
+    activation: Callable = nn.relu
+    
+    @nn.compact
+    def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
+        """Process image-like inputs and output same shape as z.
+        
+        Args:
+            z: Current state [batch_shape, height, width, channels]
+            x: Input data [batch_shape, height, width, channels]
+            t: Time values [batch_shape]
+            
+        Returns:
+            dz/dt prediction [batch_shape, height, width, channels] - same shape as z
+        """
+        # Get the output shape from z
+        output_shape = z.shape
+        
+        # Time embedding
+        # Assume batch_shape = (x.shape[0],) - just the first dimension
+        batch_size = x.shape[0]
+        
+        # Handle different t shapes that might come from ODE integration
+        if t.ndim == 0:  # scalar
+            t_batch = jnp.full((batch_size,), t)
+        elif t.shape == (batch_size,):  # already correct shape
+            t_batch = t
+        else:  # other shapes - take the first element and broadcast
+            t_batch = jnp.full((batch_size,), t.flatten()[0])
+            
+        t_emb = sinusoidal_time_embedding(t_batch, self.hidden_dims[0])  # (batch_size, hidden_dim)
+        
+        # Process z through conv layers
+        z_features = z
+        for hidden_dim in self.hidden_dims:
+            z_features = nn.Conv(hidden_dim, (3, 3), padding='SAME')(z_features)
+            z_features = self.activation(z_features)
+        
+        # Process x through conv layers  
+        x_features = x
+        for hidden_dim in self.hidden_dims:
+            x_features = nn.Conv(hidden_dim, (3, 3), padding='SAME')(x_features)
+            x_features = self.activation(x_features)
+        
+        # Add time embedding to z_features
+        # t_emb has shape [batch_size, hidden_dim], we need to broadcast it
+        # z_features has shape [batch_size, height, width, hidden_dim]
+        t_emb_expanded = t_emb[:, None, None, :]  # [batch_size, 1, 1, hidden_dim]
+        z_features = z_features + t_emb_expanded
+        
+        # Combine z and x features
+        combined = z_features + x_features
+        
+        # Final conv layer to output same shape as input z
+        output = nn.Conv(output_shape[-1], (3, 3), padding='SAME')(combined)
+        
+        return output

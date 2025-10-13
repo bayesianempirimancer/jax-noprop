@@ -13,7 +13,7 @@ os.environ['JAX_PLATFORM_NAME'] = 'gpu'  # Use GPU instead of CPU
 warnings.filterwarnings('ignore')
 logging.getLogger().setLevel(logging.ERROR)
 
-from trainer import NoPropTrainer
+from .trainer import NoPropTrainer
 from sklearn.datasets import make_moons
 from sklearn.model_selection import train_test_split
 import numpy as np
