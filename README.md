@@ -37,20 +37,6 @@ cd jax-noprop
 pip install -e .
 ```
 
-### From PyPI (Coming Soon)
-
-```bash
-pip install jax-noprop
-```
-
-### Development Installation
-
-```bash
-git clone https://github.com/yourusername/jax-noprop.git
-cd jax-noprop
-pip install -e ".[dev]"
-```
-
 ## Quick Start
 
 ### Basic Usage
@@ -60,7 +46,7 @@ import jax
 import jax.numpy as jnp
 from src.noprop_ct import NoPropCT
 from src.no_prop_models import SimpleConditionalResnet
-from src.embeddings.noise_schedules import CosineNoiseSchedule, LearnableNoiseSchedule
+from src.embeddings.noise_schedules import LinearNoiseSchedule, LearnableNoiseSchedule
 
 # Create a model that takes (z, x, t) inputs and outputs z' with same shape as z
 model = SimpleConditionalResNet(hidden_dims=(64, 64))
@@ -310,7 +296,7 @@ from src.noprop_ct import NoPropCT
 from src.embeddings.noise_schedules import CosineNoiseSchedule
 
 # Create model and NoProp instance
-model = ConditionalResnet(hidden_dims=(64, 64))
+model = SimpleConditionalResnet(hidden_dims=(64, 64))
 noprop_ct = NoPropCT(
     z_shape=(2,),
     x_shape=(2,),
@@ -372,19 +358,12 @@ The continuous-time variant learns a vector field:
 dz/dt = τ⁻¹(t) * (sqrt(α(t)) * u(z,x,t) - (1+α(t))/2 * z)
 ```
 
-where `τ⁻¹(t) = γ'(t)` is the inverse time constant and u(z,x,t) is the output of the neural network.
+where `τ⁻¹(t) = γ'(t)` is the inverse time constant and `u(z,x,t)` is the output of the neural network.  For the
+Flow Matching case the flow is simply the network output, i.e. `dz/dt = u(z,x,t)`
 
 **Critical Side Note**
 
-The original NoProp paper has a minor mathematical error/omission for the continuous time case which 
-affects inference, but not learning.  In practice it seems to have little effect on performance which 
-is probably why it went unnoticed. The ultimate source of the error was likely a slightly cavalier attitude 
-toward small `dt` limits resulting in incorrect calculation of the effective time constant for the forward
-process.  Fortunately the correct dynamics described above do not differ from the original NoProp dynamics 
-very much for  `α(t)` close to 1 so the last few time steps so despite the error the results it gives are 
-very similiar because the last few denoising steps are largely indistinguishable.  See the hastily written 
-and likely error riddled writeup of my derivation of the forward process in the docs directory.  For a 
-more thorough and significantly denser writeup see (https://arxiv.org/pdf/2210.02747)
+The original NoProp paper has a minor mathematical error/omission for the continuous time case which affects inference, but not learning.  In practice it seems to have little effect on performance which is probably why it went unnoticed. The ultimate source of the error was likely a slightly cavalier attitude toward small `dt` limits resulting in incorrect calculation of the effective time constant for the forward process.  Fortunately the correct dynamics described above do not differ from the original NoProp dynamics very much for  `α(t)` close to 1.  As a result the last few time steps of the denoising process are virtually identical.  See the hastily written and likely error riddled writeup of my derivation of the forward process in the docs directory.  For a more thorough and significantly denser writeup see (https://arxiv.org/pdf/2210.02747)
 
 
 #### Loss Function
@@ -396,6 +375,14 @@ L = E[SNR'(t) * ||model(z_t, x, t) - target||²] / E[SNR'(t)] + λ * E[||model(z
 ```
 
 This ensures the model learns to denoise more aggressively when the SNR changes rapidly, while the normalization prevents large SNR' values from destabilizing learning allowing for the use of typical learning rate.
+
+The NoProp-FM loss funtion lacks the SNR weight and simply targets getting the flow right on averate, i.e.
+
+```
+L = E[SNR'(t) * ||model(z_t, x, t) - (target-z_0)||²] / E[SNR'(t)] + λ * E[||model(z_t, x, t)||²]
+```
+
+where `z_0` is a randomly selected initial condition and `z_t` is sampled from the backward process.  Note that unlike the CT case, in the FM case the dynamics are simply given by 'dz/dt = model(z_t,x,t)'
 
 ## Implementation Details
 
