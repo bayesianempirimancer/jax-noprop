@@ -7,8 +7,9 @@ from .ode_integration import integrate_ode, euler_step, heun_step, rk4_step, ada
 
 __all__ = [
     "trace_jacobian",
-    "compute_jacobian_diagonal", 
-    "compute_divergence",
+    "jacobian_diagonal", 
+    "divergence",
+    "grad_potential",
     "compute_log_det_jacobian",
     "integrate_ode",
     "euler_step",

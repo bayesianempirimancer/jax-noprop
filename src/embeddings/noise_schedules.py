@@ -12,8 +12,8 @@ from typing import Any, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.special
 import flax.linen as nn
-from flax import struct
 
 
 class NoiseSchedule(nn.Module, ABC):
@@ -190,14 +190,14 @@ class LinearNoiseSchedule(NoiseSchedule):
         """
         # Modified linear schedule to avoid boundary singularities
         # ᾱ(t) = 0.05 + 0.9*t ranges from 0.05 to 0.95
-        alpha_t = 0.05 + 0.9 * t
-        alpha_prime_t = 0.9
+        alpha_t = 0.01 + 0.98 * t
+        alpha_prime_t = 0.98
         
         # Clip to avoid numerical issues
-        alpha_t_clipped = jnp.clip(alpha_t, 1e-3, 1.0 - 1e-3)
         
-        gamma_t = jax.scipy.special.logit(alpha_t_clipped)
-        gamma_prime_t = alpha_prime_t / (alpha_t_clipped * (1.0 - alpha_t_clipped))
+        # gamma_t = jnp.log(alpha_t/(1.0 - alpha_t))
+        gamma_t = jax.scipy.special.logit(alpha_t)
+        gamma_prime_t = alpha_prime_t / (alpha_t * (1.0 - alpha_t))
         
         return gamma_t, gamma_prime_t
 
@@ -222,15 +222,15 @@ class CosineNoiseSchedule(NoiseSchedule):
         """
         # Modified cosine schedule to avoid boundary singularities
         # ᾱ(t) = 0.5 * (1 + sin(π * (t - 0.5))) ranges from ~0.05 to ~0.95
-        alpha_t = 0.5 * (1.0 + jnp.sin(jnp.pi * (t - 0.5)))
-        alpha_prime_t = 0.5 * jnp.pi * jnp.cos(jnp.pi * (t - 0.5))
+        alpha_t = 0.01 + 0.98 * jnp.sin(0.5*jnp.pi*t)
+        alpha_prime_t = 0.98 * 0.5 * jnp.pi * jnp.cos(0.5*jnp.pi * t)
         
         # Clip to avoid numerical issues
-        alpha_t_clipped = jnp.clip(alpha_t, 1e-3, 1.0 - 1e-3)
         
-        gamma_t = jax.scipy.special.logit(alpha_t_clipped)
-        gamma_prime_t = alpha_prime_t / (alpha_t_clipped * (1.0 - alpha_t_clipped))
-        
+        # gamma_t = jnp.log(alpha_t/(1.0 - alpha_t))
+        gamma_t = jax.scipy.special.logit(alpha_t)
+        gamma_prime_t = alpha_prime_t / (alpha_t * (1.0 - alpha_t))
+
         return gamma_t, gamma_prime_t
 
 
@@ -309,7 +309,7 @@ class LearnableNoiseSchedule(NoiseSchedule):
     
     hidden_dims: Tuple[int, ...] = (64, 64)  # Hidden dimensions for the neural network
     monotonic_network: nn.Module = SimpleMonotonicNetwork
-    gamma_range: Tuple[float, float] = (-3.0, 3.0)
+    gamma_range: Tuple[float, float] = (-4.0, 4.0)
         
     @nn.compact
     def __call__(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:

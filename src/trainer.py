@@ -33,7 +33,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from .noprop_ct import NoPropCT
 from .noprop_fm import NoPropFM
-from .no_prop_models import SimpleMLP
+from .no_prop_models import SimpleConditionalResnet
 from .embeddings.noise_schedules import LinearNoiseSchedule, CosineNoiseSchedule
 
 
@@ -78,14 +78,14 @@ class NoPropTrainer:
             self.model = NoPropCT(
                 z_shape=(target_dim,),
                 x_shape=(input_dim,),
-                model=SimpleMLP(hidden_dims=hidden_dims),
+                model=SimpleConditionalResnet(hidden_dims=hidden_dims),
                 noise_schedule=noise_sched
             )
         elif model_type == "fm":
             self.model = NoPropFM(
                 z_shape=(target_dim,),
                 x_shape=(input_dim,),
-                model=SimpleMLP(hidden_dims=hidden_dims),
+                model=SimpleConditionalResnet(hidden_dims=hidden_dims),
                 sigma_t=sigma_t
             )
         else:
@@ -199,7 +199,7 @@ class NoPropTrainer:
                 # Training step using the model's built-in train_step
                 key, subkey = jr.split(key)
                 self.params, self.opt_state, loss, metrics = self.model.train_step(
-                    self.params, self.opt_state, x_batch, z_batch, subkey, self.optimizer
+                    self.params, x_batch, z_batch, self.opt_state, self.optimizer, subkey
                 )
                 
                 epoch_train_losses.append(loss)

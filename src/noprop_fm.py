@@ -254,16 +254,17 @@ class NoPropFM(nn.Module):
                 output_type=output_type
             )        
 
-    @partial(jax.jit, static_argnums=(0, 6))  # self and optimizer are static arguments
+    @partial(jax.jit, static_argnums=(0, 5))  # self and optimizer are static arguments
     def train_step(
         self,
         params: Dict[str, Any],
-        opt_state: optax.OptState,
         x: jnp.ndarray,
         target: jnp.ndarray,
-        key: jax.random.PRNGKey,
-        optimizer: optax.GradientTransformation
+        opt_state: optax.OptState,
+        optimizer: optax.GradientTransformation,
+        key: jr.PRNGKey,
     ) -> Tuple[Dict[str, Any], optax.OptState, jnp.ndarray, Dict[str, jnp.ndarray]]:
+
         """Single training step for NoProp-FM.
         
         Args:

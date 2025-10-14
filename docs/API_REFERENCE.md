@@ -12,8 +12,8 @@ from src.noprop_ct import NoPropCT
 from src.noprop_fm import NoPropFM
 
 # Model architectures
-from src.no_prop_models import SimpleMLP, SimpleResNet, SimpleTransformer
-from src.models.simple_models import SimpleMLP, SimpleResNet, SimpleTransformer
+from src.no_prop_models import SimpleConditionalResnet, SimpleResNet, SimpleTransformer
+from src.models.simple_models import SimpleConditionalResnet, SimpleResNet, SimpleTransformer
 
 # Noise schedules and embeddings
 from src.embeddings.noise_schedules import (
@@ -34,7 +34,7 @@ from src.blocks.point_cloud_blocks import PointNet, PointNet2, PointCNN
 
 # Utilities
 from src.utils.ode_integration import euler_step, heun_step, rk4_step
-from src.utils.jacobian_utils import trace_jacobian, compute_divergence
+from src.utils.jacobian_utils import trace_jacobian, divergence
 
 # Training
 from src.trainer import NoPropTrainer
@@ -337,12 +337,12 @@ def dz_dt(
 
 ## Model Architectures
 
-### SimpleMLP
+### SimpleConditionalResnet
 
 Lightweight MLP for NoProp-CT, designed for simple datasets like two moons.
 
 ```python
-class SimpleMLP(nn.Module):
+class SimpleConditionalResnet(nn.Module):
     def __init__(self, hidden_dim: int = 64)
 ```
 
@@ -564,11 +564,11 @@ def trace_jacobian(
 - Avoids computing the full Jacobian matrix for memory efficiency
 - Returns `batch_shape + (target_dim,)` instead of `batch_shape + (target_dim,) + batch_shape + (target_dim,)`
 
-#### `compute_divergence(apply_fn, params, z, x, t)`
+#### `divergence(apply_fn, params, z, x, t)`
 Compute the divergence of the vector field (alias for `trace_jacobian`).
 
 ```python
-def compute_divergence(
+def divergence(
     apply_fn: Callable,
     params: Dict[str, Any],
     z: jnp.ndarray,
@@ -577,11 +577,11 @@ def compute_divergence(
 ) -> jnp.ndarray
 ```
 
-#### `compute_jacobian_diagonal(apply_fn, params, z, x, t)`
+#### `jacobian_diagonal(apply_fn, params, z, x, t)`
 Compute the diagonal elements of the Jacobian matrix.
 
 ```python
-def compute_jacobian_diagonal(
+def jacobian_diagonal(
     apply_fn: Callable,
     params: Dict[str, Any],
     z: jnp.ndarray,
@@ -666,11 +666,11 @@ else:
 import jax
 import jax.numpy as jnp
 from jax_noprop import NoPropCT
-from jax_noprop.models import SimpleMLP
+from jax_noprop.models import SimpleConditionalResnet
 from jax_noprop.noise_schedules import CosineNoiseSchedule
 
 # Create model and NoProp instance
-model = SimpleMLP(hidden_dim=64)
+model = SimpleConditionalResnet(hidden_dims=(64,))
 noprop_ct = NoPropCT(
     z_shape=(2,),
     model=model,
@@ -723,10 +723,10 @@ import jax
 import jax.numpy as jnp
 import optax
 from jax_noprop import NoPropFM
-from jax_noprop.models import SimpleMLP
+from jax_noprop.models import SimpleConditionalResnet
 
 # Create model and NoProp-FM instance
-model = SimpleMLP(hidden_dim=64)
+model = SimpleConditionalResnet(hidden_dims=(64,))
 noprop_fm = NoPropFM(
     z_shape=(2,),
     model=model,

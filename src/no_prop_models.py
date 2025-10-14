@@ -32,18 +32,18 @@ def swiglu(x: jnp.ndarray) -> jnp.ndarray:
     return nn.swish(x1) * nn.sigmoid(x2)
 
 
-class SimpleMLP(nn.Module):
-    """Simple 4-layer MLP for NoProp-CT.
+class SimpleConditionalResnet(nn.Module):
+    """Simple Conditional ResNet for NoProp-CT.
     
     This is a lightweight model that concatenates z, x, and t_embed
-    and processes them through 4 dense layers.
+    and processes them through multiple dense layers with residual connections.
     """
     hidden_dims: Tuple[int, ...] = (64,)
     activation: Callable = jax.nn.swish
     
     @nn.compact
     def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
-        """Forward pass of the simple MLP.
+        """Forward pass of the simple conditional ResNet.
         
         Args:
             z: Current state [batch_size, z_dim]

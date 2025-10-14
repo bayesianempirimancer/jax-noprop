@@ -285,16 +285,17 @@ class NoPropCT(nn.Module):
         
         return result
 
-    @partial(jax.jit, static_argnums=(0, 6))  # self and optimizer are static arguments
+    @partial(jax.jit, static_argnums=(0, 5))  # self and optimizer are static arguments
     def train_step(
         self,
         params: Dict[str, Any],
-        opt_state: optax.OptState,
         x: jnp.ndarray,
         target: jnp.ndarray,
+        opt_state: optax.OptState,
+        optimizer: optax.GradientTransformation,
         key: jr.PRNGKey,
-        optimizer: optax.GradientTransformation
     ) -> Tuple[Dict[str, Any], optax.OptState, jnp.ndarray, Dict[str, jnp.ndarray]]:
+
         """Single training step for NoProp-CT.
         
         Args:
@@ -307,7 +308,7 @@ class NoPropCT(nn.Module):
             
         Returns:
             Tuple of (updated_params, updated_opt_state, loss, metrics)
-        """
+    """
         # Compute loss and gradients (t and z_t are sampled inside compute_loss)
         # compute_loss is already JIT-compiled, so this will be fast
         (loss, metrics), grads = jax.value_and_grad(

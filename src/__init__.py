@@ -9,7 +9,7 @@ This package provides implementations of the NoProp variants:
 from .noprop_ct import NoPropCT
 from .noprop_fm import NoPropFM
 from .no_prop_models import (
-    SimpleMLP,
+    SimpleConditionalResnet,
     ResNetBlock,
     ResNet,
     ConditionalResNet,
@@ -45,8 +45,9 @@ from .utils.ode_integration import (
 # Training utilities are handled by the built-in train_step methods in the models
 from .utils.jacobian_utils import (
     trace_jacobian,
-    compute_jacobian_diagonal,
-    compute_divergence,
+    jacobian_diagonal,
+    divergence,
+    grad_potential,
     compute_log_det_jacobian,
 )
 # Note: VitSmallFeatureExtractor is not available in current structure
@@ -65,7 +66,7 @@ __all__ = [
     "NoPropCT", 
     "NoPropFM",
     # Model architectures
-    "SimpleMLP",
+    "SimpleConditionalResnet",
     "ResNetBlock",
     "ResNet",
     "ConditionalResNet",
@@ -99,8 +100,9 @@ __all__ = [
     # "eval_step",
     # Jacobian utilities
     "trace_jacobian",
-    "compute_jacobian_diagonal",
-    "compute_divergence",
+    "jacobian_diagonal",
+    "divergence",
+    "grad_potential",
     "compute_log_det_jacobian",
     # ViT feature extractor and utilities (not available in current structure)
     # "VitSmallFeatureExtractor",

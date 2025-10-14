@@ -33,7 +33,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from src.noprop_ct import NoPropCT
 from src.noprop_fm import NoPropFM
-from src.no_prop_models import SimpleMLP
+from src.no_prop_models import SimpleConditionalResnet
 from src.embeddings.noise_schedules import (
     LinearNoiseSchedule, 
     CosineNoiseSchedule, 
@@ -109,8 +109,8 @@ def train_model(
     # Set random seed
     key = jr.PRNGKey(random_seed)
     
-    # Create model using the new SimpleMLP with multiple hidden layers
-    model = SimpleMLP(hidden_dims=(64, 64, 64))
+    # Create model using the new SimpleConditionalResnet with multiple hidden layers
+    model = SimpleConditionalResnet(hidden_dims=(64, 64, 64))
     
     # Create the appropriate NoProp model
     if model_type == "ct":
@@ -208,7 +208,7 @@ def train_model(
             # Training step
             key, subkey = jr.split(key)
             params, opt_state, loss, metrics = noprop_model.train_step(
-                params, opt_state, x_batch, z_batch, subkey, optimizer
+                params, x_batch, z_batch, opt_state, optimizer, subkey
             )
             
             epoch_train_losses.append(loss)
