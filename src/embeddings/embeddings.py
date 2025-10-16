@@ -2,12 +2,11 @@
 Embedding utilities for NoProp implementations.
 
 This module provides various embedding functions used in the NoProp algorithm,
-including time embeddings and positional encodings.
+time embeddings assume t is in [0, 1].
 """
 
 from typing import Optional
 
-import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
@@ -41,7 +40,7 @@ def sinusoidal_time_embedding(t: jnp.ndarray, dim: int) -> jnp.ndarray:
     # Create frequency bands with logarithmic spacing
     half_dim = dim // 2
     emb = jnp.log(10000.0) / (half_dim - 1)
-    emb = jnp.exp(jnp.arange(half_dim) * -emb)
+    emb = jnp.exp(jnp.arange(half_dim) * -emb)*2*jnp.pi
     
     # Apply frequencies to time
     emb = t * emb[None, :]  # [batch_size, half_dim]
@@ -136,54 +135,6 @@ def get_time_embedding(t: jnp.ndarray, dim: int, method: str = "sinusoidal") -> 
     else:
         raise ValueError(f"Unsupported embedding method: {method}. "
                         f"Supported methods: sinusoidal, fourier, linear, learnable, gaussian")
-
-
-# Default embedding configurations
-DEFAULT_TIME_EMBED_DIMS = {
-    "resnet": 128,
-    "simple_cnn": 64,
-    "transformer": 256,
-}
-
-DEFAULT_EMBEDDING_METHOD = "sinusoidal"
-
-
-def learnable_time_embedding(t: jnp.ndarray, dim: int, max_time: float = 1.0) -> jnp.ndarray:
-    """Create learnable time embeddings.
-    
-    This creates a learnable embedding by discretizing time into bins
-    and using an embedding lookup table. This is useful when you want
-    the model to learn optimal time representations.
-    
-    Args:
-        t: Time values [batch_size] or [batch_size, 1]
-        dim: Embedding dimension
-        max_time: Maximum time value for discretization
-        
-    Returns:
-        Time embeddings [batch_size, dim]
-    """
-    # Ensure t is 2D
-    if t.ndim == 0:
-        t = jnp.array([t])[:, None]
-    elif t.ndim == 1:
-        t = t[:, None]
-    
-    # Discretize time into bins
-    num_bins = 1000
-    t_bins = jnp.floor(t * num_bins / max_time).astype(jnp.int32)
-    t_bins = jnp.clip(t_bins, 0, num_bins - 1)
-    
-    # Create embedding table (this would be learned parameters in practice)
-    # For now, we'll use a simple initialization
-    embedding_table = jnp.sin(jnp.arange(num_bins)[:, None] * jnp.pi / num_bins)
-    embedding_table = jnp.tile(embedding_table, (1, dim // embedding_table.shape[1] + 1))
-    embedding_table = embedding_table[:, :dim]
-    
-    # Lookup embeddings
-    time_emb = embedding_table[t_bins.squeeze()]
-    
-    return time_emb
 
 
 def gaussian_time_embedding(t: jnp.ndarray, dim: int, sigma: float = 1.0) -> jnp.ndarray:

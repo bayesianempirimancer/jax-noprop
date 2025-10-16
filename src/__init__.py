@@ -25,7 +25,6 @@ from .embeddings.embeddings import (
     sinusoidal_time_embedding,
     fourier_time_embedding,
     linear_time_embedding,
-    learnable_time_embedding,
     gaussian_time_embedding,
     get_time_embedding,
 )

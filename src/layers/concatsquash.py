@@ -1,15 +1,3 @@
-"""
-ConcatSquash layer implementation for Flax.
-
-A ConcatSquash layer is a memory-efficient alternative to simple concatenation that:
-1. Concatenates multiple inputs along the last dimension
-2. Applies a "squash" operation (typically a linear transformation) to compress the result
-3. Optionally applies activation and normalization
-
-This is commonly used in neural ODEs and flow-based models where you need to combine
-multiple inputs efficiently without creating large intermediate tensors.
-"""
-
 import jax.numpy as jnp
 import flax.linen as nn
 from typing import Callable, Optional
@@ -32,8 +20,8 @@ class ConcatSquash(nn.Module):
     """
     
     features: int
-    use_bias: bool = False_
-    use_input_layer_norm: bool = False
+    use_bias: bool = False
+    norm_layer: bool = False
     
     @nn.compact
     def __call__(self, *inputs: jnp.ndarray, training: bool = True) -> jnp.ndarray:
@@ -47,13 +35,11 @@ class ConcatSquash(nn.Module):
         Returns:
             Squashed output tensor with shape (..., output_dim)
         """
-        if not inputs:
-            raise ValueError("At least one input tensor must be provided")
         
         # Check that all inputs have compatible batch shapes
         output = 0.0 
         for i, input in enumerate(inputs):
-            if self.use_input_layer_norm:
+            if self.norm_layer:
                 input = nn.LayerNorm()(input)
             output += nn.Dense(self.features, use_bias=False, name=f'input_proj_{i}')(input)
 
