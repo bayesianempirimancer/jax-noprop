@@ -12,10 +12,9 @@ Key Features:
 - Supports both NoProp-CT and NoProp-FM variants
 """
 
-import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from typing import Dict, Any, Tuple, Optional, Callable
+from typing import Tuple, Callable
 
 try:
     # Try relative imports first (when used as a module)
@@ -85,7 +84,7 @@ class ViTCRN(nn.Module):
         # Output layer
         self.output_layer = nn.Dense(self.z_dim, name='output')
     def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, 
-                 training: bool = False) -> jnp.ndarray:
+                 training: bool = True) -> jnp.ndarray:
         """Forward pass through the ViT-Conditional ResNet model.
         
         Args:
@@ -121,8 +120,8 @@ class ViTCRN(nn.Module):
             
             
             # Optional dropout
-            if training and self.dropout_rate > 0:
-                fused = self.dropout_layers[i](fused, deterministic=False)
+            if self.dropout_rate > 0:
+                fused = self.dropout_layers[i](fused, deterministic=not training)
         
         # Output vector field
         dz_dt = self.output_layer(fused)

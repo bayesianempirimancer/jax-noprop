@@ -2,7 +2,7 @@ import jax.numpy as jnp
 from einops import rearrange, reduce
 import flax.linen as nn
 
-from .configs import AttentionConfig
+from .configs import AttentionConfig, CrossAttentionConfig
 from .norm import RMSNormGated
 from .posemb import PosEmbMLPSwinv2D, RoPE
 
@@ -110,6 +110,168 @@ class LinearAttention(nn.Module):
         z = 1 / (jnp.einsum("bhnd,bhd->bhn", q,
                             reduce(k, "b h n d -> b h d", "mean")) + 1e-6)
         kv = jnp.einsum("bhnd,bhne->bhde", k_rope * (n**-0.5), v * (n**-0.5))
+        x = jnp.einsum("bhnd,bhde->bhne", q_rope, kv) * z[..., None]
+
+        # Reshape output
+        x = rearrange(x, "b h n d -> b n (h d)")
+
+        # Apply LePE
+        v_2d = rearrange(v, "b h (x y) d -> b x y (h d)", x=h, y=w)
+        lepe_out = nn.Conv(
+            features=self.config.dim,
+            kernel_size=(3, 3),
+            padding=(1, 1),
+            feature_group_count=self.config.dim,
+        )(v_2d)
+
+        lepe_out = rearrange(lepe_out,
+                             "b x y (h d) -> b (x y) (h d)",
+                             h=num_heads)
+
+        # Combine attention output and LePE
+        x = x + lepe_out
+
+        return x
+
+
+class CrossAttention(nn.Module):
+    """
+    Multi-head Cross Attention module.
+
+    This module implements cross attention mechanism where queries come from input x
+    and keys and values come from input y.
+
+    Args:
+        config (AttentionConfig): Configuration object containing attention parameters.
+    """
+
+    config: CrossAttentionConfig
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray, y: jnp.ndarray):
+        """
+        Forward pass of the cross attention module.
+
+        Args:
+            x (jnp.ndarray): Query input tensor of shape (B, N, C) where B is batch size,
+                             N is sequence length, and C is input dimension.
+            y (jnp.ndarray): Key/Value input tensor of shape (B, M, C) where B is batch size,
+                             M is sequence length, and C is input dimension.
+
+        Returns:
+            jnp.ndarray: Output tensor of shape (B, N, C).
+
+        Raises:
+            AssertionError: If input embedding dimension doesn't match layer embedding dimension.
+        """
+        B, N, C = x.shape
+        B_y, M, C_y = y.shape
+        
+        if C != self.config.dim:
+            raise AssertionError(
+                f"Query input embedding dimension ({C}) should match layer embedding dimension ({self.config.dim})."
+            )
+        if C_y != self.config.dim:
+            raise AssertionError(
+                f"Key/Value input embedding dimension ({C_y}) should match layer embedding dimension ({self.config.dim})."
+            )
+
+        # Query from x
+        q = nn.Dense(self.config.dim, use_bias=self.config.qkv_bias, name='q')(x)
+        q = jnp.reshape(q, (B, N, self.config.num_heads, C // self.config.num_heads))
+        q = jnp.transpose(q, (0, 2, 1, 3))
+
+        # Key and Value from y
+        kv = nn.Dense(self.config.dim * 2, use_bias=self.config.qkv_bias, name='kv')(y)
+        kv = jnp.reshape(
+            kv, (B_y, M, 2, self.config.num_heads, C_y // self.config.num_heads))
+        kv = jnp.transpose(kv, (2, 0, 3, 1, 4))
+
+        k, v = tuple(kv)
+        
+        if self.config.qk_norm:
+            match self.config.norm_layer:
+                case "layernorm":
+                    q = nn.LayerNorm()(q)
+                    k = nn.LayerNorm()(k)
+                case "rmsnormgated":
+                    q = RMSNormGated()(q)
+                    k = RMSNormGated()(k)
+                case "batchnorm":
+                    q = nn.BatchNorm()(q)
+                    k = nn.BatchNorm()(k)
+                case _:
+                    raise ValueError(f"Unknown norm `{self.config.norm_layer}`")
+
+        # TODO: implement fused attention for better performance
+        attn = q @ k.transpose((0, 1, 3, 2)) / jnp.sqrt(self.config.head_dim)
+        attn = nn.softmax(attn, axis=-1)
+        attn = nn.Dropout(self.config.attn_drop)(attn, deterministic=False)
+
+        x = (attn @ v)
+        if self.config.normalize_attn:
+            x = x/(attn.sum(-1, keepdims=True) + 1e-8)
+        x = nn.Dense(self.config.dim, use_bias=self.config.proj_bias, name='proj')(x.transpose(0, 2, 1, 3).reshape(B, N, C) )
+        x = nn.Dropout(self.config.proj_drop)(x, deterministic=False)
+
+        return x
+
+
+class LinearCrossAttention(nn.Module):
+    """Linear Cross Attention from Mamba-like Linear Attention (MLLA) paper."""
+
+    config: AttentionConfig
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray, y: jnp.ndarray):
+        """
+        Forward pass of the linear cross attention module.
+
+        Args:
+            x (jnp.ndarray): Query input tensor of shape (B, N, C) where B is batch size,
+                             N is sequence length, and C is input dimension.
+            y (jnp.ndarray): Key/Value input tensor of shape (B, M, C) where B is batch size,
+                             M is sequence length, and C is input dimension.
+
+        Returns:
+            jnp.ndarray: Output tensor of shape (B, N, C).
+        """
+        b, n, c = x.shape
+        b_y, m, c_y = y.shape
+        h = int(n**0.5)
+        w = int(n**0.5)
+        num_heads = self.config.num_heads
+
+        # Query from x
+        q = rearrange(nn.Dense(self.config.dim)(x),
+                      "b n (h d) -> b h n d",
+                      h=num_heads)
+        
+        # Key and Value from y
+        k = rearrange(nn.Dense(self.config.dim)(y),
+                      "b m (h d) -> b h m d",
+                      h=num_heads)
+        v = rearrange(y, "b m (h d) -> b h m d", h=num_heads)
+
+        q = nn.elu(q) + 1.0
+        k = nn.elu(k) + 1.0
+
+        # TODO: Try to define rope here to avoid setting input_resolution a priori
+        rope = RoPE(shape=(h, w, c))
+        q_2d = rearrange(q, "b h (x y) d -> b x y (h d)", x=h, y=w)
+        k_2d = rearrange(k, "b h (x y) d -> b x y (h d)", x=h, y=w)
+
+        q_rope = rearrange(rope(q_2d),
+                           "b x y (h d) -> b h (x y) d",
+                           h=num_heads)
+        k_rope = rearrange(rope(k_2d),
+                           "b x y (h d) -> b h (x y) d",
+                           h=num_heads)
+
+        # Compute attention
+        z = 1 / (jnp.einsum("bhnd,bhd->bhn", q,
+                            reduce(k, "b h m d -> b h d", "mean")) + 1e-6)
+        kv = jnp.einsum("bhmd,bhme->bhde", k_rope * (m**-0.5), v * (m**-0.5))
         x = jnp.einsum("bhnd,bhde->bhne", q_rope, kv) * z[..., None]
 
         # Reshape output

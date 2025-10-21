@@ -1,8 +1,5 @@
 import jax.numpy as jnp
 import flax.linen as nn
-from typing import Callable, Optional
-
-from numpy import False_
 
 
 class ConcatSquash(nn.Module):

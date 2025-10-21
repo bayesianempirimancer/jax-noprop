@@ -69,6 +69,21 @@ class AttentionConfig:
     def __post_init__(self):
         self.head_dim = self.dim // self.num_heads
 
+@dataclass
+class CrossAttentionConfig:
+    dim: int
+    num_heads: int = 8
+    qkv_bias: bool = True
+    proj_bias: bool = True
+    qk_norm: bool = False
+    attn_drop: float = 0.0
+    proj_drop: float = 0.0
+    norm_layer: str = "layernorm"
+    normalize_attn: bool = True
+
+    def __post_init__(self):
+        self.head_dim = self.dim // self.num_heads
+
 
 @dataclass
 class MambaConfig:

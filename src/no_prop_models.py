@@ -5,12 +5,10 @@ This module provides ResNet wrappers that can be used with the NoProp algorithm.
 The wrappers handle the specific input/output requirements for each NoProp variant.
 """
 
-from typing import Any, Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
-import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from flax import struct
 
 from .embeddings.embeddings import sinusoidal_time_embedding, fourier_time_embedding, linear_time_embedding, get_time_embedding
 from .layers.concatsquash import ConcatSquash

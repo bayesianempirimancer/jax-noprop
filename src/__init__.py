@@ -9,11 +9,8 @@ This package provides implementations of the NoProp variants:
 from .noprop_ct import NoPropCT
 from .noprop_fm import NoPropFM
 from .no_prop_models import (
-    SimpleConditionalResnet,
-    ResNetBlock,
-    ResNet,
-    ConditionalResNet,
-    SimpleCNN,
+    ConditionalResnet_MLP,
+    ConditionalResNet_CNNx,
 )
 from .embeddings.noise_schedules import (
     LinearNoiseSchedule,
@@ -65,11 +62,8 @@ __all__ = [
     "NoPropCT", 
     "NoPropFM",
     # Model architectures
-    "SimpleConditionalResnet",
-    "ResNetBlock",
-    "ResNet",
-    "ConditionalResNet",
-    "SimpleCNN",
+    "ConditionalResnet_MLP",
+    "ConditionalResNet_CNNx",
     # Noise schedules
     "LinearNoiseSchedule",
     "CosineNoiseSchedule", 
