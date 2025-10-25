@@ -124,8 +124,7 @@ class ViTCRN(nn.Module):
                 fused = self.dropout_layers[i](fused, deterministic=not training)
         
         # Output vector field
-        dz_dt = self.output_layer(fused)
-        return dz_dt
+        return self.output_layer(fused)
     
 
 def create_vit_crn_model(z_dim: int = 10, 

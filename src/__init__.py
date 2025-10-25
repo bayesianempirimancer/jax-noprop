@@ -6,9 +6,9 @@ This package provides implementations of the NoProp variants:
 - NoProp-FM: Flow matching
 """
 
-from .noprop_ct import NoPropCT
-from .noprop_fm import NoPropFM
-from .no_prop_models import (
+from .flow_models.ct import NoPropCT
+from .flow_models.fm import NoPropFM
+from .archive.no_prop_models import (
     ConditionalResnet_MLP,
     ConditionalResNet_CNNx,
 )

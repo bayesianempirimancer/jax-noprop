@@ -1,19 +1,23 @@
 # API Reference
 
-This document provides detailed API documentation for the JAX NoProp implementation.
+This document provides detailed API documentation for the JAX NoProp implementation with the new unified flow models architecture.
 
 ## Import Structure
 
-The codebase uses a clean, modular import structure:
+The codebase uses a clean, modular import structure with unified flow models:
 
 ```python
 # Core NoProp implementations
-from src.noprop_ct import NoPropCT
-from src.noprop_fm import NoPropFM
+from src.flow_models.ct import NoPropCT
+from src.flow_models.fm import NoPropFM
+from src.flow_models.df import NoPropDF
 
 # Model architectures
-from src.no_prop_models import SimpleConditionalResnet, SimpleResNet, SimpleTransformer
-from src.models.simple_models import SimpleConditionalResnet, SimpleResNet, SimpleTransformer
+from src.flow_models.crn import (
+    ConditionalResnet_MLP,
+    ConvexConditionalResnet,
+    BilinearConditionalResnet
+)
 
 # Noise schedules and embeddings
 from src.embeddings.noise_schedules import (
@@ -28,16 +32,19 @@ from src.embeddings.embeddings import (
     get_time_embedding
 )
 
-# Building blocks
-from src.blocks.image_blocks import ResNet50, EfficientNetB0, VisionTransformer
-from src.blocks.point_cloud_blocks import PointNet, PointNet2, PointCNN
-
 # Utilities
 from src.utils.ode_integration import euler_step, heun_step, rk4_step
 from src.utils.jacobian_utils import trace_jacobian, divergence
+from src.utils.plotting.plot_learning_curves import create_enhanced_learning_plot
+from src.utils.plotting.plot_trajectories import (
+    create_trajectory_diagnostic_plot,
+    create_model_output_trajectory_plot,
+    create_dzdt_trajectory_plot
+)
 
 # Training
-from src.trainer import NoPropTrainer
+from src.flow_models.trainer import NoPropTrainer
+from src.flow_models.train import main as train_main
 ```
 
 ## Core Classes
@@ -50,24 +57,22 @@ Continuous-time NoProp implementation with neural ODE integration.
 class NoPropCT(nn.Module):
     def __init__(
         self,
+        config: Config,
         z_shape: Tuple[int, ...],
-        x_shape: Tuple[int, ...],
         model: nn.Module,
         noise_schedule: NoiseSchedule = LinearNoiseSchedule(),
         num_timesteps: int = 20,
-        integration_method: str = "euler",
-        reg_weight: float = 0.0
+        integration_method: str = "euler"
     )
 ```
 
 **Parameters:**
+- `config`: Configuration object containing model parameters
 - `z_shape`: Shape of target z (excluding batch dimensions), e.g., `(2,)` for 1D, `(10, 5)` for 2D
-- `x_shape`: Shape of input x (excluding batch dimensions), e.g., `(2,)` for 1D, `(28, 28, 1)` for images
 - `model`: The neural network model (must take `(z, x, t)` inputs and output same shape as `z`)
 - `noise_schedule`: Noise scheduling strategy (default: LinearNoiseSchedule)
 - `num_timesteps`: Number of timesteps for continuous time (default: 20)
 - `integration_method`: ODE integration method ("euler", "heun", or "rk4")
-- `reg_weight`: Regularization hyperparameter (default: 0.0)
 
 **Note:** The `z_shape` parameter enables automatic optimization - 1D shapes use efficient `integrate_ode`, while multi-dimensional shapes use `integrate_tensor_ode`.
 
@@ -337,17 +342,26 @@ def dz_dt(
 
 ## Model Architectures
 
-### SimpleConditionalResnet
+### ConditionalResnet_MLP
 
-Lightweight MLP for NoProp-CT, designed for simple datasets like two moons.
+Multi-layer perceptron Conditional ResNet for NoProp models.
 
 ```python
-class SimpleConditionalResnet(nn.Module):
-    def __init__(self, hidden_dim: int = 64)
+class ConditionalResnet_MLP(nn.Module):
+    def __init__(
+        self,
+        hidden_dims: Tuple[int, ...] = (64, 64),
+        output_dim: int = 2,
+        dropout_rate: float = 0.1,
+        activation: str = "relu"
+    )
 ```
 
 **Parameters:**
-- `hidden_dim`: Hidden layer dimension (default: 64)
+- `hidden_dims`: Hidden layer dimensions (default: (64, 64))
+- `output_dim`: Output dimension (default: 2)
+- `dropout_rate`: Dropout rate (default: 0.1)
+- `activation`: Activation function (default: "relu")
 
 **Forward Pass:**
 ```python
@@ -355,38 +369,233 @@ def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarra
 ```
 
 **Key Features:**
-- Dynamically infers output dimension from input `z`
 - Concatenates `z`, `x`, and time embedding
-- 3-layer architecture with ReLU activations
+- Configurable hidden layers with dropout
 - Output matches input `z` shape exactly
 
-### ConditionalResNet
+### ConvexConditionalResnet
 
-Wrapper for ResNet backbones that handles NoProp-specific inputs.
+Convex Conditional ResNet for NoProp models.
 
 ```python
-class ConditionalResNet(nn.Module):
+class ConvexConditionalResnet(nn.Module):
     def __init__(
         self,
-        num_classes: int,
-        depth: int = 18,
-        width: int = 64,
-        z_dim: Optional[int] = None,
-        time_embed_dim: int = 128
+        hidden_dims: Tuple[int, ...] = (64, 64),
+        output_dim: int = 2,
+        dropout_rate: float = 0.1
     )
 ```
 
-**Parameters:**
-- `num_classes`: Number of output classes
-- `depth`: ResNet depth (18, 50, or 152)
-- `width`: Base width of the network
-- `z_dim`: Dimension of noisy target (default: num_classes)
-- `time_embed_dim`: Time embedding dimension
+### BilinearConditionalResnet
 
-**Forward Pass:**
+Bilinear Conditional ResNet for NoProp models.
+
 ```python
-def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: Optional[jnp.ndarray] = None) -> jnp.ndarray
+class BilinearConditionalResnet(nn.Module):
+    def __init__(
+        self,
+        hidden_dims: Tuple[int, ...] = (64, 64),
+        output_dim: int = 2,
+        dropout_rate: float = 0.1
+    )
 ```
+
+## Unified Training Interface
+
+### NoPropTrainer
+
+Unified trainer for all NoProp variants (CT, FM, DF).
+
+```python
+class NoPropTrainer:
+    def __init__(self, model: Union[NoPropCT, NoPropFM, NoPropDF])
+    
+    def train(
+        self,
+        train_x: jnp.ndarray,
+        train_y: jnp.ndarray,
+        val_x: jnp.ndarray,
+        val_y: jnp.ndarray,
+        num_epochs: int,
+        test_x: Optional[jnp.ndarray] = None,
+        test_y: Optional[jnp.ndarray] = None,
+        dropout_epochs: Optional[int] = None,
+        learning_rate: Optional[float] = None,
+        batch_size: Optional[int] = None,
+        eval_steps: int = 1,
+        save_steps: Optional[int] = None,
+        output_dir: Optional[str] = None
+    ) -> Dict[str, Any]
+```
+
+**Parameters:**
+- `model`: NoProp model instance (CT, FM, or DF)
+- `train_x`: Training input data [N_train, x_dim]
+- `train_y`: Training target data [N_train, y_dim]
+- `val_x`: Validation input data [N_val, x_dim]
+- `val_y`: Validation target data [N_val, y_dim]
+- `num_epochs`: Number of training epochs
+- `test_x`: Test input data [N_test, x_dim] (optional)
+- `test_y`: Test target data [N_test, y_dim] (optional)
+- `dropout_epochs`: Number of epochs with dropout (if None, uses all epochs)
+- `learning_rate`: Learning rate (if None, uses config default)
+- `batch_size`: Batch size (if None, uses config default)
+- `eval_steps`: Steps between detailed evaluation prints
+- `save_steps`: Steps between model saves (if None, saves only at end)
+- `output_dir`: Directory to save results
+
+**Returns:**
+- Dictionary containing training results, metrics, and generated plots
+
+**Key Features:**
+- Works with any NoProp variant (CT, FM, DF)
+- Automatic model type detection
+- Integrated plotting and visualization
+- Comprehensive result saving
+- Uses model-specific `train_step` methods
+
+## Plotting Utilities
+
+### Learning Curve Visualization
+
+```python
+from src.utils.plotting.plot_learning_curves import create_enhanced_learning_plot
+
+create_enhanced_learning_plot(
+    results: Dict[str, Any],
+    train_pred: jnp.ndarray,
+    val_pred: jnp.ndarray,
+    test_pred: jnp.ndarray,
+    train_y: jnp.ndarray,
+    val_y: jnp.ndarray,
+    test_y: jnp.ndarray,
+    output_path: str,
+    model_name: str = "NoProp Model",
+    skip_epochs: int = 4
+)
+```
+
+**Parameters:**
+- `results`: Training results dictionary
+- `train_pred`: Training predictions
+- `val_pred`: Validation predictions
+- `test_pred`: Test predictions
+- `train_y`: Training targets
+- `val_y`: Validation targets
+- `test_y`: Test targets
+- `output_path`: Path to save the plot
+- `model_name`: Name for the model in the plot
+- `skip_epochs`: Number of initial epochs to skip in visualization
+
+### Trajectory Visualization
+
+```python
+from src.utils.plotting.plot_trajectories import (
+    create_trajectory_diagnostic_plot,
+    create_model_output_trajectory_plot,
+    create_dzdt_trajectory_plot
+)
+
+# Trajectory diagnostic plot
+create_trajectory_diagnostic_plot(
+    results: Dict[str, Any],
+    output_path: str,
+    model_name: str = "NoProp Model"
+)
+
+# Model output trajectory plot
+create_model_output_trajectory_plot(
+    results: Dict[str, Any],
+    x_sample: jnp.ndarray,
+    output_path: str,
+    model_name: str = "NoProp Model"
+)
+
+# dz/dt trajectory plot
+create_dzdt_trajectory_plot(
+    results: Dict[str, Any],
+    x_sample: jnp.ndarray,
+    output_path: str,
+    model_name: str = "NoProp Model"
+)
+```
+
+**Key Features:**
+- Comprehensive trajectory visualization
+- Model output evolution tracking
+- dz/dt field visualization
+- Automatic plot generation and saving
+
+## Command Line Interface
+
+### Training Script
+
+```bash
+python src/flow_models/train.py [OPTIONS]
+```
+
+**Required Arguments:**
+- `--data`: Path to data file (pickle format with 'x' and 'y' keys)
+- `--training-protocol`: Training protocol ('ct', 'fm', or 'df')
+- `--model`: Model architecture ('conditional_resnet_mlp', 'convex_conditional_resnet', 'bilinear_conditional_resnet')
+
+**Optional Arguments:**
+- `--epochs`: Number of training epochs (default: 100)
+- `--batch-size`: Batch size (default: 32)
+- `--learning-rate`: Learning rate (default: 1e-3)
+- `--dropout-epochs`: Number of epochs with dropout (default: 0)
+- `--eval-steps`: Steps between evaluation prints (default: 1)
+- `--loss-type`: Loss function type (default: 'mse')
+
+**Example Usage:**
+
+```bash
+# Train a CT model
+python src/flow_models/train.py \
+    --data data/your_data.pkl \
+    --training-protocol ct \
+    --model conditional_resnet_mlp \
+    --epochs 100 \
+    --batch-size 32 \
+    --learning-rate 1e-3
+
+# Train a FM model
+python src/flow_models/train.py \
+    --data data/your_data.pkl \
+    --training-protocol fm \
+    --model conditional_resnet_mlp \
+    --epochs 100 \
+    --batch-size 32 \
+    --learning-rate 1e-3
+
+# Train a DF model
+python src/flow_models/train.py \
+    --data data/your_data.pkl \
+    --training-protocol df \
+    --model conditional_resnet_mlp \
+    --epochs 100 \
+    --batch-size 32 \
+    --learning-rate 1e-3
+```
+
+**Data Format:**
+The data file should be a pickle file containing a dictionary with the following structure:
+```python
+{
+    'train': {'x': train_x, 'y': train_y},
+    'val': {'x': val_x, 'y': val_y},
+    'test': {'x': test_x, 'y': test_y}
+}
+```
+
+**Output:**
+The training script generates:
+- Model checkpoints
+- Training metrics
+- Learning curve plots
+- Trajectory visualizations
+- Results saved to `artifacts/` directory
 
 ## Noise Schedules
 

@@ -44,39 +44,54 @@ pip install -e .
 ```python
 import jax
 import jax.numpy as jnp
-from src.noprop_ct import NoPropCT
-from src.no_prop_models import SimpleConditionalResnet
+from src.flow_models.ct import NoPropCT
+from src.flow_models.crn import ConditionalResnet_MLP
 from src.embeddings.noise_schedules import LinearNoiseSchedule, LearnableNoiseSchedule
 
-# Create a model that takes (z, x, t) inputs and outputs z' with same shape as z
-model = SimpleConditionalResNet(hidden_dims=(64, 64))
+# Create a Conditional ResNet model
+model = ConditionalResnet_MLP(
+    hidden_dims=(64, 64),
+    output_dim=2,
+    dropout_rate=0.1
+)
 
 # Initialize NoProp-CT with different noise schedules
 noprop_ct = NoPropCT(
-    z_shape=(1000,),
-    x_shape=(224,224,3),
+    config=NoPropCT.Config(),
+    z_shape=(2,),
     model=model, 
-    noise_schedule=LinearNoiseSchedule(), # skip for noprop_fm
+    noise_schedule=LinearNoiseSchedule(),
     num_timesteps=20,
     integration_method='euler'
 )
 
 # Training Step
-updated_params, updated_opt_state, loss, metrics = noprop_ct.trainstep(params, 
-                                                                       x, 
-                                                                       y, 
-                                                                       opt_state, 
-                                                                       optimizer, 
-                                                                       key)
+updated_params, updated_opt_state, loss, metrics = noprop_ct.train_step(
+    params, x, y, opt_state, optimizer, key
+)
 
 # Prediction
-y = noprop_ct.predict(params, 
-                      x, 
-                      num_steps, 
-                      integration_method = 'euler', 
-                      output_type = 'end_point', 
-                      with_logp = False, 
-                      key = None)
+y = noprop_ct.predict(params, x, num_steps=20, integration_method='euler')
+```
+
+### Unified Training Interface
+
+```python
+from src.flow_models.trainer import NoPropTrainer
+from src.flow_models.ct import NoPropCT
+from src.flow_models.crn import ConditionalResnet_MLP
+
+# Create model and trainer
+model = ConditionalResnet_MLP(hidden_dims=(64, 64), output_dim=2)
+noprop_ct = NoPropCT(config=NoPropCT.Config(), z_shape=(2,), model=model)
+trainer = NoPropTrainer(noprop_ct)
+
+# Train the model
+results = trainer.train(
+    train_x=x_train, train_y=y_train,
+    val_x=x_val, val_y=y_val,
+    num_epochs=100, learning_rate=1e-3, batch_size=32
+)
 ```
 
 ### Prediction Options
@@ -104,37 +119,49 @@ python examples/two_moons.py
 
 ## Directory Structure
 
-The codebase is organized into a clean, modular structure:
+The codebase is organized into a clean, modular structure with a unified flow models architecture:
 
 ```
 jax-noprop/
 ├── src/                          # Main source code
-│   ├── noprop_ct.py             # NoProp-CT implementation
-│   ├── noprop_fm.py             # NoProp-FM implementation
-│   ├── no_prop_models.py        # Conditional Resnet Models for use with NoProp
-│   ├── trainer.py               # Training utilities and trainer class
+│   ├── flow_models/             # Unified NoProp implementations
+│   │   ├── ct.py                # NoProp-CT (Continuous-Time) implementation
+│   │   ├── df.py                # NoProp-DF (Diffusion) implementation  
+│   │   ├── fm.py                # NoProp-FM (Flow Matching) implementation
+│   │   ├── crn.py               # Conditional ResNet architectures
+│   │   ├── trainer.py           # Unified trainer for all NoProp variants
+│   │   └── train.py             # Training script with CLI interface
 │   ├── embeddings/              # Time and positional embeddings
 │   │   ├── embeddings.py        # Time embedding functions
 │   │   ├── noise_schedules.py   # Noise scheduling strategies
+│   │   ├── time_embeddings.py   # Time embedding utilities
 │   │   └── positional_encoding.py # Positional encoding functions
-│   ├── blocks/                  # Building block architectures
-│   │   ├── image_blocks.py      # Image processing blocks (ResNet, EfficientNet, ViT)
-│   │   └── point_cloud_blocks.py # Point cloud processing blocks (PointNet, PointNet2, etc.)
 │   ├── layers/                  # Layer implementations
+│   │   ├── builders.py          # Layer building utilities
 │   │   ├── concatsquash.py      # ConcatSquash layer for time conditioning
 │   │   └── image_models.py      # Image model layers
-│   ├── models/                  # Model architectures
-│   │   ├── simple_models.py     # Simple MLP/ResNet/Transformer models
-│   │   └── vit_crn.py          # Vision Transformer CRN
-│   └── utils/                   # Utility functions
-│       ├── jacobian_utils.py    # Jacobian computation utilities
-│       ├── ode_integration.py   # ODE integration methods
+│   ├── utils/                   # Utility functions
+│   │   ├── plotting/           # Plotting utilities
+│   │   │   ├── plot_learning_curves.py    # Learning curve visualization
+│   │   │   ├── plot_trajectories.py       # Trajectory visualization
+│   │   │   └── example_usage.py          # Plotting examples
+│   │   ├── jacobian_utils.py    # Jacobian computation utilities
+│   │   └── ode_integration.py   # ODE integration methods
+│   ├── configs/                 # Configuration classes
+│   │   ├── base_config.py       # Base configuration
+│   │   ├── base_model.py        # Base model interface
+│   │   └── base_trainer.py      # Base trainer interface
+│   └── archive/                 # Legacy implementations
+│       ├── no_prop_models.py    # Legacy model definitions
+│       └── trainer.py           # Legacy trainer
 ├── examples/                    # Example scripts
 │   ├── two_moons.py            # Two moons classification example
 │   └── two_moons_swapped.py    # Two moons generative example
 ├── docs/                       # Documentation
 │   ├── API_REFERENCE.md        # API documentation
 │   └── NoPropCT_Forward_Fix.pdf # Technical notes
+├── data/                       # Data directory
+│   └── test_synthetic_matched.pkl # Synthetic test data
 └── artifacts/                  # Generated outputs (plots, results)
 ```
 
@@ -216,39 +243,77 @@ The implementation includes several key optimizations:
 Continuous-time NoProp with neural ODE integration.
 
 ```python
+from src.flow_models.ct import NoPropCT
+from src.flow_models.crn import ConditionalResnet_MLP
+
+model = ConditionalResnet_MLP(hidden_dims=(64, 64), output_dim=2)
 noprop_ct = NoPropCT(
+    config=NoPropCT.Config(),
     z_shape=(2,),
-    model=SimpleConditionalResnet(hidden_dim=64),
+    model=model,
     noise_schedule=CosineNoiseSchedule(),
     num_timesteps=20,
-    integration_method="euler",
-    reg_weight=0.0
+    integration_method="euler"
 )
 ```
 
 **Key Methods:**
 - `predict(params, x, num_steps, integration_method="euler", output_type="end_point", key=None)`: Generate predictions
 - `compute_loss(params, x, target, key)`: Compute SNR-weighted loss
-- `train_step(params, opt_state, x, target, key, optimizer)`: Single training step
+- `train_step(params, x, target, opt_state, optimizer, key)`: Single training step
 
 #### `NoPropFM`
 Flow matching NoProp implementation.
 
 ```python
+from src.flow_models.fm import NoPropFM
+from src.flow_models.crn import ConditionalResnet_MLP
+
+model = ConditionalResnet_MLP(hidden_dims=(64, 64), output_dim=2)
 noprop_fm = NoPropFM(
+    config=NoPropFM.Config(),
     z_shape=(2,),
-    model=SimpleConditionalResent(hidden_dim=64),
+    model=model,
     num_timesteps=20,
-    integration_method="euler",
-    reg_weight=0.0,
-    sigma_t=0.05
+    integration_method="euler"
 )
 ```
 
 **Key Methods:**
 - `predict(params, x, num_steps, integration_method="euler", output_type="end_point", key=None)`: Generate predictions
 - `compute_loss(params, x, target, key)`: Compute flow matching loss
-- `train_step(params, opt_state, x, target, key, optimizer)`: Single training step
+- `train_step(params, x, target, opt_state, optimizer, key)`: Single training step
+
+#### `NoPropDF`
+Diffusion NoProp implementation.
+
+```python
+from src.flow_models.df import NoPropDF
+from src.flow_models.crn import ConditionalResnet_MLP
+
+model = ConditionalResnet_MLP(hidden_dims=(64, 64), output_dim=2)
+noprop_df = NoPropDF(
+    config=NoPropDF.Config(),
+    z_shape=(2,),
+    model=model,
+    num_timesteps=20,
+    integration_method="euler"
+)
+```
+
+#### `NoPropTrainer`
+Unified trainer for all NoProp variants.
+
+```python
+from src.flow_models.trainer import NoPropTrainer
+
+trainer = NoPropTrainer(noprop_model)  # Works with CT, FM, or DF
+results = trainer.train(
+    train_x=x_train, train_y=y_train,
+    val_x=x_val, val_y=y_val,
+    num_epochs=100, learning_rate=1e-3, batch_size=32
+)
+```
 
 
 ### Noise Schedules
@@ -285,23 +350,83 @@ schedule = LearnableNoiseSchedule(
 
 ## Training
 
-### Basic Training Loop
+### Unified Training Interface
+
+The new unified training interface provides a consistent API across all NoProp variants:
+
+```python
+from src.flow_models.trainer import NoPropTrainer
+from src.flow_models.ct import NoPropCT
+from src.flow_models.crn import ConditionalResnet_MLP
+from src.embeddings.noise_schedules import CosineNoiseSchedule
+
+# Create model and NoProp instance
+model = ConditionalResnet_MLP(hidden_dims=(64, 64), output_dim=2)
+noprop_ct = NoPropCT(
+    config=NoPropCT.Config(),
+    z_shape=(2,),
+    model=model,
+    noise_schedule=CosineNoiseSchedule(),
+    num_timesteps=20
+)
+
+# Create trainer
+trainer = NoPropTrainer(noprop_ct)
+
+# Train the model
+results = trainer.train(
+    train_x=x_train, train_y=y_train,
+    val_x=x_val, val_y=y_val,
+    num_epochs=100, learning_rate=1e-3, batch_size=32
+)
+```
+
+### Command Line Training
+
+```bash
+# Train a CT model
+python src/flow_models/train.py \
+    --data data/your_data.pkl \
+    --training-protocol ct \
+    --model conditional_resnet_mlp \
+    --epochs 100 \
+    --batch-size 32 \
+    --learning-rate 1e-3
+
+# Train a FM model  
+python src/flow_models/train.py \
+    --data data/your_data.pkl \
+    --training-protocol fm \
+    --model conditional_resnet_mlp \
+    --epochs 100 \
+    --batch-size 32 \
+    --learning-rate 1e-3
+
+# Train a DF model
+python src/flow_models/train.py \
+    --data data/your_data.pkl \
+    --training-protocol df \
+    --model conditional_resnet_mlp \
+    --epochs 100 \
+    --batch-size 32 \
+    --learning-rate 1e-3
+```
+
+### Manual Training Loop
 
 ```python
 import jax
 import jax.numpy as jnp
 import optax
-from src.no_prop_models import SimpleConditionalResnet
-from src.noprop_ct import NoPropCT
-from src.embeddings.noise_schedules import CosineNoiseSchedule
+from src.flow_models.ct import NoPropCT
+from src.flow_models.crn import ConditionalResnet_MLP
 
 # Create model and NoProp instance
-model = SimpleConditionalResnet(hidden_dims=(64, 64))
+model = ConditionalResnet_MLP(hidden_dims=(64, 64), output_dim=2)
 noprop_ct = NoPropCT(
+    config=NoPropCT.Config(),
     z_shape=(2,),
-    x_shape=(2,),
     model=model,
-    noise_schedule=CosineNoiseSchedule(),
     num_timesteps=20
 )
 
@@ -318,17 +443,10 @@ opt_state = optimizer.init(params)
 
 # Training step
 def train_step(params, opt_state, x, y, key):
-    # Sample noisy targets and timesteps
-    z_t, t = noprop_ct.sample_zt(key, y, noprop_ct.timesteps)
-    
-    # Compute loss
-    loss, metrics = noprop_ct.compute_loss(params, z_t, x, y, t, key)
-    
-    # Compute gradients and update
-    grads = jax.grad(lambda p: noprop_ct.compute_loss(p, z_t, x, y, t, key)[0])(params)
-    updates, opt_state = optimizer.update(grads, opt_state)
-    params = optax.apply_updates(params, updates)
-    
+    # Use the model's train_step method
+    params, opt_state, loss, metrics = noprop_ct.train_step(
+        params, x, y, opt_state, optimizer, key
+    )
     return params, opt_state, loss, metrics
 
 # Training loop

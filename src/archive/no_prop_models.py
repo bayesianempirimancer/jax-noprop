@@ -10,14 +10,16 @@ from typing import Callable, Optional, Tuple
 import jax.numpy as jnp
 import flax.linen as nn
 
-from .embeddings.embeddings import sinusoidal_time_embedding, fourier_time_embedding, linear_time_embedding, get_time_embedding
-from .layers.concatsquash import ConcatSquash
+from ..embeddings.embeddings import sinusoidal_time_embedding, fourier_time_embedding, linear_time_embedding, get_time_embedding
+from ..layers.concatsquash import ConcatSquash
+from ..layers.builders import get_act
 
 class ConditionalResNet_CNNx(nn.Module):
     """Simple CNN Conditional ResNet for smaller datasets like MNIST."""
     
     hidden_dims: Tuple[int, ...] = (64, 128, 64)
     time_embed_dim: int = 64
+    dropout_rate: float = 0.1
     
     def setup(self):
         pass
@@ -27,7 +29,8 @@ class ConditionalResNet_CNNx(nn.Module):
         self, 
         z: jnp.ndarray, 
         x: jnp.ndarray, 
-        t: Optional[jnp.ndarray] = None
+        t: Optional[jnp.ndarray] = None, 
+        training: bool = True
     ) -> jnp.ndarray:
         batch_size = z.shape[0]
         z_dim = z.shape[-1]
@@ -49,15 +52,16 @@ class ConditionalResNet_CNNx(nn.Module):
         t = sinusoidal_time_embedding(t, self.time_embed_dim)
 
         # Fusion
-        x = ConcatSquash(self.hidden_dims[0])(x, z, t)
+        z = ConcatSquash(self.hidden_dims[0])(z, x, t)
 
         # Processing layers
         for hidden_dim in self.hidden_dims[1:]:
-            x = nn.Dense(hidden_dim)(x)
-            x = nn.relu(x)
+            z = nn.Dense(hidden_dim)(z)
+            z = nn.relu(z)
+            z = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(z)
 
         # Output projection to match input
-        return nn.Dense(z_dim)(x)
+        return nn.Dense(z_dim)(z)
 
 class ConditionalResnet_MLP(nn.Module):
     """Simple MLP for NoProp with vector inputs.
@@ -81,12 +85,12 @@ class ConditionalResnet_MLP(nn.Module):
     hidden_dims: Tuple[int, ...] = (256, 256, 128)
     time_embed_dim: int = 64
     time_embed_method: str = "sinusoidal"
-    activation_fn: Callable = nn.swish
+    activation_fn: Callable = get_act("swish")
     use_batch_norm: bool = False
     dropout_rate: float = 0.1
     
     @nn.compact
-    def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         """Forward pass through simple MLP.
         
         Args:
@@ -102,18 +106,18 @@ class ConditionalResnet_MLP(nn.Module):
         # 1. time embeddings
         t = get_time_embedding(t, self.time_embed_dim, self.time_embed_method)
         # 2. fusion
-        x = ConcatSquash(self.hidden_dims[0])(x, z, t)
+        z = ConcatSquash(self.hidden_dims[0])(z, x, t)
 
         # 3. processing layers
         for hidden_dim in self.hidden_dims[1:]:
-            x = nn.Dense(hidden_dim)(x)
+            z = nn.Dense(hidden_dim)(z)
             if self.use_batch_norm:
-                x = nn.BatchNorm(use_running_average=True)(x)
-            x = self.activation_fn(x)            
+                z = nn.BatchNorm(use_running_average=True)(z)
+            z = self.activation_fn(z)            
             if self.dropout_rate > 0:
-                x = nn.Dropout(rate=self.dropout_rate, deterministic=True)(x)
+                z = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(z)
                 
         # 4. output projection to match input
-        return nn.Dense(output_dim)(x)
+        return nn.Dense(output_dim)(z)
 
 

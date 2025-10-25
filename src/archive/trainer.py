@@ -31,8 +31,8 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from .noprop_ct import NoPropCT
-from .noprop_fm import NoPropFM
+from ..flow_models.ct import NoPropCT
+from ..flow_models.fm import NoPropFM
 from .no_prop_models import SimpleConditionalResnet
 from .embeddings.noise_schedules import LinearNoiseSchedule, CosineNoiseSchedule
 

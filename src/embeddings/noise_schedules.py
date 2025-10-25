@@ -7,7 +7,6 @@ This module provides different noise scheduling strategies used in the NoProp pa
 - Sigmoid schedule
 """
 
-from abc import ABC
 from typing import Any, Dict, Optional, Tuple
 
 import jax
@@ -16,7 +15,7 @@ import jax.scipy.special
 import flax.linen as nn
 
 
-class NoiseSchedule(nn.Module, ABC):
+class NoiseSchedule(nn.Module):
     """Abstract base class for noise schedules.
     
     Following the paper notation:
@@ -36,55 +35,60 @@ class NoiseSchedule(nn.Module, ABC):
       dz = δ(t)/2 * z * dt + sqrt(δ(t)) * dW(t), where δ(t) = ᾱ'(t)/ᾱ(t)
     """
     
-    def get_gamma_gamma_prime_t(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    def get_gamma_gamma_prime_t(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """Get both gamma_t and gamma_prime_t values for given timesteps t.
         
         Args:
             t: Time values [batch_size]
-            params: Parameters for learnable noise schedule (optional)
             
         Returns:
             Tuple of (gamma_t, gamma_prime_t) where:
             - gamma_t: Gamma values [batch_size]
             - gamma_prime_t: Gamma derivative values [batch_size]
         """
-        return self.apply(params, t)
+        raise NotImplementedError("Subclasses must implement get_gamma_gamma_prime_t")
 
     # Utility methods for computing derived quantities from gamma values
-    def get_alpha_from_gamma(self, gamma_t: jnp.ndarray) -> jnp.ndarray:
+    @staticmethod
+    def get_alpha_from_gamma(gamma_t: jnp.ndarray) -> jnp.ndarray:
         """   
         ᾱ(t) = sigmoid(γ(t))
         """
         return jax.nn.sigmoid(gamma_t)
     
-    def get_alpha_prime_from_gamma(self, gamma_t: jnp.ndarray, gamma_prime_t: jnp.ndarray) -> jnp.ndarray:
+    @staticmethod
+    def get_alpha_prime_from_gamma(gamma_t: jnp.ndarray, gamma_prime_t: jnp.ndarray) -> jnp.ndarray:
         """
         ᾱ'(t) = γ'(t) * sigmoid(γ(t)) * (1 - sigmoid(γ(t)))
         ᾱ'(t) = γ'(t) * ᾱ(t) * (1 - ᾱ(t))
         """
-        alpha_t = self.get_alpha_from_gamma(gamma_t)
+        alpha_t = NoiseSchedule.get_alpha_from_gamma(gamma_t)
         return gamma_prime_t * alpha_t * (1.0 - alpha_t)
     
-    def get_sigma_from_gamma(self, gamma_t: jnp.ndarray) -> jnp.ndarray:
+    @staticmethod
+    def get_sigma_from_gamma(gamma_t: jnp.ndarray) -> jnp.ndarray:
         """
         σ(t) = sqrt(1 - ᾱ(t)) = sqrt(1 - sigmoid(γ(t)))
         """
-        alpha_t = self.get_alpha_from_gamma(gamma_t)
+        alpha_t = NoiseSchedule.get_alpha_from_gamma(gamma_t)
         return jnp.sqrt(1.0 - alpha_t)
     
-    def get_snr_from_gamma(self, gamma_t: jnp.ndarray) -> jnp.ndarray:
+    @staticmethod
+    def get_snr_from_gamma(gamma_t: jnp.ndarray) -> jnp.ndarray:
         """
         SNR(t) = ᾱ(t) / (1 - ᾱ(t)) = exp(γ(t))
         """
         return jnp.exp(gamma_t)
     
-    def get_snr_prime_from_gamma(self, gamma_t: jnp.ndarray, gamma_prime_t: jnp.ndarray) -> jnp.ndarray:
+    @staticmethod
+    def get_snr_prime_from_gamma(gamma_t: jnp.ndarray, gamma_prime_t: jnp.ndarray) -> jnp.ndarray:
         """        
         SNR'(t) = γ'(t) * exp(γ(t))
         """
         return gamma_prime_t * jnp.exp(gamma_t)
     
-    def get_tau_inverse_from_gamma(self, gamma_t: jnp.ndarray, gamma_prime_t: jnp.ndarray) -> jnp.ndarray:
+    @staticmethod
+    def get_tau_inverse_from_gamma(gamma_t: jnp.ndarray, gamma_prime_t: jnp.ndarray) -> jnp.ndarray:
         """
         Time constant: 1/τ(t) = γ'(t)
         """
@@ -178,7 +182,13 @@ class LinearNoiseSchedule(NoiseSchedule):
       dz = δ(t)/2 * z * dt + sqrt(δ(t)) * dW(t), where δ(t) = ᾱ'(t)/ᾱ(t)
     """
     
+    @nn.compact
     def __call__(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """Forward pass - same as get_gamma_gamma_prime_t for compatibility."""
+        return self.get_gamma_gamma_prime_t(t)
+    
+    @nn.compact
+    def get_gamma_gamma_prime_t(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """Get both γ(t) and γ'(t) for the linear schedule.
         
         For linear schedule: ᾱ(t) = t, so γ(t) = logit(t)
@@ -189,18 +199,18 @@ class LinearNoiseSchedule(NoiseSchedule):
         that stays away from the boundaries: ᾱ(t) = 0.05 + 0.9*t
         """
         # Modified linear schedule to avoid boundary singularities
-        # ᾱ(t) = 0.05 + 0.9*t ranges from 0.05 to 0.95
+        # ᾱ(t) = 0.01 + 0.98*t ranges from 0.01 to 0.99
         alpha_t = 0.01 + 0.98 * t
         alpha_prime_t = 0.98
         
         # Clip to avoid numerical issues
+        alpha_t = jnp.clip(alpha_t, 0.001, 0.999)
         
-        # gamma_t = jnp.log(alpha_t/(1.0 - alpha_t))
+        # gamma_t = logit(alpha_t) so that alpha_t = sigmoid(gamma_t)
         gamma_t = jax.scipy.special.logit(alpha_t)
         gamma_prime_t = alpha_prime_t / (alpha_t * (1.0 - alpha_t))
         
         return gamma_t, gamma_prime_t
-
 
 class CosineNoiseSchedule(NoiseSchedule):
     """Cosine noise schedule for smoother transitions.
@@ -210,7 +220,13 @@ class CosineNoiseSchedule(NoiseSchedule):
     - Backward process: z_t = sqrt(ᾱ(t)) * z_1 + sqrt(1-ᾱ(t)) * ε
     """
     
+    @nn.compact
     def __call__(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """Forward pass - same as get_gamma_gamma_prime_t for compatibility."""
+        return self.get_gamma_gamma_prime_t(t)
+    
+    @nn.compact
+    def get_gamma_gamma_prime_t(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """Get both γ(t) and γ'(t) for the cosine schedule.
         
         For cosine schedule: ᾱ(t) = sin(π/2 * t), so γ(t) = logit(sin(π/2 * t))
@@ -243,17 +259,56 @@ class SigmoidNoiseSchedule(NoiseSchedule):
     - Backward process: z_t = sqrt(ᾱ(t)) * z_1 + sqrt(1-ᾱ(t)) * ε
     """
     
-    gamma: float = 1.0  # Controls the steepness of the sigmoid
-    
+    gamma_rate: float = 4.0
+    offset: float = 0.5
+
+    @nn.compact
     def __call__(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """Forward pass - same as get_gamma_gamma_prime_t for compatibility."""
+        return self.get_gamma_gamma_prime_t(t)
+
+    @nn.compact
+    def get_gamma_gamma_prime_t(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """Get both γ(t) and γ'(t) for the sigmoid schedule.
         
         For sigmoid schedule: ᾱ(t) = σ(γ(t - 0.5)), so γ(t) = γ(t - 0.5)
         This ensures ᾱ(t) = sigmoid(γ(t)) = σ(γ(t - 0.5))
         γ'(t) = γ
         """
-        gamma_t = self.gamma * (t - 0.5)
-        gamma_prime_t = jnp.full_like(t, self.gamma)
+        gamma_t = self.gamma_rate * (t - self.offset)
+        gamma_prime_t = jnp.full_like(t, self.gamma_rate)
+        
+        return gamma_t, gamma_prime_t
+
+class SimpleLearnableNoiseSchedule(NoiseSchedule):
+    """Sigmoid noise schedule with learnable parameters.
+    
+    Following the paper notation:
+    - ᾱ(t) is the signal strength coefficient (INCREASING with time)
+    - For sigmoid schedule: ᾱ(t) = σ(γ(t - 0.5)) (INCREASING function)
+    - Backward process: z_t = sqrt(ᾱ(t)) * z_1 + sqrt(1-ᾱ(t)) * ε
+    """
+    
+    @nn.compact
+    def __call__(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """Forward pass - same as get_gamma_gamma_prime_t for compatibility."""
+        return self.get_gamma_gamma_prime_t(t)
+
+    @nn.compact
+    def get_gamma_gamma_prime_t(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """Get both γ(t) and γ'(t) for the sigmoid schedule.
+        
+        For sigmoid schedule: ᾱ(t) = σ(γ(t - 0.5)), so γ(t) = γ(t - 0.5)
+        This ensures ᾱ(t) = sigmoid(γ(t)) = σ(γ(t - 0.5))
+        γ'(t) = γ (constant for linear schedule)
+        
+        But for better dynamics, let's use a quadratic schedule where γ'(t) varies with time.
+        """
+        gamma_rate = self.param('gamma_rate', nn.initializers.constant(4.0), ())
+        gamma_offset = self.param('gamma_offset', nn.initializers.constant(0.5), ())
+
+        gamma_t = gamma_rate * (t - gamma_offset)
+        gamma_prime_t = jnp.full_like(t, gamma_rate)
         
         return gamma_t, gamma_prime_t
 
@@ -310,9 +365,15 @@ class LearnableNoiseSchedule(NoiseSchedule):
     hidden_dims: Tuple[int, ...] = (64, 64)  # Hidden dimensions for the neural network
     monotonic_network: nn.Module = SimpleMonotonicNetwork
     gamma_range: Tuple[float, float] = (-4.0, 4.0)
-        
+
+
     @nn.compact
     def __call__(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """Get both γ(t) and γ'(t) from the learnable schedule."""
+        return self._get_gamma_gamma_prime_t(t)
+
+    @nn.compact
+    def _get_gamma_gamma_prime_t(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """Get both γ(t) and γ'(t) from the learnable schedule.
         
         Args:
@@ -323,29 +384,20 @@ class LearnableNoiseSchedule(NoiseSchedule):
         gamma_max = self.param('gamma_max', nn.initializers.constant(self.gamma_range[1]), ())
 
         def gamma_fn(t_input):
-            f_t = self.monotonic_network(t_input).squeeze()
+            # Create and call the monotonic network
+            network = self.monotonic_network(hidden_dims=self.hidden_dims)
+            f_t = jnp.squeeze(network(t_input))
             f_t = t_input + (1 - t_input) * t_input * nn.sigmoid(scale_logit) * nn.sigmoid(f_t)
             return gamma_min + (gamma_max-gamma_min) * f_t
                 
         return jax.vmap(jax.value_and_grad(gamma_fn))(t)
 
     def get_gamma_gamma_prime_t(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Get both gamma_t and gamma_prime_t values for given timesteps t.
-        
-        Args:
-            t: Time values [batch_size]
-            params: Parameters for learnable noise schedule (optional)
-            
-        Returns:
-            Tuple of (gamma_t, gamma_prime_t) where:
-            - gamma_t: Gamma values [batch_size]
-            - gamma_prime_t: Gamma derivative values [batch_size]
-        """
         return self.apply({"params": params}, t)
 
 
 def create_noise_schedule(
-    schedule_type: str = "cosine", 
+    schedule_type: str, 
     **kwargs: Any
 ) -> NoiseSchedule:
     """Factory function to create noise schedules.
@@ -365,6 +417,7 @@ def create_noise_schedule(
         return SigmoidNoiseSchedule(**kwargs)
     else:
         raise ValueError(f"Unknown schedule type: {schedule_type}")
+
 
 
 
