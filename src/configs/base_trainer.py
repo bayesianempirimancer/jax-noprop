@@ -47,7 +47,7 @@ class BaseETTrainer:
         """
         Load training data from pickle file and split into train/val/test sets.
         
-        Expected data format: dict with keys 'eta', 'mu_T', 'cov_TT', 'ess'
+        Expected data format: dict with keys 'x', 'y'
         
         Args:
             data_path: Path to the pickle file containing training data
@@ -57,7 +57,7 @@ class BaseETTrainer:
             test_ratio: Fraction of data for testing (default: 0.1)
             
         Returns:
-            Tuple of (data_dict, eta_dim, mu_dim)
+            Tuple of (data_dict, x_dim, y_dim)
             
         Raises:
             ValueError: If data format is not the expected new format
@@ -68,7 +68,7 @@ class BaseETTrainer:
             raw_data = pickle.load(f)
         
         # Validate data format - must be new format with required keys
-        required_keys = {'eta', 'mu_T', 'cov_TT', 'ess'}
+        required_keys = {'x', 'y', 'cov_TT', 'ess'}
         if not isinstance(raw_data, dict):
             raise ValueError(f"Data must be a dictionary, got {type(raw_data)}")
         
@@ -78,24 +78,24 @@ class BaseETTrainer:
         
         # Check for old format and reject it
         if 'train' in raw_data or 'val' in raw_data:
-            raise ValueError("Old pre-split data format detected. Only new format with keys 'eta', 'mu_T', 'cov_TT', 'ess' is supported.")
+            raise ValueError("Old pre-split data format detected. Only new format with keys 'x', 'y', 'cov_TT', 'ess' is supported.")
         
         print("Loading new data format, applying train-val-test split")
         
         # Extract arrays from new format
-        eta = raw_data['eta']
-        mu_T = raw_data['mu_T']
+        x = raw_data['x']
+        y = raw_data['y']
         ess = raw_data['ess']
         cov_TT = raw_data['cov_TT']
         
         # Extract dimensions
-        eta_dim = eta.shape[-1]
-        mu_dim = mu_T.shape[-1]
+        x_dim = x.shape[-1]
+        y_dim = y.shape[-1]
         
         # Split the data
         train_data, val_data, test_data = BaseETTrainer.train_val_test_split(
-            eta=eta,
-            mu_T=mu_T,
+            x=x,
+            y=y,
             ess=ess,
             cov_TT=cov_TT,
             train_ratio=train_ratio,
@@ -115,17 +115,17 @@ class BaseETTrainer:
         if 'metadata' in raw_data:
             data['metadata'] = raw_data['metadata']
         
-        print(f"Loaded data with dimensions: eta_dim={eta_dim}, mu_dim={mu_dim}")
-        print(f"Train data shapes: eta {data['train']['eta'].shape}, mu_T {data['train']['mu_T'].shape}")
-        print(f"Val data shapes: eta {data['val']['eta'].shape}, mu_T {data['val']['mu_T'].shape}")
-        print(f"Test data shapes: eta {data['test']['eta'].shape}, mu_T {data['test']['mu_T'].shape}")
+        print(f"Loaded data with dimensions: x_dim={x_dim}, y_dim={y_dim}")
+        print(f"Train data shapes: x {data['train']['x'].shape}, y {data['train']['y'].shape}")
+        print(f"Val data shapes: x {data['val']['x'].shape}, y {data['val']['y'].shape}")
+        print(f"Test data shapes: x {data['test']['x'].shape}, y {data['test']['y'].shape}")
         
-        return data, eta_dim, mu_dim
+        return data, x_dim, y_dim
     
     @staticmethod
     def train_val_test_split(
-        eta: jnp.ndarray,
-        mu_T: jnp.ndarray,
+        x: jnp.ndarray,
+        y: jnp.ndarray,
         ess: Optional[jnp.ndarray] = None,
         cov_TT: Optional[jnp.ndarray] = None,
         train_ratio: float = 0.8,
@@ -137,10 +137,10 @@ class BaseETTrainer:
         Split data into train, validation, and test sets with randomization.
         
         Args:
-            eta: Natural parameters array [N, eta_dim]
-            mu_T: Expected sufficient statistics array [N, mu_dim]
+            x: Input features array [N, x_dim]
+            y: Target values array [N, y_dim]
             ess: Effective sample sizes array [N] (optional)
-            cov_TT: Covariance matrices array [N, mu_dim, mu_dim] (optional)
+            cov_TT: Covariance matrices array [N, y_dim, y_dim] (optional)
             train_ratio: Fraction of data for training (default: 0.8)
             val_ratio: Fraction of data for validation (default: 0.1)
             test_ratio: Fraction of data for testing (default: 0.1)
@@ -153,7 +153,7 @@ class BaseETTrainer:
         if abs(train_ratio + val_ratio + test_ratio - 1.0) > 1e-6:
             raise ValueError(f"Ratios must sum to 1.0, got {train_ratio + val_ratio + test_ratio}")
         
-        n_total = eta.shape[0]
+        n_total = x.shape[0]
         n_train = int(n_total * train_ratio)
         n_val = int(n_total * val_ratio)
         n_test = n_total - n_train - n_val  # Ensure exact split
@@ -173,16 +173,16 @@ class BaseETTrainer:
         
         # Create data dictionaries
         train_data = {
-            'eta': eta[train_indices],
-            'mu_T': mu_T[train_indices]
+            'x': x[train_indices],
+            'y': y[train_indices]
         }
         val_data = {
-            'eta': eta[val_indices],
-            'mu_T': mu_T[val_indices]
+            'x': x[val_indices],
+            'y': y[val_indices]
         }
         test_data = {
-            'eta': eta[test_indices],
-            'mu_T': mu_T[test_indices]
+            'x': x[test_indices],
+            'y': y[test_indices]
         }
         
         # Add optional fields if provided
@@ -391,7 +391,7 @@ class BaseETTrainer:
         
         return optimizer
     
-    def _compute_loss(self, params: Dict, eta: jnp.ndarray, targets: jnp.ndarray, 
+    def _compute_loss(self, params: Dict, x: jnp.ndarray, targets: jnp.ndarray, 
                      rngs: dict, training: bool = True) -> float:
         """
         Compute loss efficiently with exactly one forward pass.
@@ -403,7 +403,7 @@ class BaseETTrainer:
         
         Args:
             params: Model parameters
-            eta: Input natural parameters
+            x: Input features
             targets: Target values
             rngs: Random number generator keys
             training: Whether in training mode
@@ -416,7 +416,7 @@ class BaseETTrainer:
         if not hasattr(self.model, 'loss'):
             raise NotImplementedError(f"Model {type(self.model).__name__} must implement the 'loss' method")
         
-        primary_loss = self.model.loss(params, eta, targets, training=training, rngs=rngs)
+        primary_loss = self.model.loss(params, x, targets, training=training, rngs=rngs)
         
         # Ensure we don't get NaN and return
         primary_loss = jnp.where(jnp.isfinite(primary_loss), primary_loss, 1e6)        
@@ -609,10 +609,10 @@ class BaseETTrainer:
         )
     
     def train(self, 
-              train_eta: jnp.ndarray, 
-              train_mu_T: jnp.ndarray,
-              val_eta: jnp.ndarray, 
-              val_mu_T: jnp.ndarray,
+              train_x: jnp.ndarray, 
+              train_y: jnp.ndarray,
+              val_x: jnp.ndarray, 
+              val_y: jnp.ndarray,
               num_epochs: int,
               dropout_epochs: Optional[int] = None,
               learning_rate: Optional[float] = None,
@@ -621,16 +621,16 @@ class BaseETTrainer:
               save_steps: Optional[int] = None,
               output_dir: Optional[str] = None,
               training_config: Optional[BaseTrainingConfig] = None,
-              test_eta: Optional[jnp.ndarray] = None,
-              test_mu_T: Optional[jnp.ndarray] = None) -> Dict[str, Any]:
+              test_x: Optional[jnp.ndarray] = None,
+              test_y: Optional[jnp.ndarray] = None) -> Dict[str, Any]:
         """
         Train the model using the provided data with sophisticated config-based parameters.
         
         Args:
-            train_eta: Training natural parameters [N_train, eta_dim]
-            train_mu_T: Training target statistics [N_train, mu_dim]
-            val_eta: Validation natural parameters [N_val, eta_dim]
-            val_mu_T: Validation target statistics [N_val, mu_dim]
+            train_x: Training input features [N_train, x_dim]
+            train_y: Training target values [N_train, y_dim]
+            val_x: Validation input features [N_val, x_dim]
+            val_y: Validation target values [N_val, y_dim]
             num_epochs: Number of training epochs
             dropout_epochs: Number of epochs to use dropout (None = use dropout for entire training)
             learning_rate: Learning rate (uses config default if None)
@@ -639,8 +639,8 @@ class BaseETTrainer:
             save_steps: Steps between model saves (None = no intermediate saves)
             output_dir: Directory for saving checkpoints (None = no saving)
             training_config: Training configuration object
-            test_eta: Test natural parameters [N_test, eta_dim] (optional)
-            test_mu_T: Test target statistics [N_test, mu_dim] (optional)
+            test_x: Test input features [N_test, x_dim] (optional)
+            test_y: Test target values [N_test, y_dim] (optional)
             
         Returns:
             Dictionary with training results including test evaluation if test data provided
@@ -663,18 +663,18 @@ class BaseETTrainer:
         use_mini_batching = getattr(self.config, 'use_mini_batching', True)
         random_sampling = getattr(self.config, 'random_sampling', True)
         if not use_mini_batching:
-            batch_size = len(train_eta)  # Use entire dataset as one batch
+            batch_size = len(train_x)  # Use entire dataset as one batch
             
         print(f"Starting training for {num_epochs} epochs...")
-        print(f"Training data: {train_eta.shape[0]} samples")
-        print(f"Validation data: {val_eta.shape[0]} samples")
+        print(f"Training data: {train_x.shape[0]} samples")
+        print(f"Validation data: {val_x.shape[0]} samples")
         print(f"Learning rate: {learning_rate}")
         print(f"Mini-batching: {'ON' if use_mini_batching else 'OFF'}")
         if use_mini_batching:
             print(f"Batch size: {batch_size}")
             print(f"Sampling: {'RANDOM' if random_sampling else 'SEQUENTIAL'}")
         else:
-            print(f"Batch size: {len(train_eta)}")
+            print(f"Batch size: {len(train_x)}")
         print(f"Dropout epochs: {dropout_epochs}")
         print(f"Save checkpoints: {'ON' if save_steps is not None else 'OFF'}")
         if save_steps is not None:
@@ -682,7 +682,7 @@ class BaseETTrainer:
         
         # Initialize model parameters
         self.rng, init_key = random.split(self.rng)
-        params = self.model.init(init_key, train_eta[:1])  # Initialize with first sample
+        params = self.model.init(init_key, train_x[:1])  # Initialize with first sample
         
         # Create sophisticated optimizer based on config
         optimizer = self._create_optimizer(learning_rate, training_config)
@@ -697,8 +697,8 @@ class BaseETTrainer:
         val_losses = []
         
         # Calculate number of batches for progress tracking
-        num_batches = len(train_eta) // batch_size
-        if len(train_eta) % batch_size != 0:
+        num_batches = len(train_x) // batch_size
+        if len(train_x) % batch_size != 0:
             num_batches += 1
         
         # Use class method for batch sampling
@@ -706,12 +706,12 @@ class BaseETTrainer:
         # JIT-compiled training step for efficiency
         # Standard Flax approach: use training parameter to control dropout
         # Use static_argnums to handle the training parameter at compile time
-        def train_step(params, opt_state, eta_batch, mu_T_batch, rng_key, training):
+        def train_step(params, opt_state, x_batch, y_batch, rng_key, training):
             def loss_func(params):
                 rngs = {'dropout': rng_key}
                 
                 # Use efficient loss computation with training flag controlling dropout
-                loss = self._compute_loss(params, eta_batch, mu_T_batch, rngs, training=training)
+                loss = self._compute_loss(params, x_batch, y_batch, rngs, training=training)
                 
                 # Add L1 regularization loss
                 l1_weight = getattr(self.config, 'l1_reg_weight', 0.0)
@@ -746,13 +746,13 @@ class BaseETTrainer:
                 epoch_key, batch_key = random.split(epoch_key)
                 
                 # Sample batch on-demand
-                eta_batch = self._sample_batch(batch_key, train_eta, batch_size, batch_idx, random_sampling)
-                mu_T_batch = self._sample_batch(batch_key, train_mu_T, batch_size, batch_idx, random_sampling)
+                x_batch = self._sample_batch(batch_key, train_x, batch_size, batch_idx, random_sampling)
+                y_batch = self._sample_batch(batch_key, train_y, batch_size, batch_idx, random_sampling)
                 
                 # Efficient training step using standard Flax approach
                 params, opt_state, loss = train_step(
                     params, opt_state, 
-                    eta_batch, mu_T_batch, 
+                    x_batch, y_batch, 
                     batch_key, use_dropout
                 )
                 epoch_train_loss += loss
@@ -761,8 +761,8 @@ class BaseETTrainer:
             epoch_train_loss /= num_batches
             
             # Validation loss (no dropout)
-            val_predictions = self.model.predict(params, val_eta)
-            val_loss = jnp.mean((val_predictions - val_mu_T) ** 2)
+            val_predictions = self.model.predict(params, val_x)
+            val_loss = jnp.mean((val_predictions - val_y) ** 2)
             
             train_losses.append(float(epoch_train_loss))
             val_losses.append(float(val_loss))
@@ -786,7 +786,7 @@ class BaseETTrainer:
         # Compute inference time
         print("\nComputing inference time...")
         test_batch_size = 100
-        test_eta = val_eta[:test_batch_size]
+        test_x = val_x[:test_batch_size]
         
         # Check if this is a flow model (has predict method) - skip inference timing for flow models
         if hasattr(self.model, 'predict'):
@@ -795,13 +795,13 @@ class BaseETTrainer:
             inference_time_per_sample = 0.0
         else:
             # Warm up (JAX compilation)
-            _ = self.model.apply(params, test_eta[:1], training=False)
+            _ = self.model.apply(params, test_x[:1], training=False)
             
             # Time inference
             inference_times = []
             for _ in range(10):
                 start_inference = time.time()
-                _ = self.model.apply(params, test_eta, training=False)
+                _ = self.model.apply(params, test_x, training=False)
                 inference_times.append(time.time() - start_inference)
             
             avg_inference_time = sum(inference_times) / len(inference_times)
@@ -816,9 +816,9 @@ class BaseETTrainer:
         
         # Evaluate on test data if provided
         test_loss = None
-        if test_eta is not None and test_mu_T is not None:
+        if test_x is not None and test_y is not None:
             print(f"\nEvaluating on test data...")
-            test_loss = self._compute_loss(params, test_eta, test_mu_T, {}, training=False)
+            test_loss = self._compute_loss(params, test_x, test_y, {}, training=False)
             print(f"  Test loss: {test_loss:.6f}")
         
         # Create results dictionary
@@ -889,7 +889,7 @@ class BaseETTrainer:
             Dictionary with training results
         """
         # Load and split data
-        data, eta_dim, mu_dim = self.load_training_data(
+        data, x_dim, y_dim = self.load_training_data(
             data_path=data_path,
             split_seed=split_seed,
             train_ratio=train_ratio,
@@ -898,18 +898,18 @@ class BaseETTrainer:
         )
         
         # Extract test data if available and requested
-        test_eta = None
-        test_mu_T = None
+        test_x = None
+        test_y = None
         if evaluate_test and 'test' in data:
-            test_eta = data['test']['eta']
-            test_mu_T = data['test']['mu_T']
+            test_x = data['test']['x']
+            test_y = data['test']['y']
         
         # Train the model
         return self.train(
-            train_eta=data['train']['eta'],
-            train_mu_T=data['train']['mu_T'],
-            val_eta=data['val']['eta'],
-            val_mu_T=data['val']['mu_T'],
+            train_x=data['train']['x'],
+            train_y=data['train']['y'],
+            val_x=data['val']['x'],
+            val_y=data['val']['y'],
             num_epochs=num_epochs,
             dropout_epochs=dropout_epochs,
             learning_rate=learning_rate,
@@ -918,8 +918,8 @@ class BaseETTrainer:
             save_steps=save_steps,
             output_dir=output_dir,
             training_config=training_config,
-            test_eta=test_eta,
-            test_mu_T=test_mu_T
+            test_x=test_x,
+            test_y=test_y
         )
     
     def save_model(self, output_dir: str, results: Dict[str, Any]):

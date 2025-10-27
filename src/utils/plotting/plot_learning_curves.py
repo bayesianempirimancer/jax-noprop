@@ -136,10 +136,16 @@ def create_enhanced_learning_plot(
         test_pred_flat = test_pred.flatten()
         test_y_flat = test_y.flatten()
         
-        # Create scatter plots for all datasets with different colors
-        ax3.scatter(train_y_flat, train_pred_flat, alpha=0.6, s=15, color='blue', label='Train')
-        ax3.scatter(val_y_flat, val_pred_flat, alpha=0.6, s=15, color='red', label='Validation')
-        ax3.scatter(test_y_flat, test_pred_flat, alpha=0.6, s=15, color='green', label=test_label)
+        # Sample 200 points for better visualization
+        n_sample = 200
+        train_indices = np.random.choice(len(train_y_flat), min(n_sample, len(train_y_flat)), replace=False)
+        val_indices = np.random.choice(len(val_y_flat), min(n_sample, len(val_y_flat)), replace=False)
+        test_indices = np.random.choice(len(test_y_flat), min(n_sample, len(test_y_flat)), replace=False)
+        
+        # Create scatter plots for all datasets with different colors (sampled points)
+        ax3.scatter(train_y_flat[train_indices], train_pred_flat[train_indices], alpha=0.6, s=15, color='blue', label='Train')
+        ax3.scatter(val_y_flat[val_indices], val_pred_flat[val_indices], alpha=0.6, s=15, color='red', label='Validation')
+        ax3.scatter(test_y_flat[test_indices], test_pred_flat[test_indices], alpha=0.6, s=15, color='green', label=test_label)
         
         # Add perfect prediction line
         all_true = np.concatenate([train_y_flat, val_y_flat, test_y_flat])
@@ -172,10 +178,10 @@ def create_enhanced_learning_plot(
         val_residuals = val_pred_flat - val_y_flat
         test_residuals = test_pred_flat - test_y_flat
         
-        # Create scatter plots for all datasets with different colors
-        ax4.scatter(train_y_flat, train_residuals, alpha=0.6, s=15, color='blue', label='Train')
-        ax4.scatter(val_y_flat, val_residuals, alpha=0.6, s=15, color='red', label='Validation')
-        ax4.scatter(test_y_flat, test_residuals, alpha=0.6, s=15, color='green', label=test_label)
+        # Create scatter plots for all datasets with different colors (using same sampled points)
+        ax4.scatter(train_y_flat[train_indices], train_residuals[train_indices], alpha=0.6, s=15, color='blue', label='Train')
+        ax4.scatter(val_y_flat[val_indices], val_residuals[val_indices], alpha=0.6, s=15, color='red', label='Validation')
+        ax4.scatter(test_y_flat[test_indices], test_residuals[test_indices], alpha=0.6, s=15, color='green', label=test_label)
         
         ax4.axhline(y=0, color='k', linestyle='--', linewidth=2)
         ax4.set_xlabel('True Values')

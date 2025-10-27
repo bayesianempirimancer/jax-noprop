@@ -8,7 +8,7 @@ modified values while maintaining immutability and hashability.
 Usage Examples:
     # Basic usage with a config class
     @dataclass(frozen=True)
-    class MyConfig(BaseConfig):
+    class MyConfig(BaseConfigWIP):
         model_name: str = "my_model"
         config: dict = field(default_factory=lambda: {
             "dropout_rate": 0.1,
@@ -66,12 +66,10 @@ from dataclasses import dataclass, fields, replace
 from typing import Dict, Any, TypeVar, Type
 import copy
 
-
-T = TypeVar('T', bound='BaseConfig')
-
+T = TypeVar('T', bound='BaseConfigWIP')
 
 @dataclass(frozen=True)
-class BaseConfig:
+class BaseConfigWIP:
     """
     Lightweight base configuration class for frozen dataclasses.
     
@@ -81,11 +79,8 @@ class BaseConfig:
     - Simple update mechanism for creating modified configs
     """
     
-    # === MODEL IDENTIFICATION ===
-    model_name: str = "base_model_network"
-    model_type: str = "vanilla"
-    
-    def _deep_merge_dicts(self, base_dict: dict, update_dict: dict, path: str = "") -> dict:
+    @staticmethod
+    def _deep_merge_dicts(base_dict: dict, update_dict: dict, path: str = "") -> dict:
         """
         Recursively merge update_dict into base_dict, creating a new dict.
         Validates that all keys in update_dict exist in base_dict.
@@ -111,7 +106,7 @@ class BaseConfig:
             
             if isinstance(result[key], dict) and isinstance(value, dict):
                 # Both are dicts, merge recursively
-                result[key] = self._deep_merge_dicts(result[key], value, current_path)
+                result[key] = BaseConfigWIP._deep_merge_dicts(result[key], value, current_path)
             else:
                 # Replace the value
                 result[key] = copy.deepcopy(value)
@@ -218,7 +213,8 @@ class BaseConfig:
         # Create new instance with updated values
         return replace(self, **current_values)
 
-    def _deep_merge_dicts_append(self, base_dict: dict, new_dict: dict, path: str = "") -> dict:
+    @staticmethod
+    def _deep_merge_dicts_append(base_dict: dict, new_dict: dict, path: str = "") -> dict:
         """
         Recursively merge new_dict into base_dict, creating a new dict.
         Unlike _deep_merge_dicts, this allows adding new keys that don't exist in base_dict.
@@ -236,54 +232,12 @@ class BaseConfig:
         for key, value in new_dict.items():
             if isinstance(result.get(key), dict) and isinstance(value, dict):
                 # Both are dicts, merge recursively
-                result[key] = self._deep_merge_dicts_append(result[key], value, path)
+                result[key] = BaseConfigWIP._deep_merge_dicts_append(result[key], value, path)
             else:
                 # Add or replace the value
                 result[key] = copy.deepcopy(value)
         
         return result
-    
-    @classmethod
-    def with_shapes(cls, input_shape: tuple, output_shape: tuple, x_shape: tuple, **kwargs):
-        """
-        Create a Config with specific input, output, and x shapes.
-        
-        This is a convenience method for creating configs with the required shape parameters
-        for CRN modules. The shapes are added to the config dictionary.
-        
-        Note: This method requires the config class to have a 'config' field.
-        
-        Args:
-            input_shape: Input shape tuple (e.g., (8,) for 1D)
-            output_shape: Output shape tuple (e.g., (8,) for 1D)
-            x_shape: Conditional input shape tuple (e.g., (4,) for 1D)
-            **kwargs: Additional keyword arguments to pass to the config constructor
-            
-        Returns:
-            New config instance with the specified shapes
-            
-        Raises:
-            AttributeError: If the config class doesn't have a 'config' field
-        """
-        # Create a new instance with the provided kwargs
-        instance = cls(**kwargs)
-        
-        # Check if the instance has a config field
-        if not hasattr(instance, 'config'):
-            raise AttributeError(f"{cls.__name__} must have a 'config' field to use with_shapes()")
-        
-        shapes = {
-            "input_shape": input_shape,
-            "output_shape": output_shape,
-            "x_shape": x_shape
-        }
-        
-        # Try to update existing keys first, fall back to append if keys don't exist
-        try:
-            return instance.update_config(shapes)
-        except KeyError:
-            # If keys don't exist in config, use append to add them
-            return instance.append(shapes)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary using introspection."""

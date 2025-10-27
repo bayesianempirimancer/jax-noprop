@@ -36,7 +36,6 @@ class Config(BaseConfig):
     
     # Set model_name from config_dict
     model_name: str = "conditional_resnet"
-    output_dir_parent: str = "artifacts"
     
     # Hierarchical configuration structure
     config_dict = {
@@ -367,6 +366,62 @@ class PotentialFlowWrapper(nn.Module):
         # Return negative gradient (potential flow)
         return -gradients
 
+class HamiltonianFlowWrapper(nn.Module):
+    """
+    Wrapper that converts any conditional ResNet into a Hamiltonian flow.
+    
+    Takes a conditional ResNet (function of z,x,t) and uses it to define a potential function.
+    The flow is then computed under the assumption that z = jnp.concatenate([p, q], axis=-1).
+    
+    Args:
+        resnet_config: Configuration for the ResNet
+        cond_resnet: String specifying the ResNet type ("conditional_resnet_mlp", "geometric_flow", "potential_flow")
+    """
+    resnet_config: Config
+    cond_resnet: str = "conditional_resnet_mlp"
+    
+    def setup(self):
+        """Initialize the ResNet and gradient utility once for efficiency."""
+        # Create the ResNet instance once
+        self.resnet_instance = create_cond_resnet(
+            model_type=self.cond_resnet,
+            model_config=self.resnet_config.config_dict
+        )
+        
+        # Create ResNet factory function that uses the wrapper's parameters
+        # NOTE: This factory function is ESSENTIAL - the gradient utilities expect a callable
+        # function, not a Flax module. The factory provides the correct interface while
+        # maintaining the parameter scope from the wrapper's self.variables.
+        def resnet_factory(z_input, x_input, t_input, training=True):
+            return self.resnet_instance(z_input, x_input, t_input, training=training)
+        
+        # Create gradient utility once for efficiency
+        # NOTE: We pass resnet_factory (not resnet_instance) because GradNetUtility expects
+        # a callable function, not a Flax module. The factory maintains proper parameter scoping.
+        self.grad_utility = GradNetUtility(resnet_factory, reduction_method="sum")
+    
+    def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: Optional[jnp.ndarray] = None, training: bool = True, rngs=None) -> jnp.ndarray:
+        """Compute the potential flow dz/dt = -∇_z V(z,x,t), where V is the potential.
+        
+        Args:
+            z: Current state [batch_size, z_dim]
+            x: Conditional input [batch_size, x_dim] 
+            t: Time values [batch_size] or scalar (optional)
+            training: Whether in training mode
+            rngs: Random number generator keys
+            
+        Returns:
+            Flow dz/dt [batch_size, z_dim]
+        """
+        
+        # Compute gradients using the pre-created utility class (handles broadcasting automatically)
+        # Pass the wrapper's own parameters to the utility
+        gradients = self.grad_utility(self.variables, z, x, t, training=training, rngs=rngs)
+
+        dHdq, dHdp = jnp.split(gradients, 2, axis=-1)
+
+        # Return Hamiltonian flow: dq/dt = dH/dp, dp/dt = -dH/dq
+        return jnp.concatenate([dHdp, -dHdq], axis=-1)
 
 class NaturalFlowWrapper(nn.Module):
     """

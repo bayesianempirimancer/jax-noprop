@@ -34,7 +34,6 @@ class Config(BaseConfig):
     
     # Set model_name from config_dict
     model_name: str = "noprop_df_net"
-    output_dir_parent: str = "artifacts"
     
     # Properties for easy access
     

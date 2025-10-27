@@ -24,12 +24,12 @@ class BaseModel(nn.Module, Generic[ConfigType]):
     config: ConfigType
     
     @nn.compact
-    def __call__(self, eta: jnp.ndarray, training: bool = True, rngs: dict = None, **kwargs) -> tuple[jnp.ndarray, jnp.ndarray]:
+    def __call__(self, x: jnp.ndarray, training: bool = True, rngs: dict = None, **kwargs) -> tuple[jnp.ndarray, jnp.ndarray]:
         """
         Forward pass through the model.
         
         Args:
-            eta: Natural parameters of shape (batch_size, eta_dim)
+            x: input (batch_size, dim)
             training: Whether in training mode
             rngs: Random number generator keys for stochastic operations
             **kwargs: Additional model-specific arguments
@@ -41,13 +41,13 @@ class BaseModel(nn.Module, Generic[ConfigType]):
         """
         raise NotImplementedError("Subclasses must implement __call__ method")
     
-    def predict(self, params: Dict, eta: jnp.ndarray, rngs: dict = None, **kwargs) -> jnp.ndarray:
+    def predict(self, params: Dict, x: jnp.ndarray, rngs: dict = None, **kwargs) -> jnp.ndarray:
         """
         Make predictions for inference.
         
         Args:
             params: Model parameters
-            eta: Natural parameters of shape (batch_size, eta_dim)
+            x: input of shape (batch_size, dim)
             rngs: Random number generator keys for stochastic operations (optional)
             **kwargs: Additional model-specific arguments
             
@@ -56,14 +56,14 @@ class BaseModel(nn.Module, Generic[ConfigType]):
         """
         raise NotImplementedError("Subclasses must implement predict method")
     
-    def loss(self, params: Dict, eta: jnp.ndarray, targets: jnp.ndarray, 
+    def loss(self, params: Dict, x: jnp.ndarray, targets: jnp.ndarray, 
              training: bool = True, rngs: dict = None, **kwargs) -> jnp.ndarray:
         """
         Compute training loss.
         
         Args:
             params: Model parameters
-            eta: Natural parameters of shape (batch_size, eta_dim)
+            x: Input of shape (batch_size, dim)
             targets: Target values of shape (batch_size, output_dim)
             training: Whether in training mode
             rngs: Random number generator keys for stochastic operations (optional)

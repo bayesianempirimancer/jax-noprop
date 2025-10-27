@@ -34,7 +34,6 @@ class Config(BaseConfig):
     
     # Set model_name from config_dict
     model_name: str = "noprop_ct_net"
-    output_dir_parent: str = "artifacts"
     
     # Properties for easy access
     
@@ -77,7 +76,7 @@ class NoPropCT(BaseModel[Config]):
     
     config: Config
     z_shape: Tuple[int, ...]  # Shape of target z (excluding batch dimensions)
-    x_ndims: int = 1  # Number of dimensions in input x
+    x_ndims: int = 1  # Number of dimensions in input x (used to identify batch shape for predictions)
     model: str = "conditional_resnet_mlp"  # Model type string
     model_config: Optional[Config] = None
     noise_schedule: str = "learnable"

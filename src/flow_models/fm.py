@@ -34,7 +34,6 @@ class Config(BaseConfig):
     
     # Set model_name from config_dict
     model_name: str = "noprop_fm_net"
-    output_dir_parent: str = "artifacts"
     
     # Properties for easy access
     
@@ -211,7 +210,7 @@ class NoPropFM(BaseModel[Config]):
 #        target = target - z_shift
 
         z_0 = jr.normal(z_0_key, batch_shape + self.z_shape)
-        z_t = t[...,None] * target + self.config.sigma_t * jr.normal(z_t_noise_key, batch_shape + self.z_shape)
+        z_t = t[...,None] * target + jnp.sqrt(1-t[...,None]) * jr.normal(z_t_noise_key, batch_shape + self.z_shape)
 
         # Get model output
         key, dropout_key = jr.split(key)
