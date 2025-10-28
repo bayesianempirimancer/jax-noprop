@@ -83,7 +83,6 @@ class BaseConfig:
     
     # === MODEL IDENTIFICATION ===
     model_name: str = "base_model_network"
-    model_type: str = "vanilla"
     
     def _deep_merge_dicts(self, base_dict: dict, update_dict: dict, path: str = "") -> dict:
         """
@@ -244,7 +243,7 @@ class BaseConfig:
         return result
     
     @classmethod
-    def with_shapes(cls, input_shape: tuple, output_shape: tuple, x_shape: tuple, **kwargs):
+    def with_shapes(cls, latent_shape: tuple, output_shape: tuple, input_shape: tuple, **kwargs):
         """
         Create a Config with specific input, output, and x shapes.
         
@@ -254,9 +253,9 @@ class BaseConfig:
         Note: This method requires the config class to have a 'config' field.
         
         Args:
-            input_shape: Input shape tuple (e.g., (8,) for 1D)
+            latent_shape: Latent shape tuple (e.g., (8,) for 1D)
             output_shape: Output shape tuple (e.g., (8,) for 1D)
-            x_shape: Conditional input shape tuple (e.g., (4,) for 1D)
+            input_shape: Conditional input shape tuple (e.g., (4,) for 1D)
             **kwargs: Additional keyword arguments to pass to the config constructor
             
         Returns:
@@ -273,9 +272,9 @@ class BaseConfig:
             raise AttributeError(f"{cls.__name__} must have a 'config' field to use with_shapes()")
         
         shapes = {
-            "input_shape": input_shape,
+            "latent_shape": latent_shape,
             "output_shape": output_shape,
-            "x_shape": x_shape
+            "input_shape": input_shape
         }
         
         # Try to update existing keys first, fall back to append if keys don't exist

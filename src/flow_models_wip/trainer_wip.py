@@ -1,7 +1,8 @@
 """
-Trainer for VAE_flow (NoProp-CT) implementation.
+Streamlined trainer for VAE_flow (NoProp-CT) implementation.
 
-This trainer handles the training loop for the VAE_flow model with flow matching.
+This trainer leverages the built-in methods from VAE_flow and provides
+plotting and saving functionality consistent with the original trainer.
 """
 from functools import partial
 import jax
@@ -36,7 +37,7 @@ except ImportError:
 
 
 class VAEFlowTrainer:
-    """Trainer for VAE_flow model."""
+    """Streamlined trainer for VAE_flow model using built-in methods."""
     
     def __init__(
         self,
@@ -49,36 +50,31 @@ class VAEFlowTrainer:
         Initialize the trainer.
         
         Args:
-            config: VAE_flow configuration
+            config: VAE flow configuration
             learning_rate: Learning rate for optimizer
-            optimizer_name: Name of optimizer ("adam", "adamw", "sgd")
-            seed: Random seed
+            optimizer_name: Name of optimizer ('adam', 'sgd', etc.)
+            seed: Random seed for reproducibility
         """
         self.config = config
         self.learning_rate = learning_rate
         self.optimizer_name = optimizer_name
         self.seed = seed
         
-        # Initialize model (shapes are now computed from config)
+        # Initialize model
         self.model = VAE_flow(config=config)
         
         # Initialize optimizer
         if optimizer_name.lower() == "adam":
             self.optimizer = optax.adam(learning_rate)
-        elif optimizer_name.lower() == "adamw":
-            self.optimizer = optax.adamw(learning_rate)
         elif optimizer_name.lower() == "sgd":
             self.optimizer = optax.sgd(learning_rate)
         else:
-            raise ValueError(f"Unknown optimizer: {optimizer_name}")
+            raise ValueError(f"Unsupported optimizer: {optimizer_name}")
         
-        # Initialize random key
-        self.rng = jr.PRNGKey(seed)
-        
-        # Training state
+        # Initialize state
         self.params = None
         self.opt_state = None
-        self.step = 0
+        self.rng = jr.PRNGKey(seed)
         
     def initialize(self, x_sample: jnp.ndarray, y_sample: jnp.ndarray, z_sample: jnp.ndarray, t_sample: jnp.ndarray):
         """
@@ -91,15 +87,14 @@ class VAEFlowTrainer:
             t_sample: Sample time data [batch_size]
         """
         self.rng, init_rng = jr.split(self.rng)
-        # Use standard Flax initialization - @nn.compact methods will be initialized automatically
-        # The __call__ method now takes (x, y, key, training)
+        # Use the model's __call__ method for initialization
         self.params = self.model.init(init_rng, x_sample, y_sample, init_rng)
         self.opt_state = self.optimizer.init(self.params)
         print(f"Model initialized with {sum(x.size for x in jax.tree_leaves(self.params))} parameters")
         
     def train_step(self, x_batch: jnp.ndarray, y_batch: jnp.ndarray, use_dropout: bool = True) -> Dict[str, float]:
         """
-        Single training step using VAE_flow's optimized JIT-compiled train_step method.
+        Single training step using VAE_flow's built-in train_step method.
         
         Args:
             x_batch: Input batch [batch_size, input_dim]
@@ -112,7 +107,7 @@ class VAEFlowTrainer:
         if self.params is None or self.opt_state is None:
             raise ValueError("Model not initialized. Call initialize() first.")
         
-        # Use VAE_flow's JIT-compiled train_step method (now works with BaseModel inheritance)
+        # Use VAE_flow's built-in train_step method
         self.rng, train_rng = jr.split(self.rng)
         if use_dropout:
             self.params, self.opt_state, loss, metrics = self.model.train_step_with_dropout(
@@ -123,64 +118,63 @@ class VAEFlowTrainer:
                 self.params, x_batch, y_batch, self.opt_state, self.optimizer, train_rng
             )
         
-        # Update step counter
-        self.step += 1
-        
-        # Convert metrics to float for logging
-        metrics_float = {k: float(v) for k, v in metrics.items()}
-        metrics_float['step'] = self.step
-        
-        return metrics_float
+        return metrics
     
     def train_epoch(self, x_data: jnp.ndarray, y_data: jnp.ndarray, batch_size: int = 256, use_dropout: bool = True) -> Dict[str, float]:
         """
         Train for one epoch.
         
         Args:
-            x_data: Input data [num_samples, input_dim]
-            y_data: Target data [num_samples, output_dim]
+            x_data: Training input data [num_samples, input_dim]
+            y_data: Training target data [num_samples, output_dim]
             batch_size: Batch size for training
             use_dropout: Whether to use dropout during training
             
         Returns:
-            Dictionary of average metrics for the epoch
+            Dictionary of epoch metrics
         """
+        if self.params is None or self.opt_state is None:
+            raise ValueError("Model not initialized. Call initialize() first.")
+        
         num_samples = x_data.shape[0]
-        num_batches = num_samples // batch_size  # Use integer division for efficiency
+        num_batches = (num_samples + batch_size - 1) // batch_size
         
-        epoch_losses = []
-        epoch_flow_losses = []
-        epoch_recon_losses = []
-        
-        # Shuffle data for this epoch
-        self.rng, shuffle_key = jr.split(self.rng)
-        indices = jr.permutation(shuffle_key, num_samples)
-        x_shuffled = x_data[indices]
-        y_shuffled = y_data[indices]
-        
-        for i in range(num_batches):
-            start_idx = i * batch_size
-            end_idx = start_idx + batch_size
-            
-            x_batch = x_shuffled[start_idx:end_idx]
-            y_batch = y_shuffled[start_idx:end_idx]
-            
-            # Single training step
-            metrics = self.train_step(x_batch, y_batch, use_dropout)
-            
-            epoch_losses.append(metrics['total_loss'])
-            epoch_flow_losses.append(metrics['flow_loss'])
-            epoch_recon_losses.append(metrics['recon_loss'])
-        
-        # Average metrics across batches
-        avg_metrics = {
-            'total_loss': jnp.mean(jnp.array(epoch_losses)),
-            'flow_loss': jnp.mean(jnp.array(epoch_flow_losses)),
-            'recon_loss': jnp.mean(jnp.array(epoch_recon_losses)),
-            'step': self.step
+        epoch_metrics = {
+            'total_loss': 0.0,
+            'flow_loss': 0.0,
+            'recon_loss': 0.0,
+            'step': 0
         }
         
-        return avg_metrics
+        # Shuffle data
+        self.rng, shuffle_rng = jr.split(self.rng)
+        perm = jr.permutation(shuffle_rng, num_samples)
+        x_data = x_data[perm]
+        y_data = y_data[perm]
+        
+        # Train on batches
+        for i in range(num_batches):
+            start_idx = i * batch_size
+            end_idx = min((i + 1) * batch_size, num_samples)
+            
+            x_batch = x_data[start_idx:end_idx]
+            y_batch = y_data[start_idx:end_idx]
+            
+            # Training step
+            metrics = self.train_step(x_batch, y_batch, use_dropout=use_dropout)
+            
+            # Accumulate metrics
+            for key in epoch_metrics:
+                if key in metrics:
+                    epoch_metrics[key] += metrics[key]
+            epoch_metrics['step'] += 1
+        
+        # Average metrics
+        for key in epoch_metrics:
+            if key != 'step':
+                epoch_metrics[key] /= num_batches
+        
+        return epoch_metrics
     
     def train(
         self,
@@ -214,6 +208,7 @@ class VAEFlowTrainer:
         if dropout_epochs is None:
             dropout_epochs = num_epochs
         
+        # Initialize history
         history = {
             'train_losses': [],
             'train_flow_losses': [],
@@ -222,7 +217,13 @@ class VAEFlowTrainer:
             'val_flow_losses': [],
             'val_recon_losses': [],
             'train_accuracies': [],
-            'val_accuracies': []
+            'val_accuracies': [],
+            'train_pred': [],
+            'val_pred': [],
+            'train_x': [],
+            'train_y': [],
+            'val_x': [],
+            'val_y': []
         }
         
         if verbose:
@@ -232,73 +233,61 @@ class VAEFlowTrainer:
             if validation_data is not None:
                 print(f"Validation data shape: x={validation_data[0].shape}, y={validation_data[1].shape}")
         
+        # Training loop
         for epoch in tqdm(range(num_epochs), desc="Training", disable=not verbose):
-            # Determine if we should use dropout for this epoch
+            # Determine if we should use dropout
             use_dropout = epoch < dropout_epochs
             
-            # Training
+            # Train epoch
             train_metrics = self.train_epoch(x_data, y_data, batch_size, use_dropout)
             
-            # Validation using the same JIT-compiled loss function
+            # Store training metrics
+            history['train_losses'].append(train_metrics['total_loss'])
+            history['train_flow_losses'].append(train_metrics['flow_loss'])
+            history['train_recon_losses'].append(train_metrics['recon_loss'])
+            
+            # Validation
             if validation_data is not None:
                 val_metrics = self.evaluate(validation_data[0], validation_data[1], batch_size)
                 history['val_losses'].append(val_metrics['total_loss'])
                 history['val_flow_losses'].append(val_metrics['flow_loss'])
                 history['val_recon_losses'].append(val_metrics['recon_loss'])
+                history['val_accuracies'].append(val_metrics.get('accuracy', 0.0))
             
-            # Record training metrics
-            history['train_losses'].append(train_metrics['total_loss'])
-            history['train_flow_losses'].append(train_metrics['flow_loss'])
-            history['train_recon_losses'].append(train_metrics['recon_loss'])
-            
-            # Skip expensive accuracy computation during training
-            # Accuracy will be computed only at the end
-            history['train_accuracies'].append(0.0)  # Placeholder
-            history['val_accuracies'].append(0.0)    # Placeholder
-            
-            # Print progress
-            if verbose and (epoch + 1) % 10 == 0:
-                print(f"Epoch {epoch + 1}/{num_epochs}")
-                print(f"  Train Loss: {train_metrics['total_loss']:.4f} "
-                      f"(Flow: {train_metrics['flow_loss']:.4f}, "
-                      f"Recon: {train_metrics['recon_loss']:.4f})")
+            # Compute accuracy for training data (sample)
+            if epoch % 10 == 0 or epoch == num_epochs - 1:
+                train_acc = self.compute_accuracy(x_data[:100], y_data[:100])
+                history['train_accuracies'].append(train_acc)
+                
                 if validation_data is not None:
-                    print(f"  Val Loss: {val_metrics['total_loss']:.4f} "
-                          f"(Flow: {val_metrics['flow_loss']:.4f}, "
-                          f"Recon: {val_metrics['recon_loss']:.4f})")
-                print()
+                    val_acc = self.compute_accuracy(validation_data[0][:100], validation_data[1][:100])
+                    history['val_accuracies'].append(val_acc)
         
-        # Add final predictions and data to history for plotting
-        print("\nComputing final predictions...")
-        history['train_pred'] = self._compute_predictions(x_data)
-        history['val_pred'] = self._compute_predictions(validation_data[0]) if validation_data is not None else None
-        history['train_x'] = x_data
-        history['train_y'] = y_data
-        history['val_x'] = validation_data[0] if validation_data is not None else None
-        history['val_y'] = validation_data[1] if validation_data is not None else None
+        # Store final predictions and data (use more samples for better visualization)
+        num_viz_samples = min(2000, x_data.shape[0])  # Use up to 2000 samples for visualization
+        history['train_pred'] = self.predict(x_data[:num_viz_samples])
+        history['train_x'] = np.array(x_data[:num_viz_samples])
+        history['train_y'] = np.array(y_data[:num_viz_samples])
         
-        # Compute final accuracies (expensive operation, done only once at the end)
-        print("Evaluating classification performance...")
-        final_train_acc = self._compute_accuracy(x_data, y_data)
-        final_val_acc = self._compute_accuracy(validation_data[0], validation_data[1]) if validation_data is not None else 0.0
+        if validation_data is not None:
+            val_num_viz_samples = min(1000, validation_data[0].shape[0])  # Use up to 1000 validation samples
+            history['val_pred'] = self.predict(validation_data[0][:val_num_viz_samples])
+            history['val_x'] = np.array(validation_data[0][:val_num_viz_samples])
+            history['val_y'] = np.array(validation_data[1][:val_num_viz_samples])
         
-        # Update the last accuracy values in history
-        if history['train_accuracies']:
-            history['train_accuracies'][-1] = final_train_acc
-        if history['val_accuracies']:
-            history['val_accuracies'][-1] = final_val_acc
+        if verbose:
+            print("Training completed!")
         
         return history
     
-    def evaluate(self, x_data: jnp.ndarray, y_data: jnp.ndarray, batch_size: int = 256, training: bool = False) -> Dict[str, float]:
+    def evaluate(self, x_data: jnp.ndarray, y_data: jnp.ndarray, batch_size: int = 256) -> Dict[str, float]:
         """
-        Evaluate the model on given data using the same JIT-compiled loss function as training.
+        Evaluate the model on given data.
         
         Args:
             x_data: Input data [num_samples, input_dim]
             y_data: Target data [num_samples, output_dim]
-            batch_size: Batch size for evaluation (unused, kept for compatibility)
-            training: Whether to use training mode (affects dropout, etc.)
+            batch_size: Batch size for evaluation
             
         Returns:
             Dictionary of evaluation metrics
@@ -306,23 +295,90 @@ class VAEFlowTrainer:
         if self.params is None:
             raise ValueError("Model not initialized. Call initialize() first.")
         
-        # Use the same JIT-compiled loss function as training
-        # Generate a single random key for the entire evaluation
-        self.rng, eval_rng = jr.split(self.rng)
+        num_samples = x_data.shape[0]
+        num_batches = (num_samples + batch_size - 1) // batch_size
         
-        # Stop gradient computation for evaluation (speed optimization)
-        params_no_grad = jax.lax.stop_gradient(self.params)
+        total_loss = 0.0
+        flow_loss = 0.0
+        recon_loss = 0.0
         
-        # Compute loss on the entire dataset at once (JIT-compiled) with specified training mode
-        loss, metrics = self.model.loss(params_no_grad, x_data, y_data, eval_rng, training=training)
+        # Evaluate on batches
+        for i in range(num_batches):
+            start_idx = i * batch_size
+            end_idx = min((i + 1) * batch_size, num_samples)
+            
+            x_batch = x_data[start_idx:end_idx]
+            y_batch = y_data[start_idx:end_idx]
+            
+            # Use model's loss method for evaluation
+            self.rng, eval_rng = jr.split(self.rng)
+            loss, metrics = self.model.loss(self.params, x_batch, y_batch, eval_rng, training=False)
+            
+            total_loss += loss
+            flow_loss += metrics.get('flow_loss', 0.0)
+            recon_loss += metrics.get('recon_loss', 0.0)
         
-        # Convert to float for logging (outside JIT compilation)
-        return {k: float(v) for k, v in metrics.items()}
+        # Average metrics
+        avg_loss = total_loss / num_batches
+        avg_flow_loss = flow_loss / num_batches
+        avg_recon_loss = recon_loss / num_batches
+        
+        return {
+            'total_loss': float(avg_loss),
+            'flow_loss': float(avg_flow_loss),
+            'recon_loss': float(avg_recon_loss)
+        }
+    
+    def predict(self, x_data: jnp.ndarray, num_steps: int = 20, integration_method: str = "euler", output_type: str = "end_point") -> jnp.ndarray:
+        """
+        Make predictions using the model's predict method.
+        
+        Args:
+            x_data: Input data [num_samples, input_dim]
+            num_steps: Number of integration steps
+            integration_method: Integration method for ODE solving
+            output_type: Type of output ('end_point', 'trajectory')
+            
+        Returns:
+            Predictions [num_samples, output_dim] or [num_samples, num_steps, output_dim]
+        """
+        if self.params is None:
+            raise ValueError("Model not initialized. Call initialize() first.")
+        
+        return self.model.predict(self.params, x_data, num_steps, integration_method, output_type)
+    
+    def compute_accuracy(self, x_data: jnp.ndarray, y_data: jnp.ndarray) -> float:
+        """
+        Compute classification accuracy.
+        
+        Args:
+            x_data: Input data [num_samples, input_dim]
+            y_data: Target data [num_samples, output_dim] (one-hot encoded)
+            
+        Returns:
+            Accuracy as a float between 0 and 1
+        """
+        predictions = self.predict(x_data)
+        
+        # Convert to numpy for easier computation
+        pred_np = np.array(predictions)
+        y_np = np.array(y_data)
+        
+        # For classification, compare predicted vs true classes
+        if y_np.shape[1] > 1:  # One-hot encoded
+            pred_classes = np.argmax(pred_np, axis=1)
+            true_classes = np.argmax(y_np, axis=1)
+        else:  # Binary classification
+            pred_classes = (pred_np > 0.5).astype(int).flatten()
+            true_classes = y_np.astype(int).flatten()
+        
+        accuracy = np.mean(pred_classes == true_classes)
+        return float(accuracy)
     
     def save_params(self, filepath: str):
         """Save model parameters to file."""
         if self.params is None:
-            raise ValueError("Model not initialized. Call initialize() first.")
+            raise ValueError("Model not initialized. No parameters to save.")
         
         with open(filepath, 'wb') as f:
             pickle.dump(self.params, f)
@@ -335,667 +391,229 @@ class VAEFlowTrainer:
         print(f"Parameters loaded from {filepath}")
     
     def save_results(self, results: Dict[str, Any], output_dir: str):
-        """Save training results and generate plots."""
+        """Save training results and create plots."""
+        os.makedirs(output_dir, exist_ok=True)
         
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        # Save training results
-        with open(output_path / "training_results.pkl", 'wb') as f:
+        # Save raw results
+        results_file = os.path.join(output_dir, "training_results.pkl")
+        with open(results_file, 'wb') as f:
             pickle.dump(results, f)
+        print(f"Results saved to {results_file}")
         
-        # Generate plots
-        print("Generating plots...")
+        # Save parameters
+        params_file = os.path.join(output_dir, "model_params.pkl")
+        self.save_params(params_file)
         
-        # Use plotting functions if available
-        try:
-            
-            # 1. Learning curve plot
-            print("Generating learning curve plot...")
-            try:
-                learning_plot_path = output_path / "learning_analysis.png"
-                create_enhanced_learning_plot(
-                    results=results,
-                    train_pred=results['train_pred'],
-                    val_pred=results['val_pred'],
-                    test_pred=results.get('test_pred'),
-                    train_y=results['train_y'],
-                    val_y=results['val_y'],
-                    test_y=results.get('test_y'),
-                    output_path=str(learning_plot_path),
-                    model_name="VAE Flow Model",
-                    skip_epochs=0  # Don't skip any epochs for VAE
-                )
-                print(f"Learning curve plot saved to: {learning_plot_path}")
-            except Exception as e:
-                print(f"Warning: Could not generate learning curve plot: {e}")
-            
-            # 2. Data visualization plot (original data + class-colored points)
-            print("Generating data visualization plot...")
-            try:
-                self._create_data_visualization_plot(results, output_path)
-            except Exception as e:
-                print(f"Warning: Could not generate data visualization plot: {e}")
-            
-            # 3. Trajectory plots
-            print("Generating trajectory plots...")
-            try:
-                self._create_trajectory_plots(results, output_path)
-            except Exception as e:
-                print(f"Warning: Could not generate trajectory plots: {e}")
-            
-            # 4. Latent space flow plots
-            print("Generating latent space flow plots...")
-            try:
-                self._create_latent_space_flow_plot(results, output_path)
-            except Exception as e:
-                print(f"Warning: Could not generate latent space flow plots: {e}")
-                
-        except ImportError as e:
-            print(f"Warning: Could not import plotting utilities: {e}")
-            print("Skipping plot generation...")
-        
-        print(f"Results saved to: {output_path}")
+        # Create plots if plotting is available
+        if PLOTTING_AVAILABLE:
+            self._create_plots(results, output_dir)
+        else:
+            print("Plotting not available. Install plotting dependencies to generate plots.")
     
-    def _create_vae_diagnostic_plots(self, results: Dict[str, Any], output_path):
-        """Create VAE-specific diagnostic plots."""
+    def _create_plots(self, results: Dict[str, Any], output_dir: str):
+        """Create diagnostic plots."""
+        try:
+            # Learning curves
+            if 'train_losses' in results and len(results['train_losses']) > 0:
+                self._create_learning_curves_plot(results, output_dir)
+            
+            # Data visualization
+            if 'train_x' in results and 'train_y' in results:
+                self._create_data_visualization_plot(results, output_dir)
+            
+            # Predictions vs targets
+            if 'train_pred' in results and 'train_y' in results:
+                self._create_predictions_plot(results, output_dir)
+                
+        except Exception as e:
+            print(f"Warning: Error creating plots: {e}")
+            traceback.print_exc()
+    
+    def _create_learning_curves_plot(self, results: Dict[str, Any], output_dir: str):
+        """Create learning curves plot."""
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+        fig.suptitle('Training Progress', fontsize=16)
         
-        # 1. Loss components plot
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle('VAE Flow Model - Training Analysis', fontsize=16, fontweight='bold')
-        
-        # Plot training losses
-        epochs = range(1, len(results['train_loss']) + 1)
+        epochs = range(len(results['train_losses']))
         
         # Total loss
-        axes[0, 0].plot(epochs, results['train_loss'], 'b-', label='Train', linewidth=2)
-        axes[0, 0].plot(epochs, results['val_loss'], 'r-', label='Validation', linewidth=2)
+        axes[0, 0].plot(epochs, results['train_losses'], label='Train', color='blue')
+        if 'val_losses' in results and len(results['val_losses']) > 0:
+            val_epochs = range(len(results['val_losses']))
+            axes[0, 0].plot(val_epochs, results['val_losses'], label='Validation', color='red')
+        axes[0, 0].set_title('Total Loss')
         axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_ylabel('Total Loss')
-        axes[0, 0].set_title('Total Loss Curves')
+        axes[0, 0].set_ylabel('Loss')
         axes[0, 0].legend()
-        axes[0, 0].grid(True, alpha=0.3)
+        axes[0, 0].grid(True)
         
         # Flow loss
-        if 'train_flow_loss' in results:
-            axes[0, 1].plot(epochs, results['train_flow_loss'], 'g-', label='Flow Loss', linewidth=2)
-            axes[0, 1].set_xlabel('Epoch')
-            axes[0, 1].set_ylabel('Flow Loss')
-            axes[0, 1].set_title('Flow Matching Loss')
-            axes[0, 1].legend()
-            axes[0, 1].grid(True, alpha=0.3)
+        axes[0, 1].plot(epochs, results['train_flow_losses'], label='Train', color='blue')
+        if 'val_flow_losses' in results and len(results['val_flow_losses']) > 0:
+            axes[0, 1].plot(val_epochs, results['val_flow_losses'], label='Validation', color='red')
+        axes[0, 1].set_title('Flow Loss')
+        axes[0, 1].set_xlabel('Epoch')
+        axes[0, 1].set_ylabel('Loss')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True)
         
         # Reconstruction loss
-        if 'train_recon_loss' in results:
-            axes[1, 0].plot(epochs, results['train_recon_loss'], 'm-', label='Recon Loss', linewidth=2)
-            axes[1, 0].set_xlabel('Epoch')
-            axes[1, 0].set_ylabel('Reconstruction Loss')
-            axes[1, 0].set_title('Reconstruction Loss')
-            axes[1, 0].legend()
-            axes[1, 0].grid(True, alpha=0.3)
+        axes[1, 0].plot(epochs, results['train_recon_losses'], label='Train', color='blue')
+        if 'val_recon_losses' in results and len(results['val_recon_losses']) > 0:
+            axes[1, 0].plot(val_epochs, results['val_recon_losses'], label='Validation', color='red')
+        axes[1, 0].set_title('Reconstruction Loss')
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Loss')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True)
         
-        # Accuracy plot
-        if 'train_accuracies' in results and 'val_accuracies' in results:
-            axes[1, 1].plot(epochs, results['train_accuracies'], 'b-', label='Train Acc', linewidth=2)
-            axes[1, 1].plot(epochs, results['val_accuracies'], 'r-', label='Val Acc', linewidth=2)
+        # Accuracy
+        if 'train_accuracies' in results and len(results['train_accuracies']) > 0:
+            acc_epochs = range(len(results['train_accuracies']))
+            axes[1, 1].plot(acc_epochs, results['train_accuracies'], label='Train', color='blue')
+            if 'val_accuracies' in results and len(results['val_accuracies']) > 0:
+                val_acc_epochs = range(len(results['val_accuracies']))
+                axes[1, 1].plot(val_acc_epochs, results['val_accuracies'], label='Validation', color='red')
+            axes[1, 1].set_title('Accuracy')
             axes[1, 1].set_xlabel('Epoch')
             axes[1, 1].set_ylabel('Accuracy')
-            axes[1, 1].set_title('Classification Accuracy')
             axes[1, 1].legend()
-            axes[1, 1].grid(True, alpha=0.3)
-            axes[1, 1].set_ylim([0, 1])
-        else:
-            # If no accuracy data, show loss ratio
-            if 'train_flow_loss' in results and 'train_recon_loss' in results:
-                flow_recon_ratio = np.array(results['train_flow_loss']) / np.array(results['train_recon_loss'])
-                axes[1, 1].plot(epochs, flow_recon_ratio, 'purple', linewidth=2)
-                axes[1, 1].set_xlabel('Epoch')
-                axes[1, 1].set_ylabel('Flow/Recon Loss Ratio')
-                axes[1, 1].set_title('Flow vs Reconstruction Loss Ratio')
-                axes[1, 1].grid(True, alpha=0.3)
+            axes[1, 1].grid(True)
         
         plt.tight_layout()
-        vae_plot_path = output_path / "vae_training_analysis.png"
-        plt.savefig(vae_plot_path, dpi=300, bbox_inches='tight')
+        plot_file = os.path.join(output_dir, "learning_curves.png")
+        plt.savefig(plot_file, dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"VAE training analysis plot saved to: {vae_plot_path}")
-        
-        # 2. Latent space visualization (if 2D or 3D)
-        if results['train_pred'].shape[1] == 2:
-            self._create_latent_space_plot(results, output_path)
+        print(f"Learning curves plot saved to {plot_file}")
     
-    def _create_latent_space_plot(self, results: Dict[str, Any], output_path):
-        """Create latent space visualization for 2D data."""
+    def _create_data_visualization_plot(self, results: Dict[str, Any], output_dir: str):
+        """Create data visualization plot with more data points."""
+        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+        fig.suptitle('Data Visualization - Two Moons Dataset', fontsize=16)
         
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-        fig.suptitle('VAE Flow Model - Latent Space Analysis', fontsize=16, fontweight='bold')
-        
-        # Original data
+        # Training data
         train_x = results['train_x']
         train_y = results['train_y']
-        val_x = results['val_x']
-        val_y = results['val_y']
         
-        # Plot original data
-        axes[0].scatter(train_x[:, 0], train_x[:, 1], c=train_y.argmax(axis=1), 
-                       cmap='viridis', alpha=0.6, s=20, label='Train')
-        axes[0].scatter(val_x[:, 0], val_x[:, 1], c=val_y.argmax(axis=1), 
-                       cmap='viridis', alpha=0.8, s=30, marker='x', label='Val')
-        axes[0].set_xlabel('X1')
-        axes[0].set_ylabel('X2')
-        axes[0].set_title('Original Data')
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-        
-        # Plot predictions
-        train_pred = results['train_pred']
-        val_pred = results['val_pred']
-        
-        axes[1].scatter(train_pred[:, 0], train_pred[:, 1], c=train_y.argmax(axis=1), 
-                       cmap='viridis', alpha=0.6, s=20, label='Train Pred')
-        axes[1].scatter(val_pred[:, 0], val_pred[:, 1], c=val_y.argmax(axis=1), 
-                       cmap='viridis', alpha=0.8, s=30, marker='x', label='Val Pred')
-        axes[1].set_xlabel('Predicted X1')
-        axes[1].set_ylabel('Predicted X2')
-        axes[1].set_title('Model Predictions')
-        axes[1].legend()
-        axes[1].grid(True, alpha=0.3)
-        
-        # Plot residuals
-        train_residuals = train_pred - train_x
-        val_residuals = val_pred - val_x
-        
-        axes[2].scatter(train_residuals[:, 0], train_residuals[:, 1], 
-                       c=train_y.argmax(axis=1), cmap='viridis', alpha=0.6, s=20, label='Train Res')
-        axes[2].scatter(val_residuals[:, 0], val_residuals[:, 1], 
-                       c=val_y.argmax(axis=1), cmap='viridis', alpha=0.8, s=30, marker='x', label='Val Res')
-        axes[2].set_xlabel('Residual X1')
-        axes[2].set_ylabel('Residual X2')
-        axes[2].set_title('Prediction Residuals')
-        axes[2].legend()
-        axes[2].grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        latent_plot_path = output_path / "latent_space_analysis.png"
-        plt.savefig(latent_plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"Latent space analysis plot saved to: {latent_plot_path}")
-    
-    def _create_data_visualization_plot(self, results: Dict[str, Any], output_path):
-        """Create data visualization plot showing true vs predicted class labels."""
-        
-        # Create a 1x2 subplot layout
-        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-        fig.suptitle('Two Moons: True vs Predicted Class Labels', fontsize=16, fontweight='bold')
-        
-        # Get the data
-        train_x = results.get('train_x', results.get('x_data'))
-        train_y = results.get('train_y', results.get('y_data'))
-        train_pred = results.get('train_pred')
-        
-        if train_x is None or train_y is None or train_pred is None:
-            print("Warning: No data available for visualization")
-            return
-        
-        # Convert one-hot encoded y back to class labels if needed
-        if train_y.ndim > 1 and train_y.shape[1] > 1:
-            y_true_classes = np.argmax(train_y, axis=1)
-        else:
-            y_true_classes = train_y.astype(int)
-        
-        # Convert predictions to class labels
-        if train_pred.ndim > 1 and train_pred.shape[1] > 1:
-            y_pred_classes = np.argmax(train_pred, axis=1)
-        else:
-            y_pred_classes = (train_pred > 0.5).astype(int).flatten()
-        
-        # Colors and labels
-        colors = ['red', 'blue']
-        class_names = ['Class 0', 'Class 1']
-        
-        # Plot 1: True class labels
-        for class_id in [0, 1]:
-            mask = y_true_classes == class_id
-            axes[0].scatter(train_x[mask, 0], train_x[mask, 1], 
-                           c=colors[class_id], alpha=0.6, s=20, 
-                           label=class_names[class_id])
-        
-        axes[0].set_xlabel('Feature 1')
-        axes[0].set_ylabel('Feature 2')
-        axes[0].set_title('True Class Labels')
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-        axes[0].set_aspect('equal')
-        
-        # Plot 2: Predicted class labels
-        for class_id in [0, 1]:
-            mask = y_pred_classes == class_id
-            axes[1].scatter(train_x[mask, 0], train_x[mask, 1], 
-                           c=colors[class_id], alpha=0.6, s=20, 
-                           label=class_names[class_id])
-        
-        axes[1].set_xlabel('Feature 1')
-        axes[1].set_ylabel('Feature 2')
-        axes[1].set_title('Predicted Class Labels')
-        axes[1].legend()
-        axes[1].grid(True, alpha=0.3)
-        axes[1].set_aspect('equal')
-        
-        plt.tight_layout()
-        
-        # Save the plot
-        data_plot_path = output_path / "data_visualization.png"
-        plt.savefig(data_plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"Data visualization plot saved to: {data_plot_path}")
-    
-    def _create_trajectory_plots(self, results: Dict[str, Any], output_path):
-        """Create trajectory plots showing learned dynamics."""
-        
-        # Get sample data for trajectory analysis
-        train_x = results.get('train_x')
-        train_y = results.get('train_y')
-        
-        if train_x is None or train_y is None:
-            print("Warning: No training data available for trajectory plots")
-            return
-        
-        # Use a small subset for trajectory visualization
-        num_samples = min(10, train_x.shape[0])
-        sample_indices = np.random.choice(train_x.shape[0], num_samples, replace=False)
-        x_sample = train_x[sample_indices]
-        y_sample = train_y[sample_indices]
-        
-        # Convert to JAX arrays
-        x_jax = jnp.array(x_sample)
-        y_jax = jnp.array(y_sample)
-        
-        print(f"Computing trajectories for {num_samples} samples...")
-        
-        # Get trajectory data using the model's predict method
-        try:
-            # Get full trajectories
-            trajectories = self.model.predict(
-                self.params, 
-                x_jax, 
-                num_steps=20,
-                output_type="trajectory"
-            )  # Shape: [num_steps, num_samples, output_dim]
+        if train_x.shape[1] >= 2:  # At least 2D data
+            # Use model predictions for coloring if available, otherwise use ground truth
+            if 'train_pred' in results:
+                train_pred = np.array(results['train_pred'])
+                color_values = train_pred[:, 0] if train_pred.shape[1] > 0 else train_pred
+                color_label = 'Prediction'
+            else:
+                color_values = train_y[:, 0] if train_y.shape[1] > 0 else train_y
+                color_label = 'Class'
             
-            # Convert to numpy for plotting
-            trajectories_np = np.array(trajectories)
-            targets_np = np.array(y_jax)
-            
-            print(f"Trajectory shape: {trajectories_np.shape}")
-            
-            # Create trajectory diagnostic plot
-            
-            trajectory_plot_path = output_path / "trajectory_diagnostics.png"
-            create_trajectory_diagnostic_plot(
-                trajectories=trajectories_np.transpose(1, 0, 2),  # [num_samples, num_steps, output_dim]
-                targets=targets_np,
-                output_path=str(trajectory_plot_path),
-                model_name="VAE Flow Model",
-                num_samples=num_samples
-            )
-            
-            # Create simple trajectory plot
-            
-            simple_trajectory_plot_path = output_path / "simple_trajectories.png"
-            create_simple_trajectory_plot(
-                trajectories=trajectories_np.transpose(1, 0, 2),  # [num_samples, num_steps, output_dim]
-                targets=targets_np,
-                output_path=str(simple_trajectory_plot_path),
-                model_name="VAE Flow Model",
-                num_samples=min(5, num_samples)
-            )
-            
-            print(f"Trajectory plots saved to: {trajectory_plot_path} and {simple_trajectory_plot_path}")
-            
-        except Exception as e:
-            print(f"Error computing trajectories: {e}")
-            # Fallback: create a simple plot showing the flow field
-            self._create_flow_field_plot(x_sample, y_sample, output_path)
-    
-    def _create_flow_field_plot(self, x_sample: np.ndarray, y_sample: np.ndarray, output_path):
-        """Create a simple flow field visualization as fallback."""
+            # Use smaller points and higher alpha for better density visualization
+            scatter = axes[0].scatter(train_x[:, 0], train_x[:, 1], 
+                                    c=color_values, 
+                                    cmap='viridis', alpha=0.7, s=8)
+            axes[0].set_title(f'Training Data ({train_x.shape[0]} samples)')
+            axes[0].set_xlabel('Feature 1')
+            axes[0].set_ylabel('Feature 2')
+            axes[0].grid(True, alpha=0.3)
+            plt.colorbar(scatter, ax=axes[0], label=color_label)
         
-        # Create a grid for flow field visualization
-        x_min, x_max = x_sample[:, 0].min() - 0.5, x_sample[:, 0].max() + 0.5
-        y_min, y_max = x_sample[:, 1].min() - 0.5, x_sample[:, 1].max() + 0.5
-        
-        # Create grid
-        x_grid = np.linspace(x_min, x_max, 20)
-        y_grid = np.linspace(y_min, y_max, 20)
-        X_grid, Y_grid = np.meshgrid(x_grid, y_grid)
-        
-        # Flatten grid for model evaluation
-        grid_points = np.stack([X_grid.flatten(), Y_grid.flatten()], axis=1)
-        grid_jax = jnp.array(grid_points)
-        
-        # Get predictions for grid points
-        try:
-            predictions = self.model.predict(self.params, grid_jax, num_steps=20)
-            pred_classes = np.argmax(np.array(predictions), axis=1)
+        # Validation data if available
+        if 'val_x' in results and 'val_y' in results:
+            val_x = np.array(results['val_x'])
+            val_y = np.array(results['val_y'])
             
-            # Reshape for plotting
-            pred_grid = pred_classes.reshape(X_grid.shape)
-            
-            # Create plot
-            fig, ax = plt.subplots(1, 1, figsize=(10, 8))
-            
-            # Plot decision boundary
-            ax.contourf(X_grid, Y_grid, pred_grid, levels=[-0.5, 0.5, 1.5], colors=['lightcoral', 'lightblue'], alpha=0.3)
-            
-            # Plot original data points
-            colors = ['red', 'blue']
-            for class_id in [0, 1]:
-                mask = np.argmax(y_sample, axis=1) == class_id
-                ax.scatter(x_sample[mask, 0], x_sample[mask, 1], 
-                          c=colors[class_id], alpha=0.7, s=30, 
-                          label=f'Class {class_id}')
-            
-            ax.set_xlabel('Feature 1')
-            ax.set_ylabel('Feature 2')
-            ax.set_title('VAE Flow Model - Decision Boundary')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            ax.set_aspect('equal')
-            
-            plt.tight_layout()
-            
-            # Save the plot
-            flow_field_plot_path = output_path / "flow_field_visualization.png"
-            plt.savefig(flow_field_plot_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            print(f"Flow field visualization saved to: {flow_field_plot_path}")
-            
-        except Exception as e:
-            print(f"Error creating flow field plot: {e}")
-    
-    def _compute_accuracy(self, x_data: jnp.ndarray, y_data: jnp.ndarray) -> float:
-        """Compute classification accuracy."""
-        predictions = self._compute_predictions(x_data)
-        
-        # For classification, compare predicted vs true classes
-        if y_data.shape[1] > 1:  # One-hot encoded
-            pred_classes = jnp.argmax(predictions, axis=1)
-            true_classes = jnp.argmax(y_data, axis=1)
-        else:  # Binary classification
-            pred_classes = (predictions > 0.5).astype(int).flatten()
-            true_classes = y_data.astype(int).flatten()
-        
-        accuracy = jnp.mean(pred_classes == true_classes)
-        return float(accuracy)
-    
-    def _compute_predictions(self, x_data: jnp.ndarray) -> jnp.ndarray:
-        """Compute model predictions for given input data."""
-        if self.params is None:
-            raise ValueError("Model not initialized. Call initialize() first.")
-        
-        # Use the model's predict method with the corrected signature
-        predictions = self.model.predict(self.params, x_data, num_steps=20, integration_method="euler")
-        return predictions
-    
-    def _create_latent_space_flow_plot(self, results: Dict[str, Any], output_path):
-        """Create latent space flow visualization showing how data flows through the latent space."""
-        
-        # Get sample data
-        train_x = results.get('train_x')
-        train_y = results.get('train_y')
-        
-        if train_x is None or train_y is None:
-            print("Warning: No training data available for latent space flow plot")
-            return
-        
-        # Use representative samples from each moon for visualization
-        true_classes = np.argmax(train_y, axis=1)
-        num_samples_per_class = min(50, np.sum(true_classes == 0), np.sum(true_classes == 1))
-        
-        # Sample from each class
-        class_0_indices = np.where(true_classes == 0)[0]
-        class_1_indices = np.where(true_classes == 1)[0]
-        
-        class_0_sample = np.random.choice(class_0_indices, num_samples_per_class, replace=False)
-        class_1_sample = np.random.choice(class_1_indices, num_samples_per_class, replace=False)
-        
-        # Combine samples
-        sample_indices = np.concatenate([class_0_sample, class_1_sample])
-        x_sample = train_x[sample_indices]
-        y_sample = train_y[sample_indices]
-        
-        num_samples = len(sample_indices)
-        
-        # Convert to JAX arrays
-        x_jax = jnp.array(x_sample)
-        y_jax = jnp.array(y_sample)
-        
-        print(f"Computing latent space flow for {num_samples} samples...")
-        
-        try:
-            # Get latent representations at different time points
-            num_time_points = 10
-            time_points = jnp.linspace(0.0, 1.0, num_time_points)
-            
-            # Sample initial latent states
-            key = jr.PRNGKey(42)
-            z_0 = jr.normal(key, (num_samples,) + self.model.z_shape)
-            
-            # Get target latent states from encoder
-            mu_target, logvar_target = self.model.apply(
-                self.params, y_jax, method='encoder', training=False, rngs={'dropout': key}
-            )
-            z_target = mu_target  # Use deterministic encoding
-            
-            # Compute latent trajectories
-            latent_trajectories = []
-            for t in time_points:
-                # Linear interpolation: z_t = z_0 + t * (z_target - z_0)
-                z_t = z_0 + t * (z_target - z_0)
-                latent_trajectories.append(z_t)
-            
-            latent_trajectories = jnp.stack(latent_trajectories)  # [num_time_points, num_samples, latent_dim]
-            
-            # Convert to numpy for plotting
-            trajectories_np = np.array(latent_trajectories)
-            true_classes = np.argmax(y_sample, axis=1)
-            
-            # Skip the old latent space flow plot - not useful
-            
-            # Create latent trajectories over time for each condition
-            self._create_latent_trajectories_over_time_plot(x_sample, y_sample, output_path)
-            
-        except Exception as e:
-            print(f"Error creating latent space flow plot: {e}")
-            traceback.print_exc()
-    
-    def _create_latent_flow_field_plot(self, x_sample: np.ndarray, y_sample: np.ndarray, output_path):
-        """Create a flow field visualization in the latent space."""
-        
-        try:
-            # Create a grid in the latent space
-            latent_dim = self.model.config.config["latent_shape"][0]
-            if latent_dim < 2:
-                print("Latent dimension too small for flow field visualization")
-                return
-            
-            # Create 2D grid for first two latent dimensions
-            grid_size = 20
-            z1_range = np.linspace(-3, 3, grid_size)
-            z2_range = np.linspace(-3, 3, grid_size)
-            Z1, Z2 = np.meshgrid(z1_range, z2_range)
-            
-            # Create dummy x values for the flow field computation
-            batch_size = grid_size * grid_size
-            x_dummy = jnp.zeros((batch_size, 2))  # Dummy input
-            z_grid = jnp.stack([Z1.flatten(), Z2.flatten()], axis=1)
-            
-            # Pad with zeros if latent_dim > 2
-            if latent_dim > 2:
-                z_padding = jnp.zeros((batch_size, latent_dim - 2))
-                z_grid = jnp.concatenate([z_grid, z_padding], axis=1)
-            
-            # Compute flow field
-            t_dummy = jnp.ones(batch_size) * 0.5  # Midpoint in time
-            key = jr.PRNGKey(42)
-            
-            dz_dt = self.model.apply(
-                self.params, z_grid, x_dummy, t_dummy, method='flow_model', 
-                training=False, rngs={'dropout': key}
-            )
-            
-            # Extract first two dimensions of the flow field
-            dz_dt_2d = np.array(dz_dt[:, :2])
-            U = dz_dt_2d[:, 0].reshape(grid_size, grid_size)
-            V = dz_dt_2d[:, 1].reshape(grid_size, grid_size)
-            
-            # Create the plot
-            fig, ax = plt.subplots(figsize=(10, 8))
-            
-            # Plot flow field
-            magnitude = np.sqrt(U**2 + V**2)
-            ax.quiver(Z1, Z2, U, V, magnitude, cmap='viridis', alpha=0.7)
-            
-            # Add some sample trajectories
-            num_trajectories = 20
-            for i in range(num_trajectories):
-                # Random starting point
-                z_start = jr.normal(jr.PRNGKey(i), (2,)) * 2
-                if latent_dim > 2:
-                    z_start_padded = jnp.concatenate([z_start, jnp.zeros(latent_dim - 2)])
+            if val_x.shape[1] >= 2:  # At least 2D data
+                # Use model predictions for coloring if available, otherwise use ground truth
+                if 'val_pred' in results:
+                    val_pred = np.array(results['val_pred'])
+                    color_values = val_pred[:, 0] if val_pred.shape[1] > 0 else val_pred
+                    color_label = 'Prediction'
                 else:
-                    z_start_padded = z_start
+                    color_values = val_y[:, 0] if val_y.shape[1] > 0 else val_y
+                    color_label = 'Class'
                 
-                # Simple Euler integration for trajectory
-                trajectory = [z_start]
-                z_current = z_start_padded
-                x_dummy_single = jnp.zeros((1, 2))
-                
-                for step in range(10):
-                    t_current = jnp.array([0.5])
-                    dz_dt_current = self.model.apply(
-                        self.params, z_current.reshape(1, -1), x_dummy_single, t_current,
-                        method='flow_model', training=False, rngs={'dropout': key}
-                    )
-                    z_current = z_current + 0.1 * dz_dt_current[0]
-                    trajectory.append(z_current[:2])
-                
-                trajectory = np.array(trajectory)
-                ax.plot(trajectory[:, 0], trajectory[:, 1], 'r-', alpha=0.5, linewidth=1)
-            
-            ax.set_xlabel('Latent Dim 1')
-            ax.set_ylabel('Latent Dim 2')
-            ax.set_title('Latent Space Flow Field (2D Projection)')
-            ax.grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            
-            # Save the plot
-            flow_field_path = output_path / "latent_flow_field.png"
-            plt.savefig(flow_field_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            print(f"Latent flow field plot saved to: {flow_field_path}")
-            
-        except Exception as e:
-            print(f"Error creating latent flow field plot: {e}")
-            traceback.print_exc()
-    
-    def _create_latent_trajectories_over_time_plot(self, x_sample: np.ndarray, y_sample: np.ndarray, output_path):
-        """Create a visualization showing latent trajectories over time for each moon condition."""
+                scatter = axes[1].scatter(val_x[:, 0], val_x[:, 1], 
+                                        c=color_values, 
+                                        cmap='viridis', alpha=0.7, s=8)
+                axes[1].set_title(f'Validation Data ({val_x.shape[0]} samples)')
+                axes[1].set_xlabel('Feature 1')
+                axes[1].set_ylabel('Feature 2')
+                axes[1].grid(True, alpha=0.3)
+                plt.colorbar(scatter, ax=axes[1], label=color_label)
+        else:
+            # If no validation data, show training data density
+            axes[1].hist2d(train_x[:, 0], train_x[:, 1], bins=50, cmap='viridis', alpha=0.8)
+            axes[1].set_title(f'Training Data Density ({train_x.shape[0]} samples)')
+            axes[1].set_xlabel('Feature 1')
+            axes[1].set_ylabel('Feature 2')
+            axes[1].grid(True, alpha=0.3)
         
-        try:
-            # Use exactly 4 samples from each condition
-            true_classes = np.argmax(y_sample, axis=1)
-            class_0_indices = np.where(true_classes == 0)[0]
-            class_1_indices = np.where(true_classes == 1)[0]
-            
-            # Sample 4 from each class
-            class_0_sample = np.random.choice(class_0_indices, min(4, len(class_0_indices)), replace=False)
-            class_1_sample = np.random.choice(class_1_indices, min(4, len(class_1_indices)), replace=False)
-            
-            # Combine samples
-            sample_indices = np.concatenate([class_0_sample, class_1_sample])
-            x_subset = x_sample[sample_indices]
-            y_subset = y_sample[sample_indices]
-            
-            # Convert to JAX arrays
-            x_jax = jnp.array(x_subset)
-            y_jax = jnp.array(y_subset)
-            
-            # Get latent representations from encoder
-            key = jr.PRNGKey(42)
-            mu_target, logvar_target = self.model.apply(
-                self.params, y_jax, method='encoder', training=False, rngs={'dropout': key}
-            )
-            z_target = mu_target  # Use deterministic encoding
-            
-            # Sample initial latent states
-            z_0 = jr.normal(key, (x_subset.shape[0],) + self.model.z_shape)
-            
-            # Create time points for trajectory
-            num_time_points = 20
-            time_points = jnp.linspace(0.0, 1.0, num_time_points)
-            
-            # Compute latent trajectories using the flow model
-            latent_trajectories = []
-            for t in time_points:
-                # Linear interpolation: z_t = z_0 + t * (z_target - z_0)
-                z_t = z_0 + t * (z_target - z_0)
-                latent_trajectories.append(z_t)
-            
-            latent_trajectories = jnp.stack(latent_trajectories)  # [num_time_points, num_samples, latent_dim]
-            
-            # Convert to numpy
-            trajectories_np = np.array(latent_trajectories)
-            true_classes = np.argmax(y_subset, axis=1)
-            
-            # Create the plot: 2 rows (conditions) x 4 columns (data points)
-            fig, axes = plt.subplots(2, 4, figsize=(20, 10))
-            fig.suptitle('Latent Trajectories Over Time: All Dimensions for Each Data Point', fontsize=16, fontweight='bold')
-            
-            colors = ['red', 'blue']
-            moon_names = ['Moon 0', 'Moon 1']
-            
-            # Plot trajectories for each condition and data point
-            for condition_idx in range(2):
-                condition_mask = true_classes == condition_idx
-                if not np.any(condition_mask):
-                    continue
-                
-                condition_trajectories = trajectories_np[:, condition_mask, :]  # [time, samples, latent_dim]
-                num_condition_samples = condition_trajectories.shape[1]
-                
-                # Plot each data point from this condition
-                for data_point_idx in range(min(4, num_condition_samples)):
-                    ax = axes[condition_idx, data_point_idx]
-                    
-                    # Plot all latent dimensions for this data point
-                    for dim in range(self.model.config.config["latent_shape"][0]):
-                        traj = condition_trajectories[:, data_point_idx, dim]
-                        ax.plot(time_points, traj, alpha=0.7, linewidth=1, 
-                               label=f'Dim {dim+1}' if dim < 4 else None)  # Only label first 4 for clarity
-                    
-                    ax.set_xlabel('Time (t)')
-                    ax.set_ylabel('Latent Value')
-                    ax.set_title(f'{moon_names[condition_idx]} - Data Point {data_point_idx+1}')
-                    ax.grid(True, alpha=0.3)
-                    
-                    # Add legend only to first subplot of each row
-                    if data_point_idx == 0:
-                        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-            
-            plt.tight_layout()
-            
-            # Save the plot
-            trajectories_plot_path = output_path / "latent_trajectories_over_time.png"
-            plt.savefig(trajectories_plot_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            print(f"Latent trajectories over time plot saved to: {trajectories_plot_path}")
-            
-        except Exception as e:
-            print(f"Error creating latent trajectories over time plot: {e}")
-            traceback.print_exc()
+        plt.tight_layout()
+        plot_file = os.path.join(output_dir, "data_visualization.png")
+        plt.savefig(plot_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Data visualization plot saved to {plot_file}")
+    
+    def _create_predictions_plot(self, results: Dict[str, Any], output_dir: str):
+        """Create predictions vs targets plot."""
+        if 'train_pred' not in results or 'train_y' not in results:
+            return
+        
+        train_pred = results['train_pred']
+        train_y = results['train_y']
+        
+        # Convert to numpy if needed
+        if hasattr(train_pred, 'shape'):
+            pred_np = np.array(train_pred)
+        else:
+            pred_np = train_pred
+        
+        if hasattr(train_y, 'shape'):
+            y_np = np.array(train_y)
+        else:
+            y_np = train_y
+        
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        fig.suptitle('Predictions vs Targets', fontsize=16)
+        
+        # Flatten for plotting if needed
+        if pred_np.ndim > 2:
+            pred_flat = pred_np.reshape(-1)
+        else:
+            pred_flat = pred_np.flatten()
+        
+        if y_np.ndim > 2:
+            y_flat = y_np.reshape(-1)
+        else:
+            y_flat = y_np.flatten()
+        
+        # Scatter plot
+        axes[0].scatter(y_flat, pred_flat, alpha=0.6)
+        axes[0].plot([y_flat.min(), y_flat.max()], [y_flat.min(), y_flat.max()], 'r--', lw=2)
+        axes[0].set_xlabel('Target')
+        axes[0].set_ylabel('Prediction')
+        axes[0].set_title('Predictions vs Targets')
+        axes[0].grid(True)
+        
+        # Residuals
+        residuals = pred_flat - y_flat
+        axes[1].scatter(y_flat, residuals, alpha=0.6)
+        axes[1].axhline(y=0, color='r', linestyle='--')
+        axes[1].set_xlabel('Target')
+        axes[1].set_ylabel('Residuals')
+        axes[1].set_title('Residuals')
+        axes[1].grid(True)
+        
+        plt.tight_layout()
+        plot_file = os.path.join(output_dir, "predictions.png")
+        plt.savefig(plot_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Predictions plot saved to {plot_file}")
+
+
+def main():
+    """Example usage of the VAEFlowTrainer."""
+    # This would be used for testing or as a standalone script
+    pass
+
+
+if __name__ == "__main__":
+    main()

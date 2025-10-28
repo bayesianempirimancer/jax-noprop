@@ -1,27 +1,32 @@
 """Encoder factory functions for VAE models."""
 
-from typing import Tuple
+from typing import Tuple, Dict, Any
 from dataclasses import dataclass, field
+from functools import cached_property
+
 import jax.numpy as jnp
 import flax.linen as nn
 from src.utils.activation_utils import get_activation_function
 from src.layers.mlp import MLP
 
 
+########  CONFIG CLASS   ###########
+
 @dataclass(frozen=True)
 class Config:
     """Configuration for encoder networks."""
     model_name: str = "encoder"
-    model_type: str = "mlp_normal"  # Options: "mlp", "mlp_normal", "resnet", "resnet_normal", "identity"
     config: dict = field(default_factory=lambda: {
+        "model_type": "mlp",  # Options: "mlp", "mlp_normal", "resnet", "resnet_normal", "identity"
         "encoder_type": "normal",  # Options: "normal", "deterministic"
-        "input_dim": "NA",  # Will be set from main config if not specified
-        "latent_dim": "NA",
+        "input_shape": "NA",  # Will be set from main config if not specified
+        "latent_shape": "NA",
         "hidden_dims": (64, 32, 16),
         "activation": "swish",
         "dropout_rate": 0.1,
     })
 
+########  ENCODER CLASSES AVAILABLE   ###########
 
 def get_encoder_class(encoder_type: str):
     """Get encoder class by type string."""
@@ -39,70 +44,74 @@ def get_encoder_class(encoder_type: str):
     return ENCODER_CLASSES[encoder_type]
 
 
-def create_encoder(config_dict: dict, input_dim: int = None, latent_dim: int = None, latent_shape: tuple = None):
-    """Create encoder based on config dictionary and optional parameters.
+########  FACTORY FUNCTION   ###########
+
+def create_encoder(config_dict: Dict[str, Any], **kwargs) -> nn.Module:
+    """Create an encoder model using the homogenized approach."""
+    from src.models.vae.encoders import get_encoder_class
     
-    Args:
-        config_dict: Dictionary containing encoder configuration
-        input_dim: Input dimension (optional, uses config if not provided)
-        latent_dim: Latent dimension (optional, uses config if not provided)
-        latent_shape: Latent shape tuple (optional, overrides latent_dim if provided)
-    
-    Returns:
-        Instantiated encoder model
-    """
-    # Build final config dict with provided parameters
-    # Convert FrozenDict to regular dict if needed
+    input_shape = kwargs.get('input_shape')
+    latent_shape = kwargs.get('latent_shape')
+
+    # Convert config_dict to regular dict if needed
     if hasattr(config_dict, 'unfreeze'):
         final_config = config_dict.unfreeze()
     else:
         final_config = dict(config_dict)
     
-    # Handle input_dim
-    if input_dim is not None:
-        final_config["input_dim"] = input_dim
-    elif final_config.get("input_dim") == "NA":
-        raise ValueError("input_dim must be provided either as parameter or in config_dict")
+    # Handle input_shape and input_dim
+    if input_shape is not None:
+        final_config["input_shape"] = input_shape
+    elif final_config.get("input_shape") == "NA":
+        raise ValueError("input_shape must be provided either as parameter or in config_dict")
     
-    # Handle latent_dim and latent_shape
     if latent_shape is not None:
-        # Convert latent_shape to flattened dimension
-        actual_latent_dim = 1
-        for dim in latent_shape:
-            actual_latent_dim *= dim
-        final_config["latent_dim"] = actual_latent_dim
-    elif latent_dim is not None:
-        final_config["latent_dim"] = latent_dim
-    elif final_config.get("latent_dim") == "NA":
-        raise ValueError("latent_dim must be provided either as parameter or in config_dict")
-    
-    # Use model_type from config to determine the encoder class
-    model_type = final_config.get("model_type", "mlp_normal")
-    if model_type not in ["mlp", "mlp_normal", "resnet", "resnet_normal", "identity"]:
-        raise ValueError(f"Unknown model_type: {model_type}. Available: ['mlp', 'mlp_normal', 'resnet', 'resnet_normal', 'identity']")
-    
+        final_config["latent_shape"] = latent_shape
+    elif final_config.get("latent_shape") == "NA":
+        raise ValueError("latent_shape must be provided either as parameter or in config_dict")    
     # Get the appropriate encoder class based on model_type
+    model_type = final_config.get("model_type", "mlp_normal")
     EncoderClass = get_encoder_class(model_type)
     
-    # Create and return the encoder instance with final config
+    # Create and return the encoder instance with homogenized approach
     return EncoderClass(
         config=final_config,
-        input_dim=final_config["input_dim"],
-        latent_dim=final_config["latent_dim"],
-        latent_shape=latent_shape  # Pass shape for structured output
+        input_shape=input_shape, 
+        latent_shape=latent_shape
     )
 
+
+########  ENCODER MODELS  ###########
 
 class MLPEncoder(nn.Module):
     """Deterministic MLP encoder that returns single tensor."""
     config: dict
-    input_dim: int
-    latent_dim: int
-    latent_shape: tuple = None
+    input_shape: Tuple[int, ...]
+    latent_shape: Tuple[int, ...]
+
+    @cached_property
+    def input_dim(self) -> int:
+        total_dim = 1
+        for dim in self.input_shape:
+            total_dim *= dim
+        return total_dim
+
+    @cached_property
+    def latent_dim(self) -> int:
+        total_dim = 1
+        for dim in self.latent_shape:
+            total_dim *= dim
+        return total_dim
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        # Deterministic encoder outputs latent_dim
+        # Flatten input if it has structured shape
+        if self.input_shape is not None:
+            # Reshape from (batch, *input_shape) to (batch, input_dim)
+            batch_shape = x.shape[:-len(self.input_shape)]
+            x = x.reshape(batch_shape + (self.input_dim,))
+        
+        # Use MLP for the main network
         mlp = MLP(
             out_features=self.latent_dim,
             hidden_features=self.config["hidden_dims"],
@@ -111,44 +120,54 @@ class MLPEncoder(nn.Module):
             bias=True
         )
         
-        # Apply MLP and reshape to structured output if latent_shape is provided
+        # Apply MLP and return raw output
         output = mlp(x, x.shape[-1])
-        
-        if self.latent_shape is not None:
-            # Reshape from (batch, latent_dim) to (batch, *latent_shape)
-            batch_shape = output.shape[:-1]
-            output = output.reshape(batch_shape + self.latent_shape)
-        
-        return output
+        return output.reshape(batch_shape + self.latent_shape)
 
 
 class MLPNormalEncoder(nn.Module):
-    """Probabilistic MLP encoder that returns (mu, logvar) tuple by definition."""
+    """Normal MLP encoder that returns (mu, logvar) tuple."""
     config: dict
-    input_dim: int
-    latent_dim: int
-    latent_shape: tuple = None
+    input_shape: Tuple[int, ...]
+    latent_shape: Tuple[int, ...]
+
+    @cached_property
+    def input_dim(self) -> int:
+        total_dim = 1
+        for dim in self.input_shape:
+            total_dim *= dim
+        return total_dim
+
+    @cached_property
+    def latent_dim(self) -> int:
+        total_dim = 1
+        for dim in self.latent_shape:
+            total_dim *= dim
+        return total_dim
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, training: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        # Probabilistic encoder outputs 2*latent_dim and splits into mu, logvar
+        # Flatten input if it has structured shape
+        if self.input_shape is not None:
+            # Reshape from (batch, *input_shape) to (batch, input_dim)
+            batch_shape = x.shape[:-len(self.input_shape)]
+            x = x.reshape(batch_shape + (self.input_dim,))
+        
+        # Use MLP for the main network
         mlp = MLP(
-            out_features=2 * self.latent_dim,
+            out_features=self.latent_dim * 2,  # mu and logvar
             hidden_features=self.config["hidden_dims"],
             act_layer=get_activation_function(self.config["activation"]),
             dropout_rate=self.config["dropout_rate"] if training else 0.0,
             bias=True
         )
         
-        # Apply MLP and split output into mu and logvar
+        # Apply MLP and split into mu and logvar
         output = mlp(x, x.shape[-1])
-        mu, logvar = jnp.split(output, 2, axis=-1)
+        output = output.reshape(batch_shape + (self.latent_dim * 2,))
         
-        if self.latent_shape is not None:
-            # Reshape from (batch, latent_dim) to (batch, *latent_shape)
-            batch_shape = mu.shape[:-1]
-            mu = mu.reshape(batch_shape + self.latent_shape)
-            logvar = logvar.reshape(batch_shape + self.latent_shape)
+        mu = output[..., :self.latent_dim].reshape(batch_shape + self.latent_shape)
+        logvar = output[..., self.latent_dim:].reshape(batch_shape + self.latent_shape)
         
         return mu, logvar
 
@@ -156,14 +175,32 @@ class MLPNormalEncoder(nn.Module):
 class ResNetEncoder(nn.Module):
     """Deterministic ResNet encoder that returns single tensor."""
     config: dict
-    input_dim: int
-    latent_dim: int
-    latent_shape: tuple = None
+    input_shape: Tuple[int, ...]
+    latent_shape: Tuple[int, ...]
+
+    @cached_property
+    def input_dim(self) -> int:
+        total_dim = 1
+        for dim in self.input_shape:
+            total_dim *= dim
+        return total_dim
+
+    @cached_property
+    def latent_dim(self) -> int:
+        total_dim = 1
+        for dim in self.latent_shape:
+            total_dim *= dim
+        return total_dim
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        # Deterministic encoder outputs latent_dim
-        # Using MLP for now (same as MLPEncoder)
+        # Flatten input if it has structured shape
+        if self.input_shape is not None:
+            # Reshape from (batch, *input_shape) to (batch, input_dim)
+            batch_shape = x.shape[:-len(self.input_shape)]
+            x = x.reshape(batch_shape + (self.input_dim,))
+        
+        # Use MLP for the main network (simplified ResNet for now)
         mlp = MLP(
             out_features=self.latent_dim,
             hidden_features=self.config["hidden_dims"],
@@ -172,58 +209,79 @@ class ResNetEncoder(nn.Module):
             bias=True
         )
         
-        # Apply MLP and reshape to structured output if latent_shape is provided
+        # Apply MLP and return raw output
         output = mlp(x, x.shape[-1])
-        
-        if self.latent_shape is not None:
-            # Reshape from (batch, latent_dim) to (batch, *latent_shape)
-            batch_shape = output.shape[:-1]
-            output = output.reshape(batch_shape + self.latent_shape)
-        
-        return output
+        return output.reshape(batch_shape + self.latent_shape)
 
 
 class ResNetNormalEncoder(nn.Module):
-    """Probabilistic ResNet encoder that returns (mu, logvar) tuple by definition."""
+    """Normal ResNet encoder that returns (mu, logvar) tuple."""
     config: dict
-    input_dim: int
-    latent_dim: int
-    latent_shape: tuple = None
+    input_shape: Tuple[int, ...]
+    latent_shape: Tuple[int, ...]
+
+    @cached_property
+    def input_dim(self) -> int:
+        total_dim = 1
+        for dim in self.input_shape:
+            total_dim *= dim
+        return total_dim
+
+    @cached_property
+    def latent_dim(self) -> int:
+        total_dim = 1
+        for dim in self.latent_shape:
+            total_dim *= dim
+        return total_dim
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, training: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        # Probabilistic encoder outputs 2*latent_dim and splits into mu, logvar
-        # Using MLP for now (same as MLPNormalEncoder)
+        # Flatten input if it has structured shape
+        if self.input_shape is not None:
+            # Reshape from (batch, *input_shape) to (batch, input_dim)
+            batch_shape = x.shape[:-len(self.input_shape)]
+            x = x.reshape(batch_shape + (self.input_dim,))
+        
+        # Use MLP for the main network (simplified ResNet for now)
         mlp = MLP(
-            out_features=2 * self.latent_dim,
+            out_features=self.latent_dim * 2,  # mu and logvar
             hidden_features=self.config["hidden_dims"],
             act_layer=get_activation_function(self.config["activation"]),
             dropout_rate=self.config["dropout_rate"] if training else 0.0,
             bias=True
         )
         
-        # Apply MLP and split output into mu and logvar
+        # Apply MLP and split into mu and logvar
         output = mlp(x, x.shape[-1])
-        mu, logvar = jnp.split(output, 2, axis=-1)
+        output = output.reshape(batch_shape + (self.latent_dim * 2,))
         
-        if self.latent_shape is not None:
-            # Reshape from (batch, latent_dim) to (batch, *latent_shape)
-            batch_shape = mu.shape[:-1]
-            mu = mu.reshape(batch_shape + self.latent_shape)
-            logvar = logvar.reshape(batch_shape + self.latent_shape)
+        mu = output[..., :self.latent_dim].reshape(batch_shape + self.latent_shape)
+        logvar = output[..., self.latent_dim:].reshape(batch_shape + self.latent_shape)
         
         return mu, logvar
 
 
 class IdentityEncoder(nn.Module):
-    """Deterministic identity encoder that returns single tensor."""
+    """Identity encoder that returns input unchanged."""
     config: dict
-    input_dim: int
-    latent_dim: int
+    input_shape: Tuple[int, ...]
+    latent_shape: Tuple[int, ...]
+
+    @cached_property
+    def input_dim(self) -> int:
+        total_dim = 1
+        for dim in self.input_shape:
+            total_dim *= dim
+        return total_dim
+
+    @cached_property
+    def latent_dim(self) -> int:
+        total_dim = 1
+        for dim in self.latent_shape:
+            total_dim *= dim
+        return total_dim
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        # Identity encoder just returns the input unchanged
+        # Identity function - return input unchanged
         return x
-
-

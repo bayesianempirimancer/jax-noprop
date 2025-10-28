@@ -23,16 +23,16 @@ import jax.random as jr
 import flax.linen as nn
 from flax.core import FrozenDict
 import optax
-from typing import Tuple
-from dataclasses import dataclass
+from typing import Tuple, Dict
+from dataclasses import dataclass, field
 
 from functools import partial, cached_property
 from src.configs.base_config import BaseConfig
 from src.utils.ode_integration import integrate_ode
 
-from src.models.vae.encoders import Config as EncoderConfig, create_encoder
-from src.models.vae.decoders import Config as DecoderConfig, create_decoder
-from src.flow_models_wip.crn_wip import Config as CRNConfig, create_crn
+from src.models.vae.encoders import create_encoder
+from src.models.vae.decoders import create_decoder
+from src.flow_models_wip.crn_wip import create_conditional_resnet
 
 
 @dataclass(frozen=True)
@@ -41,46 +41,60 @@ class VAEFlowConfig(BaseConfig):
     # BaseConfig fields
     model_name: str = "vae_flow_network"
 
-    config: FrozenDict = FrozenDict({
+    config: FrozenDict = field(default_factory=lambda: FrozenDict({
         "input_shape": "NA",  # Will be set based on z_dim
         "output_shape": "NA",  # Will be set based on z_dim or z_dim**2
         "latent_shape": "NA",  # Will be set based on x_dim
-        "loss_type": "cross_entropy", # Options: "cross_entropy", "mse", "none"
+        "loss_type": "cross_entropy", # Options: "cross_entropy", "mse", "none".  Should be consistent with decoder type
         "flow_loss_weight": 0.01,  # Weight for flow loss in total loss
         "reg_weight": 0.0,  # Weight for regularization loss in total loss
-    })
-    # Separate configuration dictionaries using FrozenDict for hashability
-    crn_config: FrozenDict = FrozenDict({
+    }))
+
+    crn_config: FrozenDict = field(default_factory=lambda: FrozenDict({
         "model_type": "vanilla", # Options: "vanilla", "geometric", "potential", "natural"
         "network_type": "mlp", # Options: "mlp", "bilinear", "convex"
         "hidden_dims": (64, 64, 64),
         "time_embed_dim": 64,
         "time_embed_method": "sinusoidal",
-        "dropout_rate": 0.1,
         "activation_fn": "swish",
         "use_batch_norm": False,
-    })
-    
-    encoder_config: FrozenDict = FrozenDict({
-        "model_type": "mlp_normal", # Options: "mlp", "mlp_normal", "resnet", "resnet_normal", "identity"
-        "encoder_type": "normal", # Options: "normal", "deterministic"
-        "hidden_dims": (64, 32, 16),
         "dropout_rate": 0.1,
-        "activation": "swish",
-    })
+    }))
     
-    decoder_config: FrozenDict = FrozenDict({
+    encoder_config: FrozenDict = field(default_factory=lambda: FrozenDict({
+        "model_type": "mlp", # Options: "mlp", "mlp_normal", "resnet", "resnet_normal", "identity"
+        "encoder_type": "normal",  # Options: "deterministic", "normal"
+        "input_shape": "NA",  # Will be set from main config if not specified
+        "latent_shape": "NA",
+        "hidden_dims": (64, 32, 16),
+        "activation": "swish",
+        "dropout_rate": 0.1,
+    }))
+    
+    decoder_config: FrozenDict = field(default_factory=lambda: FrozenDict({
         "model_type": "mlp", # Options: "mlp", "resnet", "identity"
         "decoder_type": "logits", # Options: "logits", "normal"
+        "latent_shape": "NA",  # Will be set from main config if not specified
+        "output_shape": "NA",
         "hidden_dims": (64, 32, 16),
-        "dropout_rate": 0.1,
         "activation": "swish",
-    })
+        "dropout_rate": 0.1,
+    }))
 
 
 class VAE_flow(nn.Module):
     """Variational Autoencoder with flow model using @nn.compact methods."""
     config: VAEFlowConfig
+    
+    def setup(self):
+        """Initialize the CRN model as a field."""
+        self.crn_model = create_conditional_resnet(
+            self.config.crn_config,
+            latent_shape=self.z_shape,
+            input_shape=self.config.config["input_shape"],
+            output_shape=self.z_shape
+        )
+    
 
     @property
     def z_shape(self) -> Tuple[int, ...]:
@@ -138,13 +152,8 @@ class VAE_flow(nn.Module):
         
         z_flat = self._flatten_z(z)
         
-        # Create flow model using the new unified API
-        crn_model = create_crn(
-            self.config.crn_config,
-            z_dim=self.z_dim,
-            x_dim=self.config.config["input_shape"][0]  # Assuming 1D input
-        )
-        dz_dt_flat = crn_model(z_flat, x, t, training=training)
+        # Use the CRN model created in setup()
+        dz_dt_flat = self.crn_model(z_flat, x, t, training=training)
         
         # Optimized: only unflatten if necessary
         if len(self.z_shape) <= 1:
@@ -161,10 +170,10 @@ class VAE_flow(nn.Module):
             - For normal encoders: encoder returns (mu, logvar) directly
             - For deterministic encoders: encoder returns z, we return (z, -jnp.inf)
         """
-        # Use single factory function: create_encoder(config_dict, input_dim, latent_shape)
+        # Use direct factory function: create_encoder(config_dict, input_shape, latent_shape)
         encoder = create_encoder(
             self.config.encoder_config,
-            input_dim=x.shape[-1],  # Use flattened input dimension
+            input_shape=(x.shape[-1],),  # Use flattened input dimension
             latent_shape=self.z_shape  # Use structured latent shape
         )
 
@@ -185,12 +194,11 @@ class VAE_flow(nn.Module):
     @nn.compact
     def decoder(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         """Decoder that maps latent z to output space using single factory function."""
-        # Create decoder network
+        # Create decoder network using direct factory
         decoder = create_decoder(
             self.config.decoder_config,
-            input_dim=x.shape[-1],  # Use actual input dimension
-            output_dim=self.config.config["output_shape"][0],  # Use config output_dim
-            input_shape=self.z_shape  # Use structured input shape
+            latent_shape=self.z_shape,  # Use structured latent shape
+            output_shape=(self.config.config["output_shape"][0],)  # Use config output_dim
         )
         
         # Get raw output from decoder
@@ -207,39 +215,25 @@ class VAE_flow(nn.Module):
 
             
     def __call__(self, x: jnp.ndarray, y: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> jnp.ndarray:
-        # For initialization, we just need to call the nn compact methods to initialize parameters
+        # For initialization, we need to call the nn compact methods to initialize parameters
 
         batch_shape = x.shape[:-self.x_ndims]
                 
         # Call flow_model to initialize its parameters (need dummy z and t)
         dummy_z = jnp.zeros(batch_shape + self.z_shape)
         dummy_t = jnp.zeros(batch_shape)
-        _ = self.flow_model(dummy_z, x, dummy_t, training=training)
+        
+        # Call flow_model to initialize the CRN model parameters
+        flow_output = self.flow_model(dummy_z, x, dummy_t, training)
         
         # Call encoder and decoder to initialize their parameters
-        encoder_output = self.encoder(y, training=training)
-        decoder_output = self.decoder(dummy_z, training=training)
+        # These @nn.compact methods need to be called during initialization to create parameters
+        encoder_output = self.encoder(y, training)
+        decoder_output = self.decoder(dummy_z, training)
         
-        # Assertions for encoder output (after processing in encoder method)
-        # The encoder method always returns (mu, logvar) tuple for consistency
-        assert isinstance(encoder_output, tuple), f"Encoder should return tuple, got {type(encoder_output)}"
-        assert len(encoder_output) == 2, f"Encoder should return (mu, logvar) tuple, got {len(encoder_output)} elements"
-        mu, logvar = encoder_output
-        expected_shape = batch_shape + self.z_shape
-        assert mu.shape == expected_shape, f"Encoder mu shape {mu.shape} != expected {expected_shape}"
-        
-        # Check logvar based on encoder type
-        if self.config.encoder_config["encoder_type"] == "normal":
-            assert logvar.shape == expected_shape, f"Normal encoder logvar shape {logvar.shape} != expected {expected_shape}"
-        else:  # deterministic
-            assert logvar == -jnp.inf, f"Deterministic encoder logvar should be -inf, got {logvar}"
-        
-        # Assertions for decoder output
-        expected_decoder_shape = batch_shape + (self.config.config["output_shape"][0],)
-        assert decoder_output.shape == expected_decoder_shape, f"Decoder output shape {decoder_output.shape} != expected {expected_decoder_shape}"
-        
-        # Return dummy output for initialization
-        return jnp.zeros(batch_shape + (self.config.config["output_shape"][0],))
+        # For initialization, we just return a dummy output
+        # The actual forward pass logic is handled by the individual methods
+        return jnp.zeros(batch_shape + self.z_shape)
         
     def loss(self, params: dict, x: jnp.ndarray, y: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> Tuple[jnp.ndarray, dict]:
         """

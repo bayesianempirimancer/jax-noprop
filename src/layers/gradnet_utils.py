@@ -58,12 +58,16 @@ def reduction_fn(output: jnp.ndarray, reduction_method: str) -> jnp.ndarray:
     Helper function to reduce neural network output to scalar values.
     
     Args:
-        output: Neural network output [batch_size, output_dim] or [output_dim]
+        output: Neural network output [batch_size, output_dim] or [output_dim] or scalar
         reduction_method: How to reduce the output ("sum", "mean", "norm", "first", "logsumexp")
         
     Returns:
         Reduced scalar output [batch_size] or scalar
     """
+    # Handle 0-dimensional arrays (already scalar)
+    if output.ndim == 0:
+        return output
+    
     if reduction_method == "sum":
         return jnp.sum(output, axis=-1)
     elif reduction_method == "mean":
