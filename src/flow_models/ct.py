@@ -232,7 +232,7 @@ class VAE_flow(nn.Module):
         decoder = create_decoder(
             self.config.decoder,
             latent_shape=self.z_shape,  # Use structured latent shape
-            output_shape=(self.config.main["output_shape"][0],)  # Use config output_dim
+            output_shape=self.config.main["output_shape"]  # Use full output_shape
         )
         
         # Get output from decoder (transformation is handled in decoder)

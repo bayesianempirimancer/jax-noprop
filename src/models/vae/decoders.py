@@ -199,9 +199,12 @@ class IdentityDecoder(nn.Module):
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        # Identity decoder just returns input unchanged
-        # Apply output transformation based on decoder type
+        # Identity decoder maps from latent space to output space
+        # First apply linear transformation from latent_dim to output_dim
+        output = nn.Dense(self.output_shape[0])(x)
+        
+        # Then apply output transformation based on decoder type
         decoder_type = self.config.get("decoder_type", "linear")
-        return apply_output_transformation(x, decoder_type)
+        return apply_output_transformation(output, decoder_type)
 
 
