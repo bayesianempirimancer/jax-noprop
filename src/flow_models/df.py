@@ -46,7 +46,7 @@ class VAEFlowConfig(BaseConfig):
     }))
     
     encoder: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "model_type": "identity", # Options: "mlp", "mlp_normal", "resnet", "resnet_normal", "identity", "linear"
+        "model_type": "linear", # Options: "mlp", "mlp_normal", "resnet", "resnet_normal", "identity", "linear"
         "encoder_type": "deterministic",  # Options: "deterministic", "normal", 
         "input_shape": "NA",  # Will be set from main config if not specified
         "latent_shape": "NA",
@@ -57,7 +57,7 @@ class VAEFlowConfig(BaseConfig):
     
     decoder: FrozenDict = field(default_factory=lambda: FrozenDict({
         "model_type": "identity", # Options: "mlp", "resnet", "identity"
-        "decoder_type": "none", # Options: "linear", "softmax", "none"
+        "decoder_type": "softmax", # Options: "linear", "softmax", "none"
         "latent_shape": "NA",  # Will be set from main config if not specified
         "output_shape": "NA",
         "hidden_dims": (64, 32, 16),

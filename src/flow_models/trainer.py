@@ -24,6 +24,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from src.flow_models.fm import VAE_flow as FlowMatchingModel, VAEFlowConfig as FlowMatchingConfig
 from src.flow_models.df import VAE_flow as DiffusionModel, VAEFlowConfig as DiffusionConfig
+from src.flow_models.ct import VAE_flow as CTModel, VAEFlowConfig as CTConfig
 
 # Optional plotting imports (with try-except for graceful degradation)
 try:
@@ -65,6 +66,9 @@ class VAEFlowTrainer:
         if isinstance(config, DiffusionConfig):
             self.model = DiffusionModel(config=config)
             self.model_type = "diffusion"
+        elif isinstance(config, CTConfig):
+            self.model = CTModel(config=config)
+            self.model_type = "ct"
         else:  # FlowMatchingConfig
             self.model = FlowMatchingModel(config=config)
             self.model_type = "flow_matching"
@@ -372,10 +376,13 @@ class VAEFlowTrainer:
         
         # For classification, compare predicted vs true classes
         if y_np.shape[1] > 1:  # One-hot encoded
+            # Labels are now {0, 1}, argmax works directly
             pred_classes = np.argmax(pred_np, axis=1)
             true_classes = np.argmax(y_np, axis=1)
         else:  # Binary classification
-            pred_classes = (pred_np > 0.5).astype(int).flatten()
+            # Predictions: if pred > 0, class 1, else class 0
+            pred_classes = (pred_np > 0).astype(int).flatten()
+            # Labels are now {0, 1}, use directly
             true_classes = y_np.astype(int).flatten()
         
         accuracy = np.mean(pred_classes == true_classes)

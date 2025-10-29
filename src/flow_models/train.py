@@ -20,6 +20,7 @@ from flax.core import FrozenDict
 # Import flow model configurations and trainer
 from .fm import VAEFlowConfig as FlowMatchingConfig
 from .df import VAEFlowConfig as DiffusionConfig
+from .ct import VAEFlowConfig as CTConfig
 from .trainer import VAEFlowTrainer
 from experiments.results_tracker import ResultsTracker, generate_experiment_name
 
@@ -46,8 +47,8 @@ def load_two_moons_data(data_path: str = "data/two_moons_formatted.pkl") -> Tupl
         x_val = jnp.array(data['val']['x'])
         y_val = jnp.array(data['val']['y'])
         
-        # Keep binary labels as 0/1 (no preprocessing)
-        # y_train = 2 * y_train - 1
+        # Keep binary labels as {0, 1} for softmax/cross_entropy
+        # y_train = 2 * y_train - 1  # Commented out - keeping {0, 1} labels
         # y_val = 2 * y_val - 1
         
         print(f"Loaded dataset:")
@@ -193,12 +194,13 @@ def create_vae_config(
     hidden_dims: Tuple[int, ...] = (64, 64, 64),
     learning_rate: float = 0.001,
     recon_weight: float = 0.1,
-    decoder_type: str = "none",
+    decoder_type: str = "softmax",
     decoder_model: str = "identity",
     encoder_type: str = "linear",
     recon_loss_type: str = "cross_entropy",
     reg_weight: float = 0.0,
-    model_type: str = "flow_matching"
+    model_type: str = "flow_matching",
+    noise_schedule: str = "linear"
 ):
     """Create VAE flow configuration for two moons dataset."""
     base_config = FrozenDict({
@@ -256,6 +258,20 @@ def create_vae_config(
             encoder=encoder,
             decoder=decoder
         )
+    elif model_type == "ct":
+        # Add CT-specific config with noise schedule
+        ct_config = FrozenDict({
+            **base_config,
+            "recon_loss_type": recon_loss_type,
+            "reg_weight": reg_weight,
+            "noise_schedule": noise_schedule,
+        })
+        return CTConfig(
+            main=ct_config,
+            crn=crn,
+            encoder=encoder,
+            decoder=decoder
+        )
     else:  # flow_matching
         return FlowMatchingConfig(
             main=base_config, 
@@ -269,8 +285,8 @@ def main():
     """Main training function."""
     parser = argparse.ArgumentParser(description='Train VAE_flow model on two moons dataset')
     parser.add_argument('--model_type', type=str, default='flow_matching', 
-                       choices=['flow_matching', 'diffusion'],
-                       help='Model type: flow_matching or diffusion')
+                       choices=['flow_matching', 'diffusion', 'ct'],
+                       help='Model type: flow_matching, diffusion, or ct')
     parser.add_argument('--data_path', type=str, default='data/two_moons_formatted.pkl', 
                        help='Path to two moons dataset')
     parser.add_argument('--use_synthetic', action='store_true', 
@@ -302,20 +318,23 @@ def main():
                        help='Optimizer')
     parser.add_argument('--recon_weight', type=float, default=0.1,
                         help='Reconstruction loss weight (0.0 = no reconstruction, 1.0 = equal weight)')
-    parser.add_argument('--decoder_type', type=str, default='none',
+    parser.add_argument('--decoder_type', type=str, default='softmax',
                         choices=['none', 'linear', 'softmax'],
                         help='Decoder output transformation: none, linear, or softmax')
     parser.add_argument('--decoder_model', type=str, default='identity',
                         choices=['identity', 'mlp', 'resnet'],
                         help='Decoder model architecture: identity, mlp, or resnet')
-    parser.add_argument('--encoder_type', type=str, default='mlp',
+    parser.add_argument('--encoder_type', type=str, default='linear',
                         choices=['mlp', 'mlp_normal', 'resnet', 'resnet_normal', 'identity', 'linear'],
                         help='Encoder type: mlp, mlp_normal, resnet, resnet_normal, identity, or linear')
-    parser.add_argument('--recon_loss_type', type=str, default='mse',
+    parser.add_argument('--recon_loss_type', type=str, default='cross_entropy',
                         choices=['mse', 'cross_entropy', 'none'],
                         help='Reconstruction loss type')
     parser.add_argument('--reg_weight', type=float, default=0.0,
                         help='Regularization loss weight')
+    parser.add_argument('--noise_schedule', type=str, default='linear',
+                        choices=['linear', 'cosine', 'sigmoid', 'learnable', 'simple_learnable'],
+                        help='Noise schedule for CT model (linear, cosine, sigmoid, learnable, simple_learnable)')
     parser.add_argument('--reverse', action='store_true',
                         help='Swap x and y: predict moon coordinates from labels (y -> x)')
     parser.add_argument('--experiment_name', type=str, default=None,
@@ -379,6 +398,8 @@ def main():
     print(f"  Learning rate: {args.learning_rate}")
     print(f"  Optimizer: {args.optimizer}")
     print(f"  Reconstruction weight: {args.recon_weight}")
+    if args.model_type == "ct":
+        print(f"  Noise schedule: {args.noise_schedule}")
     print(f"  Dropout epochs: {args.dropout_epochs if args.dropout_epochs else args.num_epochs}")
     print(f"  Seed: {args.seed}")
     print("=" * 60)
@@ -434,7 +455,8 @@ def main():
             encoder_type=args.encoder_type,
             recon_loss_type=args.recon_loss_type,
             reg_weight=args.reg_weight,
-            model_type=args.model_type
+            model_type=args.model_type,
+            noise_schedule=args.noise_schedule
         )
     else:
         config = create_vae_config(
@@ -450,7 +472,8 @@ def main():
             encoder_type=args.encoder_type,
             recon_loss_type=args.recon_loss_type,
             reg_weight=args.reg_weight,
-            model_type=args.model_type
+            model_type=args.model_type,
+            noise_schedule=args.noise_schedule
         )
     
     # Create trainer
