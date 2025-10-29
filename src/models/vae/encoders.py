@@ -36,6 +36,7 @@ def get_encoder_class(encoder_type: str):
         'resnet': ResNetEncoder,
         'resnet_normal': ResNetNormalEncoder,
         'identity': IdentityEncoder,
+        'linear': LinearEncoder,
     }
     
     if encoder_type not in ENCODER_CLASSES:
@@ -285,3 +286,36 @@ class IdentityEncoder(nn.Module):
     def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         # Identity function - return input unchanged
         return x
+
+
+class LinearEncoder(nn.Module):
+    """Linear encoder that applies a single Dense layer."""
+    config: dict
+    input_shape: Tuple[int, ...]
+    latent_shape: Tuple[int, ...]
+
+    @cached_property
+    def input_dim(self) -> int:
+        total_dim = 1
+        for dim in self.input_shape:
+            total_dim *= dim
+        return total_dim
+
+    @cached_property
+    def latent_dim(self) -> int:
+        total_dim = 1
+        for dim in self.latent_shape:
+            total_dim *= dim
+        return total_dim
+    
+    @nn.compact
+    def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+        # Flatten input
+        batch_shape = x.shape[:-len(self.input_shape)]
+        x_flat = x.reshape(-1, self.input_dim)
+        
+        # Apply linear transformation
+        output = nn.Dense(self.latent_dim)(x_flat)
+        
+        # Reshape to latent shape
+        return output.reshape(batch_shape + self.latent_shape)

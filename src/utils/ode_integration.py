@@ -55,6 +55,8 @@ def integrate_ode(
         elif method == "adaptive":
             # For adaptive method, we need special handling
             return _integrate_ode_adaptive_scan(vector_field, params, z0, x, time_span, num_steps)
+        elif method == "midpoint":
+            return _integrate_ode_midpoint_scan(vector_field, params, z0, x, time_span, num_steps)
         else:
             raise ValueError(f"Unknown integration method: {method}")
     
@@ -67,6 +69,8 @@ def integrate_ode(
             return _integrate_ode_rk4_scan_trajectory(vector_field, params, z0, x, time_span, num_steps)
         elif method == "adaptive":
             return _integrate_ode_adaptive_scan_trajectory(vector_field, params, z0, x, time_span, num_steps)
+        elif method == "midpoint":
+            return _integrate_ode_midpoint_scan_trajectory(vector_field, params, z0, x, time_span, num_steps)
         else:
             raise ValueError(f"Unknown integration method: {method}")
     
@@ -206,6 +210,17 @@ def rk4_step(
     # Combine stages
     return z + dt * (k1 + 2*k2 + 2*k3 + k4) / 6.0
 
+def midpoint_step(
+    vector_field: Callable,
+    params: Dict[str, Any],
+    z: jnp.ndarray,
+    x: jnp.ndarray,
+    t: jnp.ndarray,
+    dt: float
+) -> jnp.ndarray:
+    """Single midpoint integration step."""
+    dz_dt = vector_field(params, z, x, t + 0.5*dt)
+    return z + dt * dz_dt
 
 def adaptive_step(
     vector_field: Callable,
@@ -364,6 +379,39 @@ def _integrate_ode_rk4_scan(
         
         # Combine stages
         z_new = z + dt * (k1 + 2*k2 + 2*k3 + k4) / 6.0
+        t_new = t + dt
+        
+        return (z_new, t_new), z_new
+    
+    # Initial state
+    batch_shape = z0.shape[:-1]
+    t0 = jnp.full((1,) * len(batch_shape), t_start)
+    initial_carry = (z0, t0)
+    
+    # Scan over integration steps
+    (z_final, _), _ = jax.lax.scan(rk4_step_scan, initial_carry, None, length=num_steps)
+    
+    return z_final
+
+
+def _integrate_ode_midpoint_scan(
+    vector_field: Callable,
+    params: Dict[str, Any],
+    z0: jnp.ndarray,
+    x: jnp.ndarray,
+    time_span: Tuple[float, float],
+    num_steps: int
+) -> jnp.ndarray:
+    """JIT-compiled RK4 integration using scan."""
+    t_start, t_end = time_span
+    dt = (t_end - t_start) / num_steps
+    
+    def rk4_step_scan(carry, _):
+        z, t = carry
+        # Stage 1
+        dz_dt = vector_field(params, z, x, t + 0.5*dt)
+        
+        z_new = z + dt * dz_dt
         t_new = t + dt
         
         return (z_new, t_new), z_new
@@ -573,6 +621,41 @@ def _integrate_ode_adaptive_scan_trajectory(
     
     # Keep trajectory in (max_steps, batch_shape, output_dim) format as documented
     # No transpose needed - scan already returns the correct format
+    
+    # Prepend the initial state to get the complete trajectory
+    # z0 has shape (batch_shape, state_dim), we need (1, batch_shape, state_dim)
+    return jnp.concatenate([z0[None, ...], trajectory], axis=0)
+
+
+def _integrate_ode_midpoint_scan_trajectory(
+    vector_field: Callable,
+    params: Dict[str, Any],
+    z0: jnp.ndarray,
+    x: jnp.ndarray,
+    time_span: Tuple[float, float],
+    num_steps: int
+) -> jnp.ndarray:
+    """JIT-compiled midpoint integration using scan that returns full trajectory."""
+    t_start, t_end = time_span
+    dt = (t_end - t_start) / num_steps
+    
+    def midpoint_step_scan(carry, _):
+        z, t = carry
+        # Midpoint method: evaluate at midpoint
+        dz_dt = vector_field(params, z, x, t + 0.5*dt)
+        
+        z_new = z + dt * dz_dt
+        t_new = t + dt
+        
+        return (z_new, t_new), z_new
+    
+    # Initial state
+    batch_shape = z0.shape[:-1]
+    t0 = jnp.full((1,) * len(batch_shape), t_start)
+    initial_carry = (z0, t0)
+    
+    # Scan over integration steps
+    (z_final, _), trajectory = jax.lax.scan(midpoint_step_scan, initial_carry, None, length=num_steps)
     
     # Prepend the initial state to get the complete trajectory
     # z0 has shape (batch_shape, state_dim), we need (1, batch_shape, state_dim)

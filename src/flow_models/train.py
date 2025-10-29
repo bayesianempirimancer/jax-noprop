@@ -12,12 +12,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 from typing import Tuple, Optional
 import argparse
-import os
 import pickle
+from datetime import datetime
+from pathlib import Path
 from flax.core import FrozenDict
 
-from .fm import VAEFlowConfig
+# Import flow model configurations and trainer
+from .fm import VAEFlowConfig as FlowMatchingConfig
+from .df import VAEFlowConfig as DiffusionConfig
 from .trainer import VAEFlowTrainer
+from experiments.results_tracker import ResultsTracker, generate_experiment_name
 
 
 def load_two_moons_data(data_path: str = "data/two_moons_formatted.pkl") -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -42,9 +46,14 @@ def load_two_moons_data(data_path: str = "data/two_moons_formatted.pkl") -> Tupl
         x_val = jnp.array(data['val']['x'])
         y_val = jnp.array(data['val']['y'])
         
+        # Keep binary labels as 0/1 (no preprocessing)
+        # y_train = 2 * y_train - 1
+        # y_val = 2 * y_val - 1
+        
         print(f"Loaded dataset:")
         print(f"  Training: x={x_train.shape}, y={y_train.shape}")
         print(f"  Validation: x={x_val.shape}, y={y_val.shape}")
+        print(f"  Label range: [{jnp.min(y_train):.1f}, {jnp.max(y_train):.1f}]")
         
         return x_train, y_train, x_val, y_val
         
@@ -178,57 +187,90 @@ def plot_training_history(history: dict, save_path: str = None):
 def create_vae_config(
     input_shape: Tuple[int, ...] = (2,),
     output_shape: Tuple[int, ...] = (2,),
-    latent_shape: Tuple[int, ...] = (4,),
+    latent_shape: Tuple[int, ...] = (2,),
     crn_type: str = "vanilla",
     network_type: str = "mlp",
     hidden_dims: Tuple[int, ...] = (64, 64, 64),
-    learning_rate: float = 1e-3,
-    flow_loss_weight: float = 0.01
-) -> VAEFlowConfig:
+    learning_rate: float = 0.001,
+    recon_weight: float = 0.1,
+    decoder_type: str = "none",
+    decoder_model: str = "identity",
+    encoder_type: str = "linear",
+    recon_loss_type: str = "cross_entropy",
+    reg_weight: float = 0.0,
+    model_type: str = "flow_matching"
+):
     """Create VAE flow configuration for two moons dataset."""
-    return VAEFlowConfig(
-        config=FrozenDict({
-            "input_shape": input_shape,
-            "output_shape": output_shape,
-            "latent_shape": latent_shape,
-            "loss_type": "mse",
-            "flow_loss_weight": flow_loss_weight,
-            "reg_weight": 0.0
-        }),
-        crn_config=FrozenDict({
-            "model_type": crn_type,
-            "network_type": network_type,
-            "hidden_dims": hidden_dims,
-            "time_embed_dim": 32,
-            "time_embed_method": "sinusoidal",
-            "dropout_rate": 0.1,
-            "activation_fn": "swish",
-            "use_batch_norm": False
-        }),
-        encoder_config=FrozenDict({
-            "model_type": "mlp",
-            "encoder_type": "deterministic",
-            "input_shape": input_shape,
-            "latent_shape": latent_shape,
-            "hidden_dims": (128, 64, 32),
-            "activation": "swish",
-            "dropout_rate": 0.1
-        }),
-        decoder_config=FrozenDict({
-            "model_type": "mlp",
-            "decoder_type": "logits",
-            "latent_shape": latent_shape,
-            "output_shape": output_shape,
-            "hidden_dims": (32, 64, 128),
-            "activation": "swish",
-            "dropout_rate": 0.1
+    base_config = FrozenDict({
+        "input_shape": input_shape,
+        "output_shape": output_shape,
+        "latent_shape": latent_shape,
+        "recon_loss_type": recon_loss_type,
+        "recon_weight": recon_weight,
+        "reg_weight": reg_weight,
+        "integration_method": "euler",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
+        "num_timesteps": 20,
+    })
+    
+    crn = FrozenDict({
+        "model_type": crn_type,
+        "network_type": network_type,
+        "hidden_dims": hidden_dims,
+        "time_embed_dim": 32,
+        "time_embed_method": "sinusoidal",
+        "dropout_rate": 0.1,
+        "activation_fn": "swish",
+        "use_batch_norm": False
+    })
+    
+    encoder = FrozenDict({
+        "model_type": encoder_type,
+        "encoder_type": "deterministic",
+        "input_shape": input_shape,
+        "latent_shape": latent_shape,
+        "hidden_dims": (16,32,16,),  # Very simple architecture
+        "activation": "swish",
+        "dropout_rate": 0.0  # No dropout for simplicity
+    })
+    
+    decoder = FrozenDict({
+        "model_type": decoder_model,
+        "decoder_type": decoder_type,
+        "latent_shape": latent_shape,
+        "output_shape": output_shape,
+        "hidden_dims": (16,32,16,),  # Very simple architecture
+        "activation": "swish",
+        "dropout_rate": 0.0  # No dropout for simplicity
+    })
+    
+    if model_type == "diffusion":
+        # Add diffusion-specific config
+        diffusion_config = FrozenDict({
+            **base_config,
+            "recon_loss_type": recon_loss_type,  # Use passed recon_loss_type
+            "reg_weight": 0.00,  # Add regularization for diffusion
         })
-    )
+        return DiffusionConfig(
+            main=diffusion_config, 
+            crn=crn,
+            encoder=encoder,
+            decoder=decoder
+        )
+    else:  # flow_matching
+        return FlowMatchingConfig(
+            main=base_config, 
+            crn=crn,
+            encoder=encoder,
+            decoder=decoder
+        )
 
 
 def main():
     """Main training function."""
     parser = argparse.ArgumentParser(description='Train VAE_flow model on two moons dataset')
+    parser.add_argument('--model_type', type=str, default='flow_matching', 
+                       choices=['flow_matching', 'diffusion'],
+                       help='Model type: flow_matching or diffusion')
     parser.add_argument('--data_path', type=str, default='data/two_moons_formatted.pkl', 
                        help='Path to two moons dataset')
     parser.add_argument('--use_synthetic', action='store_true', 
@@ -239,8 +281,8 @@ def main():
                        help='Input dimension (2 for two moons)')
     parser.add_argument('--output_dim', type=int, default=2, 
                        help='Output dimension (2 for two moons)')
-    parser.add_argument('--latent_dim', type=int, default=4, 
-                       help='Latent dimension')
+    parser.add_argument('--latent_dim', type=int, default=2,
+                        help='Latent dimension')
     parser.add_argument('--crn_type', type=str, default='vanilla', 
                        choices=['vanilla', 'geometric', 'potential', 'natural', 'hamiltonian'],
                        help='CRN flow type')
@@ -258,26 +300,71 @@ def main():
     parser.add_argument('--optimizer', type=str, default='adam', 
                        choices=['adam', 'sgd', 'adagrad'],
                        help='Optimizer')
-    parser.add_argument('--flow_loss_weight', type=float, default=0.01, 
-                       help='Flow loss weight')
+    parser.add_argument('--recon_weight', type=float, default=0.1,
+                        help='Reconstruction loss weight (0.0 = no reconstruction, 1.0 = equal weight)')
+    parser.add_argument('--decoder_type', type=str, default='none',
+                        choices=['none', 'linear', 'softmax'],
+                        help='Decoder output transformation: none, linear, or softmax')
+    parser.add_argument('--decoder_model', type=str, default='identity',
+                        choices=['identity', 'mlp', 'resnet'],
+                        help='Decoder model architecture: identity, mlp, or resnet')
+    parser.add_argument('--encoder_type', type=str, default='mlp',
+                        choices=['mlp', 'mlp_normal', 'resnet', 'resnet_normal', 'identity', 'linear'],
+                        help='Encoder type: mlp, mlp_normal, resnet, resnet_normal, identity, or linear')
+    parser.add_argument('--recon_loss_type', type=str, default='mse',
+                        choices=['mse', 'cross_entropy', 'none'],
+                        help='Reconstruction loss type')
+    parser.add_argument('--reg_weight', type=float, default=0.0,
+                        help='Regularization loss weight')
+    parser.add_argument('--reverse', action='store_true',
+                        help='Swap x and y: predict moon coordinates from labels (y -> x)')
+    parser.add_argument('--experiment_name', type=str, default=None,
+                        help='Name for this experiment (auto-generated if not provided)')
+    parser.add_argument('--results_file', type=str, default='experiment_results.md',
+                        help='Markdown file to track results')
     parser.add_argument('--dropout_epochs', type=int, default=None, 
                        help='Number of epochs to use dropout (default: all epochs)')
     parser.add_argument('--seed', type=int, default=42, 
                        help='Random seed')
-    parser.add_argument('--save_dir', type=str, default='artifacts/two_moons_training', 
-                       help='Directory to save results')
+    parser.add_argument('--save_dir', type=str, default=None, 
+                       help='Directory to save results (auto-generated if not provided)')
     parser.add_argument('--verbose', action='store_true', 
                        help='Verbose training output')
     
     args = parser.parse_args()
     
+    # Generate experiment name if not provided
+    if args.experiment_name is None:
+        parameters = {
+            'recon_weight': args.recon_weight,
+            'decoder_type': args.decoder_type,
+            'recon_loss_type': args.recon_loss_type,
+            'reg_weight': args.reg_weight,
+            'model_type': args.model_type,
+            'crn_type': args.crn_type,
+            'num_epochs': args.num_epochs,
+            'learning_rate': args.learning_rate
+        }
+        args.experiment_name = generate_experiment_name(parameters)
+    
+    # Generate unique save directory if not provided
+    if args.save_dir is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        args.save_dir = f"artifacts/{args.experiment_name}_{timestamp}"
+    
     # Create save directory
-    os.makedirs(args.save_dir, exist_ok=True)
+    Path(args.save_dir).mkdir(parents=True, exist_ok=True)
+    
+    # Initialize results tracker
+    tracker = ResultsTracker(args.results_file)
     
     print("=" * 60)
     print("VAE_flow Training Script - Two Moons Dataset")
     print("=" * 60)
+    print(f"Experiment: {args.experiment_name}")
+    print(f"Results file: {args.results_file}")
     print(f"Configuration:")
+    print(f"  Model type: {args.model_type}")
     print(f"  Dataset: {'Synthetic' if args.use_synthetic else 'Two Moons'}")
     if not args.use_synthetic:
         print(f"  Data path: {args.data_path}")
@@ -291,7 +378,7 @@ def main():
     print(f"  Batch size: {args.batch_size}")
     print(f"  Learning rate: {args.learning_rate}")
     print(f"  Optimizer: {args.optimizer}")
-    print(f"  Flow loss weight: {args.flow_loss_weight}")
+    print(f"  Reconstruction weight: {args.recon_weight}")
     print(f"  Dropout epochs: {args.dropout_epochs if args.dropout_epochs else args.num_epochs}")
     print(f"  Seed: {args.seed}")
     print("=" * 60)
@@ -332,15 +419,39 @@ def main():
     else:
         effective_input_dim = args.input_dim
     
-    config = create_vae_config(
-        input_shape=(effective_input_dim,),
-        output_shape=(args.output_dim,),
-        latent_shape=(args.latent_dim,),
-        crn_type=args.crn_type,
-        network_type=args.network_type,
-        hidden_dims=tuple(args.hidden_dims),
-        flow_loss_weight=args.flow_loss_weight
-    )
+    # Create config - swap input/output if reverse mode
+    if args.reverse:
+        config = create_vae_config(
+            input_shape=(args.output_dim,),  # Swapped: labels are now input
+            output_shape=(effective_input_dim,),  # Swapped: coordinates are now output
+            latent_shape=(args.latent_dim,),
+            crn_type=args.crn_type,
+            network_type=args.network_type,
+            hidden_dims=tuple(args.hidden_dims),
+            recon_weight=args.recon_weight,
+            decoder_type=args.decoder_type,
+            decoder_model=args.decoder_model,
+            encoder_type=args.encoder_type,
+            recon_loss_type=args.recon_loss_type,
+            reg_weight=args.reg_weight,
+            model_type=args.model_type
+        )
+    else:
+        config = create_vae_config(
+            input_shape=(effective_input_dim,),
+            output_shape=(args.output_dim,),
+            latent_shape=(args.latent_dim,),
+            crn_type=args.crn_type,
+            network_type=args.network_type,
+            hidden_dims=tuple(args.hidden_dims),
+            recon_weight=args.recon_weight,
+            decoder_type=args.decoder_type,
+            decoder_model=args.decoder_model,
+            encoder_type=args.encoder_type,
+            recon_loss_type=args.recon_loss_type,
+            reg_weight=args.reg_weight,
+            model_type=args.model_type
+        )
     
     # Create trainer
     trainer = VAEFlowTrainer(
@@ -352,10 +463,19 @@ def main():
     
     # Initialize model
     print("Initializing model...")
+    # Swap x and y if reverse mode is enabled
+    if args.reverse:
+        print("Reverse mode: Predicting moon coordinates from labels (y -> x)")
+        train_x, train_y = y_train, x_train
+        val_x, val_y = y_val, x_val
+    else:
+        train_x, train_y = x_train, y_train
+        val_x, val_y = x_val, y_val
+    
     # Create sample data for initialization
-    batch_size = min(args.batch_size, x_train.shape[0])
-    x_sample = x_train[:batch_size]
-    y_sample = y_train[:batch_size]
+    batch_size = min(args.batch_size, train_x.shape[0])
+    x_sample = train_x[:batch_size]
+    y_sample = train_y[:batch_size]
     z_sample = jr.normal(jr.PRNGKey(args.seed), (batch_size, args.latent_dim))
     t_sample = jr.uniform(jr.PRNGKey(args.seed + 1), (batch_size,), minval=0.0, maxval=1.0)
     
@@ -364,11 +484,11 @@ def main():
     # Train model
     print("Starting training...")
     history = trainer.train(
-        x_data=x_train,
-        y_data=y_train,
+        x_data=train_x,
+        y_data=train_y,
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
-        validation_data=(x_val, y_val),
+        validation_data=(val_x, val_y),
         dropout_epochs=args.dropout_epochs,
         verbose=args.verbose
     )
@@ -376,6 +496,44 @@ def main():
     # Save results using trainer's built-in save functionality
     print("Saving results...")
     trainer.save_results(history, args.save_dir)
+    
+    # Prepare results for tracking
+    final_results = {
+        'final_train_loss': history['train_losses'][-1],
+        'final_val_loss': history['val_losses'][-1] if history['val_losses'] else None,
+        'final_flow_loss': history['train_flow_losses'][-1],
+        'final_recon_loss': history['train_recon_losses'][-1],
+        'train_accuracy': history['train_accuracies'][-1] if history['train_accuracies'] else None,
+        'val_accuracy': history['val_accuracies'][-1] if history['val_accuracies'] else None,
+        'training_time': sum(history.get('epoch_times', [0])),  # If we track epoch times
+        'num_epochs': args.num_epochs,
+        'batch_size': args.batch_size,
+        'learning_rate': args.learning_rate
+    }
+    
+    # Track experiment results
+    experiment_params = {
+        'recon_weight': args.recon_weight,
+        'decoder_type': args.decoder_type,
+        'recon_loss_type': args.recon_loss_type,
+        'reg_weight': args.reg_weight,
+        'model_type': args.model_type,
+        'crn_type': args.crn_type,
+        'network_type': args.network_type,
+        'hidden_dims': args.hidden_dims,
+        'num_epochs': args.num_epochs,
+        'batch_size': args.batch_size,
+        'learning_rate': args.learning_rate,
+        'optimizer': args.optimizer,
+        'seed': args.seed
+    }
+    
+    tracker.add_experiment(
+        experiment_name=args.experiment_name,
+        parameters=experiment_params,
+        results=final_results,
+        status="completed"
+    )
     
     # Print final results
     print("\n" + "=" * 60)
@@ -392,12 +550,13 @@ def main():
         print(f"Final validation accuracy: {history['val_accuracies'][-1]:.4f}")
     
     print(f"\nResults saved to: {args.save_dir}")
+    print(f"Experiment tracked in: {args.results_file}")
     print("Files created:")
-    for file in os.listdir(args.save_dir):
-        file_path = os.path.join(args.save_dir, file)
-        if os.path.isfile(file_path):
-            size = os.path.getsize(file_path)
-            print(f"  - {file} ({size} bytes)")
+    save_path = Path(args.save_dir)
+    for file_path in save_path.iterdir():
+        if file_path.is_file():
+            size = file_path.stat().st_size
+            print(f"  - {file_path.name} ({size} bytes)")
 
 
 if __name__ == "__main__":

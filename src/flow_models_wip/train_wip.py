@@ -216,7 +216,7 @@ def create_vae_config(
         }),
         decoder_config=FrozenDict({
             "model_type": "mlp",
-            "decoder_type": "logits",
+            "decoder_type": "deterministic",
             "latent_shape": latent_shape,
             "output_shape": output_shape,
             "hidden_dims": (32, 64, 128),

@@ -139,6 +139,16 @@ logs/
 checkpoints/
 results/
 
+# Experiment artifacts (entire directory and all contents)
+artifacts/
+experiment_results.md
+detailed_report_*.md
+
+# Generated experiment results (but keep the scripts)
+experiments/artifacts/
+experiments/experiment_results.md
+experiments/detailed_report_*.md
+
 # Model outputs
 *.png
 *.jpg

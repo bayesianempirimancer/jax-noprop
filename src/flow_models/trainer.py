@@ -22,7 +22,8 @@ from mpl_toolkits.mplot3d import Axes3D
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from src.flow_models.fm import VAE_flow, VAEFlowConfig
+from src.flow_models.fm import VAE_flow as FlowMatchingModel, VAEFlowConfig as FlowMatchingConfig
+from src.flow_models.df import VAE_flow as DiffusionModel, VAEFlowConfig as DiffusionConfig
 
 # Optional plotting imports (with try-except for graceful degradation)
 try:
@@ -41,7 +42,7 @@ class VAEFlowTrainer:
     
     def __init__(
         self,
-        config: VAEFlowConfig,
+        config,
         learning_rate: float = 1e-3,
         optimizer_name: str = "adam",
         seed: int = 42
@@ -60,8 +61,13 @@ class VAEFlowTrainer:
         self.optimizer_name = optimizer_name
         self.seed = seed
         
-        # Initialize model
-        self.model = VAE_flow(config=config)
+        # Initialize model based on config type
+        if isinstance(config, DiffusionConfig):
+            self.model = DiffusionModel(config=config)
+            self.model_type = "diffusion"
+        else:  # FlowMatchingConfig
+            self.model = FlowMatchingModel(config=config)
+            self.model_type = "flow_matching"
         
         # Initialize optimizer
         if optimizer_name.lower() == "adam":
@@ -329,7 +335,7 @@ class VAEFlowTrainer:
             'recon_loss': float(avg_recon_loss)
         }
     
-    def predict(self, x_data: jnp.ndarray, num_steps: int = 20, integration_method: str = "euler", output_type: str = "end_point") -> jnp.ndarray:
+    def predict(self, x_data: jnp.ndarray, num_steps: int = 20, integration_method: str = "midpoint", output_type: str = "end_point") -> jnp.ndarray:
         """
         Make predictions using the model's predict method.
         
@@ -376,19 +382,37 @@ class VAEFlowTrainer:
         return float(accuracy)
     
     def save_params(self, filepath: str):
-        """Save model parameters to file."""
+        """Save model parameters and config to file."""
         if self.params is None:
             raise ValueError("Model not initialized. No parameters to save.")
         
+        # Save both parameters and config
+        save_data = {
+            'params': self.params,
+            'config': self.config
+        }
+        
         with open(filepath, 'wb') as f:
-            pickle.dump(self.params, f)
-        print(f"Parameters saved to {filepath}")
+            pickle.dump(save_data, f)
+        print(f"Parameters and config saved to {filepath}")
     
     def load_params(self, filepath: str):
-        """Load model parameters from file."""
+        """Load model parameters and config from file."""
         with open(filepath, 'rb') as f:
-            self.params = pickle.load(f)
-        print(f"Parameters loaded from {filepath}")
+            data = pickle.load(f)
+        
+        # Handle both old format (just params) and new format (params + config)
+        if isinstance(data, dict) and 'params' in data:
+            self.params = data['params']
+            if 'config' in data:
+                self.config = data['config']
+                print(f"Parameters and config loaded from {filepath}")
+            else:
+                print(f"Parameters loaded from {filepath} (no config found)")
+        else:
+            # Old format - just parameters
+            self.params = data
+            print(f"Parameters loaded from {filepath} (old format, no config)")
     
     def save_results(self, results: Dict[str, Any], output_dir: str):
         """Save training results and create plots."""
@@ -413,78 +437,128 @@ class VAEFlowTrainer:
     def _create_plots(self, results: Dict[str, Any], output_dir: str):
         """Create diagnostic plots."""
         try:
-            # Learning curves
+            # 1. Training Progress Plot (4-panel: Total loss, Reconstruction loss, Predictions vs Targets, Residuals vs Targets)
             if 'train_losses' in results and len(results['train_losses']) > 0:
-                self._create_learning_curves_plot(results, output_dir)
+                self._create_training_progress_plot(results, output_dir)
             
-            # Data visualization
+            # 2. Data visualization (keep as is)
             if 'train_x' in results and 'train_y' in results:
                 self._create_data_visualization_plot(results, output_dir)
             
-            # Predictions vs targets
+            # 3. Trajectory plot
             if 'train_pred' in results and 'train_y' in results:
-                self._create_predictions_plot(results, output_dir)
+                self._create_trajectory_plot(results, output_dir)
+            
+            # 4. Trajectory diagnostics plot
+            if 'train_pred' in results and 'train_y' in results:
+                self._create_trajectory_diagnostics_plot(results, output_dir)
                 
         except Exception as e:
             print(f"Warning: Error creating plots: {e}")
             traceback.print_exc()
     
-    def _create_learning_curves_plot(self, results: Dict[str, Any], output_dir: str):
-        """Create learning curves plot."""
-        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-        fig.suptitle('Training Progress', fontsize=16)
+    def _create_training_progress_plot(self, results: Dict[str, Any], output_dir: str):
+        """Create 4-panel training progress plot: Total loss, Reconstruction loss, Predictions vs Targets, Residuals vs Targets."""
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle('Training Progress', fontsize=16, fontweight='bold')
         
         epochs = range(len(results['train_losses']))
         
-        # Total loss
-        axes[0, 0].plot(epochs, results['train_losses'], label='Train', color='blue')
+        # Panel 1: Total loss
+        axes[0, 0].plot(epochs, results['train_losses'], label='Train', color='blue', linewidth=2)
         if 'val_losses' in results and len(results['val_losses']) > 0:
             val_epochs = range(len(results['val_losses']))
-            axes[0, 0].plot(val_epochs, results['val_losses'], label='Validation', color='red')
-        axes[0, 0].set_title('Total Loss')
+            axes[0, 0].plot(val_epochs, results['val_losses'], label='Validation', color='red', linewidth=2)
+        axes[0, 0].set_title('Total Loss', fontsize=14, fontweight='bold')
         axes[0, 0].set_xlabel('Epoch')
         axes[0, 0].set_ylabel('Loss')
         axes[0, 0].legend()
-        axes[0, 0].grid(True)
+        axes[0, 0].grid(True, alpha=0.3)
         
-        # Flow loss
-        axes[0, 1].plot(epochs, results['train_flow_losses'], label='Train', color='blue')
-        if 'val_flow_losses' in results and len(results['val_flow_losses']) > 0:
-            axes[0, 1].plot(val_epochs, results['val_flow_losses'], label='Validation', color='red')
-        axes[0, 1].set_title('Flow Loss')
+        # Panel 2: Reconstruction loss
+        if 'train_recon_losses' in results and len(results['train_recon_losses']) > 0:
+            axes[0, 1].plot(epochs, results['train_recon_losses'], label='Train', color='blue', linewidth=2)
+            if 'val_recon_losses' in results and len(results['val_recon_losses']) > 0:
+                axes[0, 1].plot(val_epochs, results['val_recon_losses'], label='Validation', color='red', linewidth=2)
+        axes[0, 1].set_title('Reconstruction Loss', fontsize=14, fontweight='bold')
         axes[0, 1].set_xlabel('Epoch')
         axes[0, 1].set_ylabel('Loss')
         axes[0, 1].legend()
-        axes[0, 1].grid(True)
+        axes[0, 1].grid(True, alpha=0.3)
         
-        # Reconstruction loss
-        axes[1, 0].plot(epochs, results['train_recon_losses'], label='Train', color='blue')
-        if 'val_recon_losses' in results and len(results['val_recon_losses']) > 0:
-            axes[1, 0].plot(val_epochs, results['val_recon_losses'], label='Validation', color='red')
-        axes[1, 0].set_title('Reconstruction Loss')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('Loss')
-        axes[1, 0].legend()
-        axes[1, 0].grid(True)
+        # Panel 3: Predictions vs Targets
+        if 'train_pred' in results and 'train_y' in results:
+            train_pred = np.array(results['train_pred'])
+            train_y = np.array(results['train_y'])
+            val_pred = np.array(results.get('val_pred', []))
+            val_y = np.array(results.get('val_y', []))
+            
+            # Flatten for plotting
+            if train_pred.ndim > 2:
+                train_pred_flat = train_pred.reshape(-1)
+            else:
+                train_pred_flat = train_pred.flatten()
+            
+            if train_y.ndim > 2:
+                train_y_flat = train_y.reshape(-1)
+            else:
+                train_y_flat = train_y.flatten()
+            
+            # Sample points for better visualization
+            n_sample = min(1000, len(train_y_flat))
+            indices = np.random.choice(len(train_y_flat), n_sample, replace=False)
+            
+            axes[1, 0].scatter(train_y_flat[indices], train_pred_flat[indices], alpha=0.6, s=15, color='blue', label='Train')
+            
+            if len(val_pred) > 0 and len(val_y) > 0:
+                if val_pred.ndim > 2:
+                    val_pred_flat = val_pred.reshape(-1)
+                else:
+                    val_pred_flat = val_pred.flatten()
+                
+                if val_y.ndim > 2:
+                    val_y_flat = val_y.reshape(-1)
+                else:
+                    val_y_flat = val_y.flatten()
+                
+                n_val_sample = min(500, len(val_y_flat))
+                val_indices = np.random.choice(len(val_y_flat), n_val_sample, replace=False)
+                axes[1, 0].scatter(val_y_flat[val_indices], val_pred_flat[val_indices], alpha=0.6, s=15, color='red', label='Val')
+            
+            # Perfect prediction line
+            all_true = np.concatenate([train_y_flat, val_y_flat if len(val_y) > 0 else []])
+            all_pred = np.concatenate([train_pred_flat, val_pred_flat if len(val_pred) > 0 else []])
+            min_val = min(all_true.min(), all_pred.min())
+            max_val = max(all_true.max(), all_pred.max())
+            axes[1, 0].plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=2, label='Perfect Prediction')
+            
+            axes[1, 0].set_xlabel('True Values')
+            axes[1, 0].set_ylabel('Predicted Values')
+            axes[1, 0].set_title('Predictions vs Targets', fontsize=14, fontweight='bold')
+            axes[1, 0].legend()
+            axes[1, 0].grid(True, alpha=0.3)
         
-        # Accuracy
-        if 'train_accuracies' in results and len(results['train_accuracies']) > 0:
-            acc_epochs = range(len(results['train_accuracies']))
-            axes[1, 1].plot(acc_epochs, results['train_accuracies'], label='Train', color='blue')
-            if 'val_accuracies' in results and len(results['val_accuracies']) > 0:
-                val_acc_epochs = range(len(results['val_accuracies']))
-                axes[1, 1].plot(val_acc_epochs, results['val_accuracies'], label='Validation', color='red')
-            axes[1, 1].set_title('Accuracy')
-            axes[1, 1].set_xlabel('Epoch')
-            axes[1, 1].set_ylabel('Accuracy')
+        # Panel 4: Residuals vs Targets
+        if 'train_pred' in results and 'train_y' in results:
+            residuals = train_pred_flat - train_y_flat
+            axes[1, 1].scatter(train_y_flat[indices], residuals[indices], alpha=0.6, s=15, color='blue', label='Train')
+            
+            if len(val_pred) > 0 and len(val_y) > 0:
+                val_residuals = val_pred_flat - val_y_flat
+                axes[1, 1].scatter(val_y_flat[val_indices], val_residuals[val_indices], alpha=0.6, s=15, color='red', label='Val')
+            
+            axes[1, 1].axhline(y=0, color='k', linestyle='--', linewidth=2)
+            axes[1, 1].set_xlabel('True Values')
+            axes[1, 1].set_ylabel('Residuals (Predicted - True)')
+            axes[1, 1].set_title('Residuals vs Targets', fontsize=14, fontweight='bold')
             axes[1, 1].legend()
-            axes[1, 1].grid(True)
+            axes[1, 1].grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plot_file = os.path.join(output_dir, "learning_curves.png")
+        plot_file = os.path.join(output_dir, "training_progress.png")
         plt.savefig(plot_file, dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"Learning curves plot saved to {plot_file}")
+        print(f"Training progress plot saved to {plot_file}")
     
     def _create_data_visualization_plot(self, results: Dict[str, Any], output_dir: str):
         """Create data visualization plot with more data points."""
@@ -607,6 +681,120 @@ class VAEFlowTrainer:
         plt.savefig(plot_file, dpi=300, bbox_inches='tight')
         plt.close()
         print(f"Predictions plot saved to {plot_file}")
+
+    def _create_trajectory_plot(self, results: Dict[str, Any], output_dir: str):
+        """Create trajectory plot using the trajectory plotting utilities."""
+        try:
+            from src.utils.plotting.plot_trajectories import create_simple_trajectory_plot
+            
+            # Get sample data for trajectory generation
+            if 'train_x' not in results or 'train_y' not in results:
+                print("Warning: Cannot create trajectory plot - missing train_x or train_y in results")
+                return
+            
+            # Sample a few points for trajectory visualization
+            train_x = np.array(results['train_x'])
+            train_y = np.array(results['train_y'])
+            n_samples = min(5, len(train_x))
+            
+            # Get trajectories using the model's predict method
+            x_sample = train_x[:n_samples]
+            y_sample = train_y[:n_samples]
+            
+            # Generate trajectories using the model
+            print(f"Generating trajectories for {n_samples} samples...")
+            trajectories = []
+            for i in range(n_samples):
+                x_single = x_sample[i:i+1]  # Keep batch dimension
+                y_single = y_sample[i:i+1]
+                
+                # Get trajectory from model predict method
+                traj = self.model.predict(
+                    self.params, 
+                    x_single, 
+                    num_steps=20, 
+                    output_type="trajectory"
+                )
+                print(f"Sample {i}: trajectory shape = {traj.shape}")
+                # Remove batch dimension and squeeze if needed
+                if traj.ndim == 3 and traj.shape[1] == 1:
+                    traj = traj[:, 0, :]  # Remove batch dimension
+                trajectories.append(traj)
+            
+            trajectories = np.array(trajectories)  # Shape: [n_samples, n_steps, output_dim]
+            print(f"Final trajectories shape: {trajectories.shape}")
+            
+            # Create trajectory plot
+            plot_file = os.path.join(output_dir, "trajectories.png")
+            create_simple_trajectory_plot(
+                trajectories=trajectories,
+                targets=y_sample,
+                output_path=plot_file,
+                model_name=f"{self.model_type.title()} Model",
+                num_samples=n_samples
+            )
+            
+        except Exception as e:
+            print(f"Warning: Could not create trajectory plot: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _create_trajectory_diagnostics_plot(self, results: Dict[str, Any], output_dir: str):
+        """Create trajectory diagnostics plot using the trajectory plotting utilities."""
+        try:
+            from src.utils.plotting.plot_trajectories import create_trajectory_diagnostic_plot
+            
+            # Get sample data for trajectory generation
+            if 'train_x' not in results or 'train_y' not in results:
+                print("Warning: Cannot create trajectory diagnostics plot - missing train_x or train_y in results")
+                return
+            
+            # Sample more points for diagnostics
+            train_x = np.array(results['train_x'])
+            train_y = np.array(results['train_y'])
+            n_samples = min(10, len(train_x))
+            
+            # Get trajectories using the model's predict method
+            x_sample = train_x[:n_samples]
+            y_sample = train_y[:n_samples]
+            
+            # Generate trajectories using the model
+            print(f"Generating trajectory diagnostics for {n_samples} samples...")
+            trajectories = []
+            for i in range(n_samples):
+                x_single = x_sample[i:i+1]  # Keep batch dimension
+                y_single = y_sample[i:i+1]
+                
+                # Get trajectory from model predict method
+                traj = self.model.predict(
+                    self.params, 
+                    x_single, 
+                    num_steps=20, 
+                    output_type="trajectory"
+                )
+                print(f"Sample {i}: trajectory shape = {traj.shape}")
+                # Remove batch dimension and squeeze if needed
+                if traj.ndim == 3 and traj.shape[1] == 1:
+                    traj = traj[:, 0, :]  # Remove batch dimension
+                trajectories.append(traj)
+            
+            trajectories = np.array(trajectories)  # Shape: [n_samples, n_steps, output_dim]
+            print(f"Final trajectories shape: {trajectories.shape}")
+            
+            # Create trajectory diagnostics plot
+            plot_file = os.path.join(output_dir, "trajectory_diagnostics.png")
+            create_trajectory_diagnostic_plot(
+                trajectories=trajectories,
+                targets=y_sample,
+                output_path=plot_file,
+                model_name=f"{self.model_type.title()} Model",
+                num_samples=n_samples
+            )
+            
+        except Exception as e:
+            print(f"Warning: Could not create trajectory diagnostics plot: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 def main():

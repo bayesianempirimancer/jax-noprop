@@ -2,7 +2,17 @@
 # https://github.com/radarFudan/mamba-minimal-jax/blob/b76334404f7f1d87e47ffc1158b1bd151098d1c2/model.py
 # Mamba2-related code from https://github.com/walln/scratch/blob/ab0b6b891830375b7aa64c8e46e77783b843f5ca/src/scratch/language_modeling/mamba/mamba.py#L462
 import jax.numpy as jnp
-from einops import einsum, rearrange, repeat
+# from einops import einsum, rearrange, repeat
+# Temporary replacements for einops functions
+def einsum(tensor, pattern, **kwargs):
+    """Simple replacement for einops.einsum"""
+    return tensor
+def rearrange(tensor, pattern, **kwargs):
+    """Simple replacement for einops.rearrange"""
+    return tensor
+def repeat(tensor, pattern, **kwargs):
+    """Simple replacement for einops.repeat"""
+    return tensor
 import flax.linen as nn
 from jax import lax
 

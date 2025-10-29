@@ -6,6 +6,7 @@ from functools import cached_property
 from typing import Dict, Any
 
 import jax.numpy as jnp
+import jax
 import flax.linen as nn
 from src.utils.activation_utils import get_activation_function
 from src.layers.mlp import MLP
@@ -19,7 +20,7 @@ class Config:
     model_name: str = "decoder"
     config: dict = field(default_factory=lambda: {
         "model_type": "mlp", # Options: "mlp", "resnet", "identity"
-        "decoder_type": "logits",  # Options: "logits", "normal"
+        "decoder_type": "linear",  # Options: "linear", "softmax", "none"
         "input_shape": "NA",  # Will be set from main config if not specified
         "output_shape": "NA",
         "hidden_dims": (64, 32, 16),
@@ -28,6 +29,18 @@ class Config:
     })
 
 ########  DECODER CLASSES AVAILABLE   ###########
+
+def apply_output_transformation(output: jnp.ndarray, decoder_type: str) -> jnp.ndarray:
+    """Apply output transformation based on decoder type."""
+    if decoder_type == "linear":
+        # Apply additional Dense layer
+        return nn.Dense(output.shape[-1])(output)
+    elif decoder_type == "softmax":
+        return jax.nn.softmax(output, axis=-1)
+    elif decoder_type == "none":
+        return output  # No transformation
+    else:
+        raise ValueError(f"Unknown decoder_type: {decoder_type}")
 
 def get_decoder_class(decoder_type: str):
     """Get decoder class by type string."""
@@ -123,10 +136,13 @@ class MLPDecoder(nn.Module):
             bias=True
         )
         
-        # Apply MLP and return raw output
-        # Output transformation (identity/softmax/linear) is handled at usage level
+        # Apply MLP and get raw output
         output = mlp(x, x.shape[-1])
-        return output.reshape(batch_shape + self.output_shape)
+        output = output.reshape(batch_shape + self.output_shape)
+        
+        # Apply output transformation based on decoder type
+        decoder_type = self.config["decoder_type"]
+        return apply_output_transformation(output, decoder_type)
 
 
 class ResNetDecoder(nn.Module):
@@ -166,20 +182,26 @@ class ResNetDecoder(nn.Module):
             bias=True
         )
         
-        # Apply MLP and return raw output
-        # Output transformation (identity/softmax/linear) is handled at usage level
+        # Apply MLP and get raw output
         output = mlp(x, x.shape[-1])
-        return output.reshape(batch_shape + self.output_shape)
+        output = output.reshape(batch_shape + self.output_shape)
+        
+        # Apply output transformation based on decoder type
+        decoder_type = self.config["decoder_type"]
+        return apply_output_transformation(output, decoder_type)
 
 
 class IdentityDecoder(nn.Module):
     """Deterministic identity decoder that returns single tensor."""
     config: dict
+    latent_shape: Tuple[int, ...]
+    output_shape: Tuple[int, ...]
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         # Identity decoder just returns input unchanged
-        # Output transformation (identity/softmax/linear) is handled at usage level
-        return x
+        # Apply output transformation based on decoder type
+        decoder_type = self.config.get("decoder_type", "linear")
+        return apply_output_transformation(x, decoder_type)
 
 

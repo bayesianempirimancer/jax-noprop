@@ -1,22 +1,3 @@
-"""
-NoProp-CT: Continuous-time NoProp implementation.
-
-This work in progress module adds a learable embedding for the output target z_target = f(y)
-and and associated decoder p(y|z_target).  For example in the simple case where y is categorical, 
-the learnable decoder is a softmax times a one hot representation of y and the learnable embedding
-is some linear transformation of the one hot representation of y.  More generally z_target = f(y) is 
-a neural network, and p(y|z_target) is some neural network parameterized distribution.  This ammounts 
-to taking a sort of VAE on at the end of the flow.  
-
-The reason this is a work in progress is because this will require a substaantial modification of the 
-existing noprop code.  The big change is that the call routine now needs to output something that can be 
-easily turned into a prediction for z_target from z_t as input to the probabilistic decoder and the encoder
-of the y.  These are the three things that will now contribute to the loss function at each time step.  
-
-Another possibel approach would be to create a VAE and put the flow model in for the element that sets the 
-prior distribution over the latent variable z_target.  This would be a more principled approach.  We will 
-explore both approaches here.  
-"""
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -27,9 +8,10 @@ from typing import Tuple, Dict
 from dataclasses import dataclass, field
 
 from functools import partial, cached_property
+
+# Import directly without going through src package to avoid einops dependency
 from src.configs.base_config import BaseConfig
 from src.utils.ode_integration import integrate_ode
-
 from src.models.vae.encoders import create_encoder
 from src.models.vae.decoders import create_decoder
 from src.flow_models.crn import create_conditional_resnet
@@ -41,16 +23,18 @@ class VAEFlowConfig(BaseConfig):
     # BaseConfig fields
     model_name: str = "vae_flow_network"
 
-    config: FrozenDict = field(default_factory=lambda: FrozenDict({
+    main: FrozenDict = field(default_factory=lambda: FrozenDict({
         "input_shape": "NA",  # Will be set based on z_dim
         "output_shape": "NA",  # Will be set based on z_dim or z_dim**2
         "latent_shape": "NA",  # Will be set based on x_dim
-        "loss_type": "cross_entropy", # Options: "cross_entropy", "mse", "none".  Should be consistent with decoder type
-        "flow_loss_weight": 0.01,  # Weight for flow loss in total loss
+        "recon_loss_type": "cross_entropy", # Options: "cross_entropy", "mse", "none".  Should be consistent with decoder type
+        "recon_weight": 0.1,  # Weight for reconstruction loss in total loss
         "reg_weight": 0.0,  # Weight for regularization loss in total loss
+        "integration_method": "euler",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
+                                           # Only use midpoint for diffusion model.  singularities at t=0 break forward integration.
     }))
 
-    crn_config: FrozenDict = field(default_factory=lambda: FrozenDict({
+    crn: FrozenDict = field(default_factory=lambda: FrozenDict({
         "model_type": "vanilla", # Options: "vanilla", "geometric", "potential", "natural"
         "network_type": "mlp", # Options: "mlp", "bilinear", "convex"
         "hidden_dims": (64, 64, 64),
@@ -61,19 +45,19 @@ class VAEFlowConfig(BaseConfig):
         "dropout_rate": 0.1,
     }))
     
-    encoder_config: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "model_type": "mlp", # Options: "mlp", "mlp_normal", "resnet", "resnet_normal", "identity"
-        "encoder_type": "normal",  # Options: "deterministic", "normal"
+    encoder: FrozenDict = field(default_factory=lambda: FrozenDict({
+        "model_type": "identity", # Options: "mlp", "mlp_normal", "resnet", "resnet_normal", "identity", "linear"
+        "encoder_type": "deterministic",  # Options: "deterministic", "normal", 
         "input_shape": "NA",  # Will be set from main config if not specified
         "latent_shape": "NA",
-        "hidden_dims": (64, 32, 16),
+        "hidden_dims": (8,),
         "activation": "swish",
         "dropout_rate": 0.1,
     }))
     
-    decoder_config: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "model_type": "mlp", # Options: "mlp", "resnet", "identity"
-        "decoder_type": "logits", # Options: "logits", "normal"
+    decoder: FrozenDict = field(default_factory=lambda: FrozenDict({
+        "model_type": "identity", # Options: "mlp", "resnet", "identity"
+        "decoder_type": "none", # Options: "linear", "softmax", "none"
         "latent_shape": "NA",  # Will be set from main config if not specified
         "output_shape": "NA",
         "hidden_dims": (64, 32, 16),
@@ -89,9 +73,9 @@ class VAE_flow(nn.Module):
     def setup(self):
         """Initialize the CRN model as a field."""
         self.crn_model = create_conditional_resnet(
-            self.config.crn_config,
+            self.config.crn,
             latent_shape=self.z_shape,
-            input_shape=self.config.config["input_shape"],
+            input_shape=self.config.main["input_shape"],
             output_shape=self.z_shape
         )
     
@@ -99,12 +83,17 @@ class VAE_flow(nn.Module):
     @property
     def z_shape(self) -> Tuple[int, ...]:
         """Effective z_shape from config."""
-        return self.config.config["latent_shape"]
+        return self.config.main["latent_shape"]
     
     @property
     def z_ndims(self) -> int:
         """Number of dimensions in z_shape."""
         return len(self.z_shape)
+    
+    @property
+    def y_ndims(self) -> int:
+        """Number of dimensions in y_shape."""
+        return len(self.config.main["output_shape"])
     
     @cached_property
     def z_dim(self) -> int:
@@ -117,7 +106,7 @@ class VAE_flow(nn.Module):
     @property
     def x_ndims(self) -> int:
         """Number of dimensions in x_shape."""
-        return len(self.config.config["input_shape"])
+        return len(self.config.main["input_shape"])
 
     def _flatten_z(self, z: jnp.ndarray) -> jnp.ndarray:
         """Flatten the z tensor to 1D for processing."""
@@ -172,7 +161,7 @@ class VAE_flow(nn.Module):
         """
         # Use direct factory function: create_encoder(config_dict, input_shape, latent_shape)
         encoder = create_encoder(
-            self.config.encoder_config,
+            self.config.encoder,
             input_shape=(x.shape[-1],),  # Use flattened input dimension
             latent_shape=self.z_shape  # Use structured latent shape
         )
@@ -196,22 +185,13 @@ class VAE_flow(nn.Module):
         """Decoder that maps latent z to output space using single factory function."""
         # Create decoder network using direct factory
         decoder = create_decoder(
-            self.config.decoder_config,
+            self.config.decoder,
             latent_shape=self.z_shape,  # Use structured latent shape
-            output_shape=(self.config.config["output_shape"][0],)  # Use config output_dim
+            output_shape=(self.config.main["output_shape"][0],)  # Use config output_dim
         )
         
-        # Get raw output from decoder
-        output = decoder(x, training)
-        
-        # Optimized: apply output transformation based on decoder type
-        decoder_type = self.config.decoder_config["decoder_type"]
-        if decoder_type == "logits":
-            return jax.nn.softmax(output, axis=-1)
-        elif decoder_type == "normal":
-            return output
-        else:
-            raise ValueError(f"Unknown decoder_type: {decoder_type}")
+        # Get output from decoder (transformation is handled in decoder)
+        return decoder(x, training)
 
             
     def __call__(self, x: jnp.ndarray, y: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> jnp.ndarray:
@@ -271,35 +251,39 @@ class VAE_flow(nn.Module):
         # Optimized: get flow field dz/dt using flow_model method with proper rngs
         squeezed_t = t.squeeze(tuple(range(-self.z_ndims, 0)))
         dz_dt = self.apply(params, z_t, x, squeezed_t, method='flow_model', training=training, rngs={'dropout': key})    
-        flow_loss = jnp.mean((dz_dt - diff_z)**2)        
+
+        reg_loss = jnp.mean(dz_dt ** 2)
+        flow_loss = jnp.mean((dz_dt - diff_z)**2)
 #        flow_loss = jnp.mean((z_target - z_target_est)**2)
 
         # Estimate target using flow field
         z_target_est = dz_dt * (1.0-t) + z_t
 
-
         # Optimized: get the predicted probabilities from decoder with proper rngs
         y_pred = self.apply(params, z_target_est, method='decoder', training=training, rngs={'dropout': key})
+        mse_loss = jnp.mean((z_target_est - z_target)**2)
 
         # Optimized: compute loss more efficiently
-        loss_type = self.config.config["loss_type"]
-        if loss_type == "cross_entropy":
+        recon_loss_type = self.config.main["recon_loss_type"]
+        if recon_loss_type == "cross_entropy":
             recon_loss = -jnp.mean(y * jnp.log(y_pred + 1e-8))
-        elif loss_type == "mse":
-            recon_loss = jnp.mean((y - y_pred)**2)
-        elif loss_type == "none":
-            recon_loss = 0.0
         else:
-            raise ValueError(f"Unknown loss_type: {loss_type}")
+            recon_loss = jnp.mean((y - y_pred)**2)
 
-        # Optimized: pre-compute flow_loss_weight
-        flow_loss_weight = self.config.config["flow_loss_weight"]
-        total_loss = flow_loss_weight * flow_loss + recon_loss
+        # Optimized: pre-compute recon_weight
+        recon_weight = self.config.main["recon_weight"]
+        # Force recon_weight to 0 if recon_loss_type is "none"
+        if recon_loss_type == "none":
+            recon_weight = 0.0
+            
+        reg_weight = self.config.main["reg_weight"]
 
-        return total_loss, {'flow_loss': flow_loss, 'recon_loss': recon_loss, 'total_loss': total_loss}
+        total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss
+
+        return total_loss, {'flow_loss': flow_loss, 'recon_loss': recon_loss, 'mse_loss': mse_loss, 'reg_loss': reg_loss, 'total_loss': total_loss}
 
     @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, num_steps, integration_method, output_type, and training are static arguments
-    def predict(self, params: dict, x: jnp.ndarray, num_steps: int = 20, integration_method: str = "euler", output_type: str = "end_point") -> jnp.ndarray:
+    def predict(self, params: dict, x: jnp.ndarray, num_steps: int = 20, integration_method: str = "euler", output_type: str = "end_point", prng_key: jr.PRNGKey = None) -> jnp.ndarray:
         """
         Make predictions using ODE solver integration.
         
@@ -309,6 +293,7 @@ class VAE_flow(nn.Module):
             num_steps: Number of integration steps (default: 20)
             integration_method: Integration method ("euler", "heun", "rk4", "adaptive") (default: "euler")
             output_type: Type of output ("end_point" for final prediction, "trajectory" for full trajectory)
+            prng_key: Optional PRNG key for generative mode. If provided, samples z_0 from unit normal instead of zero.
             
         Returns:
             If output_type="end_point": Final prediction [batch_shape + y_shape]
@@ -318,9 +303,14 @@ class VAE_flow(nn.Module):
         # Optimized: disable gradient tracking through parameters for inference
         params_no_grad = jax.lax.stop_gradient(params)
         
-        # Optimized: generate initial latent state z_0 with proper shape
+        # Generate initial latent state z_0
         batch_shape = x.shape[:-self.x_ndims]
-        z_0 = jnp.zeros(batch_shape + (self.z_dim,))  # ode expects vectorized z
+        if prng_key is not None:
+            # Generative mode: sample from unit normal distribution
+            z_0 = jr.normal(prng_key, batch_shape + (self.z_dim,))
+        else:
+            # Regression mode: start from zero
+            z_0 = jnp.zeros(batch_shape + (self.z_dim,))  # ode expects vectorized z
         
         # Optimized: define the vector field for ODE integration using flow_model method
         def vector_field(params, z, x, t):
@@ -345,12 +335,28 @@ class VAE_flow(nn.Module):
             output_type=output_type
         )
         
-        # Optimized: decode the final latent state to get predictions
-        if len(self.z_shape) <= 1:
-            z_trajectory_structured = z_trajectory
+        if output_type == "trajectory":
+            # For trajectory output, decode the entire trajectory
+            if len(self.z_shape) <= 1:
+                z_trajectory_structured = z_trajectory
+            else:
+                z_trajectory_structured = self._unflatten_z(z_trajectory)
+            
+            # Decode each time step of the trajectory
+            decoded_trajectory = []
+            for t_step in range(z_trajectory_structured.shape[0]):
+                z_t = z_trajectory_structured[t_step]
+                decoded_t = self.apply(params, z_t, method='decoder', training=False)
+                decoded_trajectory.append(decoded_t)
+            
+            return jnp.array(decoded_trajectory)
         else:
-            z_trajectory_structured = self._unflatten_z(z_trajectory)
-        return self.apply(params, z_trajectory_structured, method='decoder', training=False)
+            # For end_point output, decode only the final latent state
+            if len(self.z_shape) <= 1:
+                z_trajectory_structured = z_trajectory
+            else:
+                z_trajectory_structured = self._unflatten_z(z_trajectory)
+            return self.apply(params, z_trajectory_structured, method='decoder', training=False)
     
     def get_dzdt(self, params: dict, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
         """

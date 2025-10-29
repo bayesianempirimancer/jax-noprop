@@ -1,6 +1,6 @@
 """VAE model components."""
 
-from .encoders import Config as EncoderConfig, get_encoder_class, create_encoder, MLPEncoder, MLPNormalEncoder, ResNetEncoder, ResNetNormalEncoder, IdentityEncoder
+from .encoders import Config as EncoderConfig, get_encoder_class, create_encoder, MLPEncoder, MLPNormalEncoder, ResNetEncoder, ResNetNormalEncoder, IdentityEncoder, LinearEncoder
 from .decoders import Config as DecoderConfig, get_decoder_class, create_decoder, MLPDecoder, ResNetDecoder, IdentityDecoder
 
 __all__ = [
@@ -15,6 +15,7 @@ __all__ = [
     "ResNetEncoder",
     "ResNetNormalEncoder",
     "IdentityEncoder",
+    "LinearEncoder",
     "MLPDecoder",
     "ResNetDecoder",
     "IdentityDecoder",
