@@ -193,6 +193,7 @@ class VAE_flow(nn.Module):
         # The actual forward pass logic is handled by the individual methods
         return jnp.zeros(batch_shape + self.z_shape)
 
+    @partial(jax.jit, static_argnums=(0, 5))  # self, num_steps, integration_method, output_type, and training are static arguments
     def loss(self, params: dict, x: jnp.ndarray, y: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> Tuple[jnp.ndarray, dict]:
         """
         Compute the diffusion loss.
@@ -256,7 +257,8 @@ class VAE_flow(nn.Module):
         predicted_noise = self.apply(params, z, x, t, method='pred_noise', training=False)
         t = jnp.expand_dims(jnp.asarray(t), axis=tuple(range(-self.z_ndims, 0)))
 
-        return 0.5*z/jnp.sqrt(t+1e-6) - predicted_noise
+#        return 0.5*z/jnp.sqrt(t+1e-6) - predicted_noise
+        return 0.5*z/jnp.sqrt(t+1e-6) - predicted_noise*(1.0/jnp.sqrt(t+1e-6)/jnp.sqrt(1-t-1e-6))
 
 
     @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, num_steps, integration_method, output_type, and training are static arguments

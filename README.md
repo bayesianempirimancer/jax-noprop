@@ -23,7 +23,7 @@ This library implements **three carefully designed flow model variants**, all ba
 - **Use Case**: When you want the model to learn the best noise schedule for your data
 
 #### 2. **NoProp-DF (Diffusion)**: Reparameterized Fixed Schedule  
-- **Core Innovation**: Uses a **reparameterized noise schedule** that eliminates singularities at t=0 and t=1
+- **Core Innovation**: Uses a **rescaled time for prediction** for more stable dynamics near t=0 and t=1
 - **Noise Schedule**: Fixed schedule (e.g., cosine, sigmoid) with mathematical guarantees against singularities
 - **Loss Function**: SNR-weighted loss with the reparameterized schedule
 - **Advantage**: Mathematically robust, no training instabilities from schedule singularities
@@ -201,10 +201,13 @@ python src/flow_models/train.py --data data/your_data.pkl --training-protocol fm
 ### Run Examples
 
 ```bash
-# Two moons dataset example 
-python examples/two_moons.py
+# Generate the two moons dataset (already included under data/)
+python data/generate_two_moons.py
 
-# The example will train both NoProp-CT and NoProp-FM models
+# Train on two moons with different protocols
+python src/flow_models/train.py --data data/two_moons_formatted.pkl --training-protocol ct --model conditional_resnet_mlp --epochs 100
+python src/flow_models/train.py --data data/two_moons_formatted.pkl --training-protocol fm --model conditional_resnet_mlp --epochs 100
+python src/flow_models/train.py --data data/two_moons_formatted.pkl --training-protocol df --model conditional_resnet_mlp --epochs 100
 ```
 
 ## Directory Structure
@@ -214,45 +217,39 @@ The codebase is organized into a clean, modular structure with a unified flow mo
 ```
 jax-noprop/
 ├── src/                          # Main source code
-│   ├── flow_models/             # Unified NoProp implementations
-│   │   ├── ct.py                # NoProp-CT (Continuous-Time) implementation
-│   │   ├── df.py                # NoProp-DF (Diffusion) implementation  
-│   │   ├── fm.py                # NoProp-FM (Flow Matching) implementation
-│   │   ├── crn.py               # Conditional ResNet architectures
-│   │   ├── trainer.py           # Unified trainer for all NoProp variants
-│   │   └── train.py             # Training script with CLI interface
-│   ├── embeddings/              # Time and positional embeddings
-│   │   ├── embeddings.py        # Time embedding functions
-│   │   ├── noise_schedules.py   # Noise scheduling strategies
-│   │   ├── time_embeddings.py   # Time embedding utilities
-│   │   └── positional_encoding.py # Positional encoding functions
-│   ├── layers/                  # Layer implementations
-│   │   ├── builders.py          # Layer building utilities
-│   │   ├── concatsquash.py      # ConcatSquash layer for time conditioning
-│   │   └── image_models.py      # Image model layers
-│   ├── utils/                   # Utility functions
-│   │   ├── plotting/           # Plotting utilities
-│   │   │   ├── plot_learning_curves.py    # Learning curve visualization
-│   │   │   ├── plot_trajectories.py       # Trajectory visualization
-│   │   │   └── example_usage.py          # Plotting examples
-│   │   ├── jacobian_utils.py    # Jacobian computation utilities
-│   │   └── ode_integration.py   # ODE integration methods
-│   ├── configs/                 # Configuration classes
-│   │   ├── base_config.py       # Base configuration
-│   │   ├── base_model.py        # Base model interface
-│   │   └── base_trainer.py      # Base trainer interface
-│   └── archive/                 # Legacy implementations
-│       ├── no_prop_models.py    # Legacy model definitions
-│       └── trainer.py           # Legacy trainer
-├── examples/                    # Example scripts
-│   ├── two_moons.py            # Two moons classification example
-│   └── two_moons_swapped.py    # Two moons generative example
-├── docs/                       # Documentation
-│   ├── API_REFERENCE.md        # API documentation
-│   └── NoPropCT_Forward_Fix.pdf # Technical notes
-├── data/                       # Data directory
-│   └── test_synthetic_matched.pkl # Synthetic test data
-└── artifacts/                  # Generated outputs (plots, results)
+│   ├── flow_models/              # NoProp implementations and training entrypoints
+│   │   ├── ct.py                 # NoProp-CT (Continuous-Time)
+│   │   ├── df.py                 # NoProp-DF (Diffusion)
+│   │   ├── fm.py                 # NoProp-FM (Flow Matching)
+│   │   ├── crn.py                # Conditional ResNet architectures
+│   │   ├── crn_grads.py          # Gradient utilities for CRN
+│   │   ├── trainer.py            # Unified trainer
+│   │   ├── trainer_gen.py        # Generative trainer utilities
+│   │   ├── train.py              # CLI training script
+│   │   └── train_gen.py          # CLI for generative training
+│   ├── embeddings/               # Time/positional embeddings and schedules
+│   │   ├── embeddings.py
+│   │   ├── noise_schedules.py
+│   │   ├── positional_encoding.py
+│   │   └── time_embeddings.py
+│   ├── layers/                   # Layer and block implementations
+│   │   ├── attention.py  builders.py  concatsquash.py  mlp.py  norm.py  ...
+│   │   └── resnet_wrapper.py
+│   ├── models/                   # (Reserved for higher-level model wrappers)
+│   └── utils/                    # Utility functions
+│       ├── activation_utils.py  jacobian_utils.py  ode_integration.py  ...
+│       └── plotting/
+│           ├── plot_learning_curves.py
+│           ├── plot_trajectories.py
+│           └── example_usage.py
+├── data/                         # Datasets and generators
+│   ├── generate_two_moons.py
+│   ├── two_moons_dataset.pkl
+│   └── two_moons_formatted.pkl
+├── examples/                     # Example scripts (currently empty)
+├── tests/                        # Tests (currently empty)
+├── pyproject.toml  setup.py  requirements.txt  LICENSE  README.md
+└── artifacts/                    # Generated outputs (plots, results)
 ```
 
 ## Architecture
@@ -721,13 +718,11 @@ python src/flow_models/train.py --data data/your_dataset.pkl --training-protocol
 
 ### **Two Moons Dataset Example**
 
-The repository includes a complete example demonstrating all three approaches:
-
 ```bash
-# Run with different protocols
-python examples/two_moons.py --protocol ct --epochs 50
-python examples/two_moons.py --protocol df --epochs 50  
-python examples/two_moons.py --protocol fm --epochs 50
+# Train with different protocols on the included two moons dataset
+python src/flow_models/train.py --data data/two_moons_formatted.pkl --training-protocol ct --epochs 50
+python src/flow_models/train.py --data data/two_moons_formatted.pkl --training-protocol df --epochs 50
+python src/flow_models/train.py --data data/two_moons_formatted.pkl --training-protocol fm --epochs 50
 ```
 
 This example demonstrates:
@@ -777,7 +772,3 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 ## License
 
 MIT License
-
----
-
-**Footnote**: This README was written by Claude (Anthropic) AI. For complaints about the documentation quality, please contact Anthropic support. For technical issues with the codebase, please open an issue on this repository.
