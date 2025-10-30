@@ -25,6 +25,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from src.flow_models.fm import VAE_flow as FlowMatchingModel, VAEFlowConfig as FlowMatchingConfig
 from src.flow_models.df import VAE_flow as DiffusionModel, VAEFlowConfig as DiffusionConfig
 from src.flow_models.ct import VAE_flow as CTModel, VAEFlowConfig as CTConfig
+from flax import traverse_util
 
 # Optional plotting imports (with try-except for graceful degradation)
 try:
@@ -102,6 +103,17 @@ class VAEFlowTrainer:
         self.opt_state = self.optimizer.init(self.params)
         print(f"Model initialized with {sum(x.size for x in jax.tree_leaves(self.params))} parameters")
         
+        # Debug: print parameter tree summary (module path -> shape, dtype)
+        try:
+            flat_params = traverse_util.flatten_dict(self.params, keep_empty_nodes=True)
+            print("Parameter tree summary (path: shape dtype):")
+            for path, value in flat_params.items():
+                if hasattr(value, 'shape'):
+                    key_path = "/".join(str(k) for k in path)
+                    print(f"  {key_path}: {tuple(value.shape)} {value.dtype}")
+        except Exception as e:
+            print(f"Warning: could not summarize parameter tree: {e}")
+        
     def train_step(self, x_batch: jnp.ndarray, y_batch: jnp.ndarray, use_dropout: bool = True) -> Dict[str, float]:
         """
         Single training step using VAE_flow's built-in train_step method.
@@ -117,16 +129,14 @@ class VAEFlowTrainer:
         if self.params is None or self.opt_state is None:
             raise ValueError("Model not initialized. Call initialize() first.")
         
-        # Use VAE_flow's built-in train_step method
+        # Always use model's train_step method
+        if not hasattr(self.model, 'train_step'):
+            raise AttributeError("Model must implement train_step(params, x, y, opt_state, optimizer, key, training)")
+        
         self.rng, train_rng = jr.split(self.rng)
-        if use_dropout:
-            self.params, self.opt_state, loss, metrics = self.model.train_step_with_dropout(
-                self.params, x_batch, y_batch, self.opt_state, self.optimizer, train_rng
-            )
-        else:
-            self.params, self.opt_state, loss, metrics = self.model.train_step_without_dropout(
-                self.params, x_batch, y_batch, self.opt_state, self.optimizer, train_rng
-            )
+        self.params, self.opt_state, loss, metrics = self.model.train_step(
+            self.params, x_batch, y_batch, self.opt_state, self.optimizer, train_rng, training=use_dropout
+        )
         
         return metrics
     
@@ -493,67 +503,44 @@ class VAEFlowTrainer:
         axes[0, 1].legend()
         axes[0, 1].grid(True, alpha=0.3)
         
-        # Panel 3: Predictions vs Targets
+        # Panel 3: Flow loss
+        if 'train_flow_losses' in results and len(results['train_flow_losses']) > 0:
+            axes[1, 0].plot(epochs, results['train_flow_losses'], label='Train', color='blue', linewidth=2)
+            if 'val_flow_losses' in results and len(results['val_flow_losses']) > 0:
+                val_epochs = range(len(results['val_flow_losses']))
+                axes[1, 0].plot(val_epochs, results['val_flow_losses'], label='Validation', color='red', linewidth=2)
+        axes[1, 0].set_title('Flow Loss', fontsize=14, fontweight='bold')
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Loss')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        # Panel 4: Residuals vs Targets
         if 'train_pred' in results and 'train_y' in results:
             train_pred = np.array(results['train_pred'])
             train_y = np.array(results['train_y'])
             val_pred = np.array(results.get('val_pred', []))
             val_y = np.array(results.get('val_y', []))
-            
-            # Flatten for plotting
-            if train_pred.ndim > 2:
-                train_pred_flat = train_pred.reshape(-1)
-            else:
-                train_pred_flat = train_pred.flatten()
-            
-            if train_y.ndim > 2:
-                train_y_flat = train_y.reshape(-1)
-            else:
-                train_y_flat = train_y.flatten()
-            
-            # Sample points for better visualization
+
+            # Flatten
+            train_pred_flat = train_pred.reshape(-1) if train_pred.ndim > 2 else train_pred.flatten()
+            train_y_flat = train_y.reshape(-1) if train_y.ndim > 2 else train_y.flatten()
+
+            # Sample indices
             n_sample = min(1000, len(train_y_flat))
             indices = np.random.choice(len(train_y_flat), n_sample, replace=False)
-            
-            axes[1, 0].scatter(train_y_flat[indices], train_pred_flat[indices], alpha=0.6, s=15, color='blue', label='Train')
-            
-            if len(val_pred) > 0 and len(val_y) > 0:
-                if val_pred.ndim > 2:
-                    val_pred_flat = val_pred.reshape(-1)
-                else:
-                    val_pred_flat = val_pred.flatten()
-                
-                if val_y.ndim > 2:
-                    val_y_flat = val_y.reshape(-1)
-                else:
-                    val_y_flat = val_y.flatten()
-                
-                n_val_sample = min(500, len(val_y_flat))
-                val_indices = np.random.choice(len(val_y_flat), n_val_sample, replace=False)
-                axes[1, 0].scatter(val_y_flat[val_indices], val_pred_flat[val_indices], alpha=0.6, s=15, color='red', label='Val')
-            
-            # Perfect prediction line
-            all_true = np.concatenate([train_y_flat, val_y_flat if len(val_y) > 0 else []])
-            all_pred = np.concatenate([train_pred_flat, val_pred_flat if len(val_pred) > 0 else []])
-            min_val = min(all_true.min(), all_pred.min())
-            max_val = max(all_true.max(), all_pred.max())
-            axes[1, 0].plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=2, label='Perfect Prediction')
-            
-            axes[1, 0].set_xlabel('True Values')
-            axes[1, 0].set_ylabel('Predicted Values')
-            axes[1, 0].set_title('Predictions vs Targets', fontsize=14, fontweight='bold')
-            axes[1, 0].legend()
-            axes[1, 0].grid(True, alpha=0.3)
-        
-        # Panel 4: Residuals vs Targets
-        if 'train_pred' in results and 'train_y' in results:
+
             residuals = train_pred_flat - train_y_flat
             axes[1, 1].scatter(train_y_flat[indices], residuals[indices], alpha=0.6, s=15, color='blue', label='Train')
-            
+
             if len(val_pred) > 0 and len(val_y) > 0:
+                val_pred_flat = val_pred.reshape(-1) if val_pred.ndim > 2 else val_pred.flatten()
+                val_y_flat = val_y.reshape(-1) if val_y.ndim > 2 else val_y.flatten()
+                n_val_sample = min(500, len(val_y_flat))
+                val_indices = np.random.choice(len(val_y_flat), n_val_sample, replace=False)
                 val_residuals = val_pred_flat - val_y_flat
                 axes[1, 1].scatter(val_y_flat[val_indices], val_residuals[val_indices], alpha=0.6, s=15, color='red', label='Val')
-            
+
             axes[1, 1].axhline(y=0, color='k', linestyle='--', linewidth=2)
             axes[1, 1].set_xlabel('True Values')
             axes[1, 1].set_ylabel('Residuals (Predicted - True)')
@@ -696,7 +683,6 @@ class VAEFlowTrainer:
             
             # Get sample data for trajectory generation
             if 'train_x' not in results or 'train_y' not in results:
-                print("Warning: Cannot create trajectory plot - missing train_x or train_y in results")
                 return
             
             # Sample a few points for trajectory visualization
@@ -709,27 +695,21 @@ class VAEFlowTrainer:
             y_sample = train_y[:n_samples]
             
             # Generate trajectories using the model
-            print(f"Generating trajectories for {n_samples} samples...")
             trajectories = []
             for i in range(n_samples):
                 x_single = x_sample[i:i+1]  # Keep batch dimension
                 y_single = y_sample[i:i+1]
-                
-                # Get trajectory from model predict method
                 traj = self.model.predict(
                     self.params, 
                     x_single, 
                     num_steps=20, 
                     output_type="trajectory"
                 )
-                print(f"Sample {i}: trajectory shape = {traj.shape}")
-                # Remove batch dimension and squeeze if needed
                 if traj.ndim == 3 and traj.shape[1] == 1:
                     traj = traj[:, 0, :]  # Remove batch dimension
                 trajectories.append(traj)
             
             trajectories = np.array(trajectories)  # Shape: [n_samples, n_steps, output_dim]
-            print(f"Final trajectories shape: {trajectories.shape}")
             
             # Create trajectory plot
             plot_file = os.path.join(output_dir, "trajectories.png")
@@ -741,8 +721,7 @@ class VAEFlowTrainer:
                 num_samples=n_samples
             )
             
-        except Exception as e:
-            print(f"Warning: Could not create trajectory plot: {e}")
+        except Exception:
             import traceback
             traceback.print_exc()
 
@@ -753,7 +732,6 @@ class VAEFlowTrainer:
             
             # Get sample data for trajectory generation
             if 'train_x' not in results or 'train_y' not in results:
-                print("Warning: Cannot create trajectory diagnostics plot - missing train_x or train_y in results")
                 return
             
             # Sample more points for diagnostics
@@ -765,28 +743,21 @@ class VAEFlowTrainer:
             x_sample = train_x[:n_samples]
             y_sample = train_y[:n_samples]
             
-            # Generate trajectories using the model
-            print(f"Generating trajectory diagnostics for {n_samples} samples...")
             trajectories = []
             for i in range(n_samples):
                 x_single = x_sample[i:i+1]  # Keep batch dimension
                 y_single = y_sample[i:i+1]
-                
-                # Get trajectory from model predict method
                 traj = self.model.predict(
                     self.params, 
                     x_single, 
                     num_steps=20, 
                     output_type="trajectory"
                 )
-                print(f"Sample {i}: trajectory shape = {traj.shape}")
-                # Remove batch dimension and squeeze if needed
                 if traj.ndim == 3 and traj.shape[1] == 1:
                     traj = traj[:, 0, :]  # Remove batch dimension
                 trajectories.append(traj)
             
             trajectories = np.array(trajectories)  # Shape: [n_samples, n_steps, output_dim]
-            print(f"Final trajectories shape: {trajectories.shape}")
             
             # Create trajectory diagnostics plot
             plot_file = os.path.join(output_dir, "trajectory_diagnostics.png")
@@ -798,8 +769,7 @@ class VAEFlowTrainer:
                 num_samples=n_samples
             )
             
-        except Exception as e:
-            print(f"Warning: Could not create trajectory diagnostics plot: {e}")
+        except Exception:
             import traceback
             traceback.print_exc()
 

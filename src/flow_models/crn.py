@@ -198,13 +198,13 @@ class ConditionalResnet_MLP(nn.Module):
 
         
     @nn.compact
-    def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: Optional[jnp.ndarray] = None, training: bool = True) -> jnp.ndarray:
+    def __call__(self, z: jnp.ndarray, x: Optional[jnp.ndarray] = None, t: Optional[jnp.ndarray] = None, training: bool = True) -> jnp.ndarray:
         """Forward pass through simple MLP.
         
         Args:
             z: Current state [batch_size, latent_shape[0]]
-            x: Conditional input [batch_size, input_shape[0]]
-            t: Time values [batch_size] or scalar (optional, defaults to 0.0)
+            x: Conditional input [batch_size, input_shape[0]] (optional)
+            t: Time values [batch_size] or scalar (optional)
             
         Returns:
             Updated state [batch_size, output_shape[0]]
@@ -212,39 +212,56 @@ class ConditionalResnet_MLP(nn.Module):
         # Convert string activation function to callable
         activation_fn = get_activation_function(self.activation_fn)
 
-        # Flatten inputs to work with dense layers
-        t = jnp.asarray(t)
+        # Handle broadcasting and flattening
         batch_shape_z = z.shape[:-len(self.latent_shape)]
-        batch_shape_x = x.shape[:-len(self.input_shape)]
-        batch_shape = jnp.broadcast_shapes(batch_shape_z, batch_shape_x, t.shape)
+        
+        # Determine batch shape based on available inputs
+        if x is not None:
+            batch_shape_x = x.shape[:-len(self.input_shape)]
+            batch_shape = jnp.broadcast_shapes(batch_shape_z, batch_shape_x)
+        else:
+            batch_shape = batch_shape_z
+            
+        if t is not None:
+            t = jnp.asarray(t)
+            batch_shape = jnp.broadcast_shapes(batch_shape, t.shape)
 
         z = jnp.broadcast_to(z, batch_shape + z.shape[-len(self.latent_shape):])
-        x = jnp.broadcast_to(x, batch_shape + x.shape[-len(self.input_shape):])
-
         z_flat = z.reshape(-1, self.latent_dim)
-        x_flat = x.reshape(-1, self.input_dim)
-        t = jnp.broadcast_to(t, batch_shape)
 
-        # Compute output dimension
+        # 1. x preprocessing (only if x is provided)
+        x_processed = None
+        if x is not None:
+            x = jnp.broadcast_to(x, batch_shape + x.shape[-len(self.input_shape):])
+            x_flat = x.reshape(-1, self.input_dim)
+            
+            # Process x through MLP layers
+            for hidden_dim in self.hidden_dims:
+                x_flat = nn.Dense(hidden_dim, kernel_init=jax.nn.initializers.xavier_normal())(x_flat)
+                if self.use_batch_norm:
+                    x_flat = nn.BatchNorm(use_running_average=True)(x_flat)
+                x_flat = activation_fn(x_flat)
+                if self.dropout_rate > 0:
+                    x_flat = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x_flat)
+            x_processed = x_flat
         
-        # 1. input (x) preprocessing
-        for hidden_dim in self.hidden_dims:
-            x_flat = nn.Dense(hidden_dim, kernel_init=jax.nn.initializers.xavier_normal())(x_flat)
-            if self.use_batch_norm:
-                x_flat = nn.BatchNorm(use_running_average=True)(x_flat)
-            x_flat = activation_fn(x_flat)
-            if self.dropout_rate > 0:
-                x_flat = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x_flat)
-        
-        # 2. time embeddings - handle t=None case
-        if t is None:
-            t_embedding = jnp.zeros((1,))  # Default to t=0 when None
-            x_flat = ConcatSquash(self.hidden_dims[0])(z_flat, x_flat)
-        else:
-            # Create time embedding directly on the flattened time tensor
+        # 2. t preprocessing (only if t is provided)
+        t_processed = None
+        if t is not None:
+            t = jnp.broadcast_to(t, batch_shape)
             t_flat = t.reshape(-1)
-            t_embedding = create_time_embedding(embed_dim=self.time_embed_dim, method=self.time_embed_method)(t_flat)
-            x_flat = ConcatSquash(self.hidden_dims[0])(z_flat, x_flat, t_embedding)
+            t_processed = create_time_embedding(embed_dim=self.time_embed_dim, method=self.time_embed_method)(t_flat)
+        
+        # 3. ConcatSquash with available preprocessed inputs
+        if x_processed is not None and t_processed is not None:
+            x_flat = ConcatSquash(self.hidden_dims[0])(z_flat, x_processed, t_processed)
+        elif x_processed is not None:
+            x_flat = ConcatSquash(self.hidden_dims[0])(z_flat, x_processed)
+        elif t_processed is not None:
+            x_flat = ConcatSquash(self.hidden_dims[0])(z_flat, t_processed)
+        else:
+            # Neither x nor t provided - just use z
+            x_flat = ConcatSquash(self.hidden_dims[0])(z_flat)
         
         # 3. processing layers
         for hidden_dim in self.hidden_dims[1:]:
@@ -315,13 +332,13 @@ class BilinearConditionalResnet(nn.Module):
         return dim
     
     @nn.compact
-    def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: Optional[jnp.ndarray] = None, training: bool = True) -> jnp.ndarray:
+    def __call__(self, z: jnp.ndarray, x: Optional[jnp.ndarray] = None, t: Optional[jnp.ndarray] = None, training: bool = True) -> jnp.ndarray:
         """Forward pass through bilinear conditional ResNet.
         
         Args:
             z: Current state [batch_size, latent_shape[0]]
-            x: Conditional input [batch_size, input_shape[0]]
-            t: Time values [batch_size] or scalar (optional, defaults to 0.0)
+            x: Conditional input [batch_size, input_shape[0]] (optional)
+            t: Time values [batch_size] or scalar (optional)
             training: Whether in training mode
             
         Returns:
@@ -331,38 +348,55 @@ class BilinearConditionalResnet(nn.Module):
         activation_fn = get_activation_function(self.activation_fn)
         
         # Handle broadcasting and flattening
-        t = jnp.asarray(t)
         batch_shape_z = z.shape[:-len(self.latent_shape)]
-        batch_shape_x = x.shape[:-len(self.input_shape)]
-        batch_shape = jnp.broadcast_shapes(batch_shape_z, batch_shape_x, t.shape)
+        
+        # Determine batch shape based on available inputs
+        if x is not None:
+            batch_shape_x = x.shape[:-len(self.input_shape)]
+            batch_shape = jnp.broadcast_shapes(batch_shape_z, batch_shape_x)
+        else:
+            batch_shape = batch_shape_z
+            
+        if t is not None:
+            t = jnp.asarray(t)
+            batch_shape = jnp.broadcast_shapes(batch_shape, t.shape)
 
         z = jnp.broadcast_to(z, batch_shape + z.shape[-len(self.latent_shape):])
-        x = jnp.broadcast_to(x, batch_shape + x.shape[-len(self.input_shape):])
-        t = jnp.broadcast_to(t, batch_shape)
-
         z_flat = z.reshape(-1, self.latent_dim)
-        x_flat = x.reshape(-1, self.input_dim)
         
-        # 1. x preprocessing
-        # 2. Process x through standard MLP (number of layers specified by hidden_dims)
-        x_processed = x_flat
-        for i, hidden_dim in enumerate(self.hidden_dims):
-            x_processed = nn.Dense(hidden_dim, kernel_init=jax.nn.initializers.xavier_normal())(x_processed)
-            if self.use_batch_norm:
-                x_processed = nn.BatchNorm(use_running_average=True)(x_processed)
-            x_processed = activation_fn(x_processed)
-            if self.dropout_rate > 0:
-                x_processed = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x_processed)
+        # 1. x preprocessing (only if x is provided)
+        x_processed = None
+        if x is not None:
+            x = jnp.broadcast_to(x, batch_shape + x.shape[-len(self.input_shape):])
+            x_flat = x.reshape(-1, self.input_dim)
+            
+            # Process x through standard MLP (number of layers specified by hidden_dims)
+            for i, hidden_dim in enumerate(self.hidden_dims):
+                x_flat = nn.Dense(hidden_dim, kernel_init=jax.nn.initializers.xavier_normal())(x_flat)
+                if self.use_batch_norm:
+                    x_flat = nn.BatchNorm(use_running_average=True)(x_flat)
+                x_flat = activation_fn(x_flat)
+                if self.dropout_rate > 0:
+                    x_flat = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x_flat)
+            x_processed = x_flat
         
-        # 3. Time embeddings and ConcatSquash
-        if t is None:
-            # Default to t=0 when None
-            x_processed = ConcatSquash(self.hidden_dims[-1])(z_flat, x_processed)
-        else:
-            # Create time embedding directly on the flattened time tensor
+        # 2. t preprocessing (only if t is provided)
+        t_processed = None
+        if t is not None:
+            t = jnp.broadcast_to(t, batch_shape)
             t_flat = t.reshape(-1)
-            t_embedding = create_time_embedding(embed_dim=self.time_embed_dim, method=self.time_embed_method)(t_flat)
-            x_processed = ConcatSquash(self.hidden_dims[-1])(z_flat, x_processed, t_embedding)
+            t_processed = create_time_embedding(embed_dim=self.time_embed_dim, method=self.time_embed_method)(t_flat)
+        
+        # 3. ConcatSquash with available preprocessed inputs
+        if x_processed is not None and t_processed is not None:
+            x_processed = ConcatSquash(self.hidden_dims[-1])(z_flat, x_processed, t_processed)
+        elif x_processed is not None:
+            x_processed = ConcatSquash(self.hidden_dims[-1])(z_flat, x_processed)
+        elif t_processed is not None:
+            x_processed = ConcatSquash(self.hidden_dims[-1])(z_flat, t_processed)
+        else:
+            # Neither x nor t provided - just use z
+            x_processed = ConcatSquash(self.hidden_dims[-1])(z_flat)
         
         # 4. Simple bilinear-like processing that combines processed x with z
         # Use Dense layers to create a bilinear-like transformation
@@ -441,13 +475,13 @@ class ConvexConditionalResnet(nn.Module):
         return dim
         
     @nn.compact
-    def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: Optional[jnp.ndarray] = None, training: bool = True) -> jnp.ndarray:
+    def __call__(self, z: jnp.ndarray, x: Optional[jnp.ndarray] = None, t: Optional[jnp.ndarray] = None, training: bool = True) -> jnp.ndarray:
         """Forward pass through convex conditional ResNet.
         
         Args:
             z: Current state [batch_size, latent_shape[0]]
-            x: Conditional input [batch_size, input_shape[0]]
-            t: Time values [batch_size] or scalar (optional, defaults to 0.0)
+            x: Conditional input [batch_size, input_shape[0]] (optional)
+            t: Time values [batch_size] or scalar (optional)
             training: Whether in training mode
             
         Returns:
@@ -457,37 +491,55 @@ class ConvexConditionalResnet(nn.Module):
         activation_fn = get_activation_function(self.activation_fn)
         
         # Handle broadcasting and flattening
-        jnp.asarray(t)
         batch_shape_z = z.shape[:-len(self.latent_shape)]
-        batch_shape_x = x.shape[:-len(self.input_shape)]
-        batch_shape = jnp.broadcast_shapes(batch_shape_z, batch_shape_x, t.shape)
+        
+        # Determine batch shape based on available inputs
+        if x is not None:
+            batch_shape_x = x.shape[:-len(self.input_shape)]
+            batch_shape = jnp.broadcast_shapes(batch_shape_z, batch_shape_x)
+        else:
+            batch_shape = batch_shape_z
+            
+        if t is not None:
+            t = jnp.asarray(t)
+            batch_shape = jnp.broadcast_shapes(batch_shape, t.shape)
 
         z = jnp.broadcast_to(z, batch_shape + z.shape[-len(self.latent_shape):])
-        x = jnp.broadcast_to(x, batch_shape + x.shape[-len(self.input_shape):])
-
         z_flat = z.reshape(-1, self.latent_dim)
-        x_flat = x.reshape(-1, self.input_dim)
-        t = jnp.broadcast_to(t, batch_shape)
         
-        # 1. x preprocessing
-        # Preprocess x through standard layers
-        for hidden_dim in self.hidden_dims:
-            x_flat = nn.Dense(hidden_dim, kernel_init=jax.nn.initializers.xavier_normal())(x_flat)
-            if self.use_batch_norm:
-                x_flat = nn.BatchNorm(use_running_average=True)(x_flat)
-            x_flat = activation_fn(x_flat)
-            if self.dropout_rate > 0:
-                x_flat = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x_flat)
+        # 1. x preprocessing (only if x is provided)
+        x_processed = None
+        if x is not None:
+            x = jnp.broadcast_to(x, batch_shape + x.shape[-len(self.input_shape):])
+            x_flat = x.reshape(-1, self.input_dim)
+            
+            # Preprocess x through standard layers
+            for hidden_dim in self.hidden_dims:
+                x_flat = nn.Dense(hidden_dim, kernel_init=jax.nn.initializers.xavier_normal())(x_flat)
+                if self.use_batch_norm:
+                    x_flat = nn.BatchNorm(use_running_average=True)(x_flat)
+                x_flat = activation_fn(x_flat)
+                if self.dropout_rate > 0:
+                    x_flat = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x_flat)
+            x_processed = x_flat
         
-        # 2. time embeddings - handle t=None case
-        if t is None:
-            # Default to t=0 when None
-            x_flat = ConcatSquash(self.hidden_dims[0])(z_flat, x_flat)
-        else:
-            # Create time embedding directly on the flattened time tensor
+        # 2. t preprocessing (only if t is provided)
+        t_processed = None
+        if t is not None:
+            t = jnp.broadcast_to(t, batch_shape)
             t_flat = t.reshape(-1)
-            t_embedding = create_time_embedding(embed_dim=self.time_embed_dim, method=self.time_embed_method)(t_flat)
-            x_flat = ConcatSquash(self.hidden_dims[0])(z_flat, x_flat, t_embedding)
+            t_processed = create_time_embedding(embed_dim=self.time_embed_dim, method=self.time_embed_method)(t_flat)
+        
+        # 3. ConcatSquash with available preprocessed inputs
+        if x_processed is not None and t_processed is not None:
+            x_flat = ConcatSquash(self.hidden_dims[0])(z_flat, x_processed, t_processed)
+        elif x_processed is not None:
+            x_flat = ConcatSquash(self.hidden_dims[0])(z_flat, x_processed)
+        elif t_processed is not None:
+            x_flat = ConcatSquash(self.hidden_dims[0])(z_flat, t_processed)
+        else:
+            # Neither x nor t provided - just use z
+            x_flat = ConcatSquash(self.hidden_dims[0])(z_flat)
         
         # 3. processing layers via convex bilinear layers 
         convex_resnet_bivariate = ConvexResNetBivariate(

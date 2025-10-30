@@ -8,10 +8,11 @@ This package provides implementations of the NoProp variants:
 
 # from .flow_models.archive.ct import NoPropCT
 # from .flow_models.archive.fm import NoPropFM
-from .archive.no_prop_models import (
-    ConditionalResnet_MLP,
-    ConditionalResNet_CNNx,
-)
+# Note: archive.no_prop_models module not found - commenting out imports
+# from .archive.no_prop_models import (
+#     ConditionalResnet_MLP,
+#     ConditionalResNet_CNNx,
+# )
 from .embeddings.noise_schedules import (
     LinearNoiseSchedule,
     CosineNoiseSchedule,
@@ -61,9 +62,9 @@ __all__ = [
     # NoProp implementations
     # "NoPropCT", 
     # "NoPropFM",
-    # Model architectures
-    "ConditionalResnet_MLP",
-    "ConditionalResNet_CNNx",
+    # Model architectures (commented out - archive module not found)
+    # "ConditionalResnet_MLP",
+    # "ConditionalResNet_CNNx",
     # Noise schedules
     "LinearNoiseSchedule",
     "CosineNoiseSchedule", 
@@ -73,7 +74,7 @@ __all__ = [
     "sinusoidal_time_embedding",
     "fourier_time_embedding",
     "linear_time_embedding",
-    "learnable_time_embedding",
+    # "learnable_time_embedding",  # Not exported from embeddings module
     "gaussian_time_embedding",
     "get_time_embedding",
     # Positional encodings

@@ -288,7 +288,10 @@ class SimpleLearnableNoiseSchedule(NoiseSchedule):
     - For sigmoid schedule: ᾱ(t) = σ(γ(t - 0.5)) (INCREASING function)
     - Backward process: z_t = sqrt(ᾱ(t)) * z_1 + sqrt(1-ᾱ(t)) * ε
     """
-    
+    def setup(self):
+        self.gamma_rate = self.param('gamma_rate', nn.initializers.constant(4.0), ())
+        self.gamma_offset = self.param('gamma_offset', nn.initializers.constant(0.5), ())
+
     @nn.compact
     def __call__(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """Forward pass - same as get_gamma_gamma_prime_t for compatibility."""
@@ -301,14 +304,9 @@ class SimpleLearnableNoiseSchedule(NoiseSchedule):
         For sigmoid schedule: ᾱ(t) = σ(γ(t - 0.5)), so γ(t) = γ(t - 0.5)
         This ensures ᾱ(t) = sigmoid(γ(t)) = σ(γ(t - 0.5))
         γ'(t) = γ (constant for linear schedule)
-        
-        But for better dynamics, let's use a quadratic schedule where γ'(t) varies with time.
         """
-        gamma_rate = self.param('gamma_rate', nn.initializers.constant(4.0), ())
-        gamma_offset = self.param('gamma_offset', nn.initializers.constant(0.5), ())
-
-        gamma_t = gamma_rate * (t - gamma_offset)
-        gamma_prime_t = jnp.full_like(t, gamma_rate)
+        gamma_t = jnp.abs(self.gamma_rate) * (t - self.gamma_offset)
+        gamma_prime_t = jnp.full_like(t, jnp.abs(self.gamma_rate))
         
         return gamma_t, gamma_prime_t
 
@@ -338,9 +336,12 @@ class SimpleMonotonicNetwork(nn.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         """Apply dense layer with positive weights."""
         # Ensure input has the right shape
+        x = jnp.asarray(x)
+        scalar_input = False
         if x.ndim == 0:
             # Scalar input - add batch dimension
             x = x[None, None]  # [1, 1]
+            scalar_input = True
         elif x.ndim == 1:
             # Batch input - add feature dimension
             x = x[:, None]  # [batch_size, 1]
@@ -349,7 +350,10 @@ class SimpleMonotonicNetwork(nn.Module):
             x = PositiveDense(hidden_dim)(x)
             x = nn.relu(x)
         x = PositiveDense(1)(x)
-        return x
+
+        if scalar_input: 
+            x = x.squeeze(-1)
+        return x.squeeze(-1)
 
 class LearnableNoiseSchedule(NoiseSchedule):
     """Learnable noise schedule as described in Appendix B of the NoProp paper.
@@ -363,7 +367,7 @@ class LearnableNoiseSchedule(NoiseSchedule):
     """
     
     hidden_dims: Tuple[int, ...] = (64, 64)  # Hidden dimensions for the neural network
-    monotonic_network: nn.Module = SimpleMonotonicNetwork
+    monotonic_network: nn.Module = SimpleMonotonicNetwork  # handles shaping so output shape is same as input shape
     gamma_range: Tuple[float, float] = (-4.0, 4.0)
 
 
@@ -379,21 +383,32 @@ class LearnableNoiseSchedule(NoiseSchedule):
         Args:
             t: Time values [batch_size]
         """
-        scale_logit = self.param('scale_logit', nn.initializers.constant(0.0), ())
-        gamma_min = self.param('gamma_min', nn.initializers.constant(self.gamma_range[0]), ())
-        gamma_max = self.param('gamma_max', nn.initializers.constant(self.gamma_range[1]), ())
+        scale_logit = self.param('scale_logit', nn.initializers.constant(0.0), () )
+        gamma_min = self.param('gamma_min', nn.initializers.constant(self.gamma_range[0]), () )
+        gamma_max = self.param('gamma_max', nn.initializers.constant(self.gamma_range[1]), () )
 
-        def gamma_fn(t_input):
-            # Create and call the monotonic network
-            network = self.monotonic_network(hidden_dims=self.hidden_dims)
-            f_t = jnp.squeeze(network(t_input))
+        # Hoist the network so parameters are shared across vectorization
+        network = self.monotonic_network(hidden_dims=self.hidden_dims)
+
+        def gamma_fn_scalar(t_input):
+            # Ensure scalar/1D input compatibility; network handles shaping internally
+            f_t = network(t_input)
             f_t = t_input + (1 - t_input) * t_input * nn.sigmoid(scale_logit) * nn.sigmoid(f_t)
-            return gamma_min + (gamma_max-gamma_min) * f_t
-                
-        return jax.vmap(jax.value_and_grad(gamma_fn))(t)
+            return gamma_min + (gamma_max - gamma_min) * f_t
+        
+        t = jnp.asarray(t)
+        t_flat = t.reshape(-1)
+        vals, grads = jax.vmap(jax.value_and_grad(gamma_fn_scalar))(t_flat)
+        gamma_t = vals.reshape(t.shape)
+        gamma_prime_t = grads.reshape(t.shape)
+        return gamma_t, gamma_prime_t
 
     def get_gamma_gamma_prime_t(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        return self.apply({"params": params}, t)
+        t = jnp.asarray(t)
+        batch_shape = t.shape 
+        t = t[...,None]
+        gamma_t, gamma_prime_t = self.apply({"params": params}, t)
+        return gamma_t.squeeze(-1), gamma_prime_t.squeeze(-1)
 
 
 def create_noise_schedule(

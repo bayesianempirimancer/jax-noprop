@@ -30,6 +30,7 @@ class VAEFlowConfig(BaseConfig):
         "recon_loss_type": "cross_entropy", # Options: "cross_entropy", "mse", "none".  Should be consistent with decoder type
         "recon_weight": 0.1,  # Weight for reconstruction loss in total loss
         "reg_weight": 0.0,  # Weight for regularization loss in total loss
+        "sigma": 0.02,  # Noise level for flow matching
         "integration_method": "euler",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
                                            # Only use midpoint for diffusion model.  singularities at t=0 break forward integration.
     }))
@@ -46,7 +47,7 @@ class VAEFlowConfig(BaseConfig):
     }))
     
     encoder: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "model_type": "linear", # Options: "mlp", "mlp_normal", "resnet", "resnet_normal", "identity", "linear"
+        "model_type": "identity", # Options: "mlp", "mlp_normal", "resnet", "resnet_normal", "identity", "linear"
         "encoder_type": "deterministic",  # Options: "deterministic", "normal", 
         "input_shape": "NA",  # Will be set from main config if not specified
         "latent_shape": "NA",
@@ -57,7 +58,7 @@ class VAEFlowConfig(BaseConfig):
     
     decoder: FrozenDict = field(default_factory=lambda: FrozenDict({
         "model_type": "identity", # Options: "mlp", "resnet", "identity"
-        "decoder_type": "softmax", # Options: "linear", "softmax", "none"
+        "decoder_type": "none", # Options: "linear", "softmax", "none"
         "latent_shape": "NA",  # Will be set from main config if not specified
         "output_shape": "NA",
         "hidden_dims": (64, 32, 16),
@@ -72,10 +73,16 @@ class VAE_flow(nn.Module):
     
     def setup(self):
         """Initialize the CRN model as a field."""
+        # For generative mode, we need to handle the case where x=None
+        # We'll create the CRN model with a proper input shape that can handle None
+        input_shape = self.config.main["input_shape"]
+        
+        # If input_shape is (1,) (dummy for generative mode), we need to handle this differently
+        # The CRN model will be called with x=None, so we need to ensure it can handle this
         self.crn_model = create_conditional_resnet(
             self.config.crn,
             latent_shape=self.z_shape,
-            input_shape=self.config.main["input_shape"],
+            input_shape=input_shape,
             output_shape=self.z_shape
         )
     
@@ -120,214 +127,138 @@ class VAE_flow(nn.Module):
             return z
         return z.reshape(z.shape[:-1] + self.z_shape)
     
+    def _broadcast_inputs(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        z_batch_shape = z.shape[:-self.z_ndims]
+        x_batch_shape = () if x is None else x.shape[:-self.x_ndims]
+        t_batch_shape = () if t is None else jnp.asarray(t).shape
+        batch_shape = jnp.broadcast_shapes(z_batch_shape, x_batch_shape, t_batch_shape)
+
+        z = jnp.broadcast_to(z, batch_shape + self.z_shape)
+        x = None if x is None else jnp.broadcast_to(x, batch_shape + x.shape[-self.x_ndims:])
+        t = None if t is None else jnp.broadcast_to(t, batch_shape)
+        return z, x, t
+
     @nn.compact
-    def flow_model(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+    def dz_dt(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         """Flow model that computes dz/dt using CRN."""
         # Optimized: minimize broadcasting and avoid redundant operations
         t = jnp.asarray(t)
-        
-        # Only broadcast if shapes don't match - avoid unnecessary operations
-        batch_shape = jnp.broadcast_shapes(
-            x.shape[:-self.x_ndims], 
-            z.shape[:-self.z_ndims], 
-            t.shape
-        )
-        if x.shape[:-self.x_ndims] != batch_shape:
-            x = jnp.broadcast_to(x, batch_shape + x.shape[-self.x_ndims:])
-        if z.shape[:-self.z_ndims] != batch_shape:
-            z = jnp.broadcast_to(z, batch_shape + z.shape[-self.z_ndims:])
-        if t.shape != batch_shape:
-            t = jnp.broadcast_to(t, batch_shape)
-        
-        z_flat = self._flatten_z(z)
-        
-        # Use the CRN model created in setup()
-        dz_dt_flat = self.crn_model(z_flat, x, t, training=training)
-        
-        # Optimized: only unflatten if necessary
-        if len(self.z_shape) <= 1:
-            return dz_dt_flat
-        else:
-            return dz_dt_flat.reshape(dz_dt_flat.shape[:-1] + self.z_shape)
+        z, x, t = self._broadcast_inputs(z, x, t)
+        dz_dt = self.crn_model(z, x, t, training=training)            
+        return dz_dt
     
     @nn.compact
     def encoder(self, x: jnp.ndarray, training: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Encoder that maps x to latent space using single factory function.
-        
-        Returns:
-            Tuple of (mu, logvar) where:
-            - For normal encoders: encoder returns (mu, logvar) directly
-            - For deterministic encoders: encoder returns z, we return (z, -jnp.inf)
-        """
+        """Encoder that maps x to latent space using single factory function."""
         # Use direct factory function: create_encoder(config_dict, input_shape, latent_shape)
         encoder = create_encoder(
             self.config.encoder,
             input_shape=(x.shape[-1],),  # Use flattened input dimension
             latent_shape=self.z_shape  # Use structured latent shape
         )
-
-        # Get encoder output - could be tuple (mu, logvar) or single tensor z
         encoder_output = encoder(x, training)
-        
-        # Optimized: move assertions outside JIT compilation for better performance
-        # (Assertions are kept for debugging but will be compiled out in optimized builds)
-        
-        # Handle both normal and deterministic cases
         if isinstance(encoder_output, tuple):
-            # Normal encoder returns (mu, logvar) tuple
-            return encoder_output
+            return encoder_output   # Normal encoder returns (mu, logvar) tuple
         else:
-            # Deterministic encoder returns z, we return (z, -jnp.inf) for consistency
-            return encoder_output, -jnp.inf
+            return encoder_output, -jnp.inf  # Deterministic encoder returns z, so (z, -jnp.inf) for consistency
 
     @nn.compact
     def decoder(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         """Decoder that maps latent z to output space using single factory function."""
-        # Create decoder network using direct factory
         decoder = create_decoder(
             self.config.decoder,
             latent_shape=self.z_shape,  # Use structured latent shape
             output_shape=self.config.main["output_shape"]  # Use full output_shape
         )
-        
-        # Get output from decoder (transformation is handled in decoder)
         return decoder(x, training)
 
-            
     def __call__(self, x: jnp.ndarray, y: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> jnp.ndarray:
         # For initialization, we need to call the nn compact methods to initialize parameters
 
-        batch_shape = x.shape[:-self.x_ndims]
-                
+        # Handle generative mode where x is None
+        batch_shape = y.shape[:-self.y_ndims]
         # Call flow_model to initialize its parameters (need dummy z and t)
         dummy_z = jnp.zeros(batch_shape + self.z_shape)
         dummy_t = jnp.zeros(batch_shape)
         
-        # Call flow_model to initialize the CRN model parameters
-        flow_output = self.flow_model(dummy_z, x, dummy_t, training)
-        
-        # Call encoder and decoder to initialize their parameters
-        # These @nn.compact methods need to be called during initialization to create parameters
+        # initialize model components
+        flow_output = self.dz_dt(dummy_z, x, dummy_t, training)
         encoder_output = self.encoder(y, training)
         decoder_output = self.decoder(dummy_z, training)
         
-        # For initialization, we just return a dummy output
-        # The actual forward pass logic is handled by the individual methods
-        return jnp.zeros(batch_shape + self.z_shape)
-        
-    @partial(jax.jit, static_argnums=(0, 5))  # self and training are static arguments
+        return jnp.zeros(batch_shape + self.z_shape) # batch consistent with expectations
+
+#    @partial(jax.jit, static_argnums=(0, 5))    
     def loss(self, params: dict, x: jnp.ndarray, y: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> Tuple[jnp.ndarray, dict]:
         """
         Compute the loss by calling individual @nn.compact methods with proper rngs.
-        
-        Args:
-            params: Model parameters
-            x: Input data [batch_shape + x_shape]
-            y: Target labels [batch_shape + y_shape]
-            key: Random key for sampling
-            training: Whether in training mode
-            
-        Returns:
-            total_loss: Combined loss value
-            loss_dict: Dictionary with individual loss components
         """
-        # Optimized: reduce random key splits and optimize sampling
         key, t_key, z_0_key, z_t_noise_key, z_target_key = jr.split(key, 5)
-
-        batch_shape = x.shape[:-self.x_ndims]
+        key, dropout_key1, dropout_key2, dropout_key3 = jr.split(key, 4)
+        batch_shape = y.shape[:-self.y_ndims]
         
-        # Optimized: get target encoding from y encoder with proper rngs
-        mu_z_target, logvar_z_target = self.apply(params, y, method='encoder', training=training, rngs={'dropout': key})
+        # Encode Target (noisy latent)
+        mu_z_target, logvar_z_target = self.apply(params, y, method='encoder', training=training, rngs={'dropout': dropout_key1})
         z_target = mu_z_target + jnp.exp(0.5 * logvar_z_target) * jr.normal(z_target_key, mu_z_target.shape)
 
-        # Optimized: sample z_0 and t more efficiently
+        # Sample initial latent state and time
         z_0 = jr.normal(z_0_key, batch_shape + self.z_shape)
         t = jr.uniform(t_key, batch_shape + self.z_ndims*(1,), minval=0.0, maxval=1.0)
         
-        # Optimized: construct z_t more efficiently
+        # Sample latent state at time t
         diff_z = z_target - z_0
         z_t = z_0 + t * diff_z
-        z_t = z_t + jr.normal(z_t_noise_key, z_t.shape) * jnp.sqrt(1-t)
+        z_t = z_t + jr.normal(z_t_noise_key, z_t.shape) * self.config.main["sigma"]
 
-        # Optimized: get flow field dz/dt using flow_model method with proper rngs
+        # Compute Flow Field, estimate target, and predicted output
         squeezed_t = t.squeeze(tuple(range(-self.z_ndims, 0)))
-        dz_dt = self.apply(params, z_t, x, squeezed_t, method='flow_model', training=training, rngs={'dropout': key})    
+        dz_dt = self.apply(params, z_t, x, squeezed_t, method='dz_dt', training=training, rngs={'dropout': dropout_key2})    
+        z_target_est = dz_dt * (1.0-t) + z_t
+        y_pred = self.apply(params, z_target_est, method='decoder', training=training, rngs={'dropout': dropout_key3})
 
+        # Compute Lossess
         reg_loss = jnp.mean(dz_dt ** 2)
-        
-        # Apply time-based normalization similar to DF model
-        # Reshape t_squeezed to broadcast properly with dz_dt and diff_z
         flow_loss = jnp.mean((dz_dt - diff_z)**2)
 
-        # Estimate target using flow field
-        z_target_est = dz_dt * (1.0-t) + z_t
-
-        # Optimized: get the predicted probabilities from decoder with proper rngs
-        y_pred = self.apply(params, z_target_est, method='decoder', training=training, rngs={'dropout': key})
-        mse_loss = jnp.mean((z_target_est - z_target)**2)
-
-        # Optimized: compute loss more efficiently
         recon_loss_type = self.config.main["recon_loss_type"]
-        if recon_loss_type == "cross_entropy":
-            recon_loss = -jnp.mean(y * jnp.log(y_pred + 1e-8))
-        else:
-            recon_loss = jnp.mean((y - y_pred)**2)
+        if recon_loss_type == "cross_entropy":  recon_loss = -jnp.mean(y * jnp.log(y_pred + 1e-8))
+        else:                                   recon_loss =  jnp.mean((y - y_pred)**2)
         
-        # Optimized: pre-compute recon_weight
-        recon_weight = self.config.main["recon_weight"]
-        # Force recon_weight to 0 if recon_loss_type is "none"
-        if recon_loss_type == "none":
-            recon_weight = 0.0
-            
+        # Compute recon_weight
         reg_weight = self.config.main["reg_weight"]
-
+        recon_weight = self.config.main["recon_weight"]
+        if recon_loss_type == "none":  recon_weight = 0.0
+                    
         total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss
 
-        return total_loss, {'flow_loss': flow_loss, 'recon_loss': recon_loss, 'mse_loss': mse_loss, 'reg_loss': reg_loss, 'total_loss': total_loss}
+        return total_loss, {'flow_loss': flow_loss, 
+                            'recon_loss': recon_loss, 
+                            'reg_loss': reg_loss, 
+                            'total_loss': total_loss}
+
 
     @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, num_steps, integration_method, output_type, and training are static arguments
     def predict(self, params: dict, x: jnp.ndarray, num_steps: int = 20, integration_method: str = "euler", output_type: str = "end_point", prng_key: jr.PRNGKey = None) -> jnp.ndarray:
         """
-        Make predictions using ODE solver integration.
-        
-        Args:
-            params: Model parameters
-            x: Input data [batch_shape + x_shape]
-            num_steps: Number of integration steps (default: 20)
-            integration_method: Integration method ("euler", "heun", "rk4", "adaptive") (default: "euler")
-            output_type: Type of output ("end_point" for final prediction, "trajectory" for full trajectory)
-            prng_key: Optional PRNG key for generative mode. If provided, samples z_0 from unit normal instead of zero.
-            
-        Returns:
-            If output_type="end_point": Final prediction [batch_shape + y_shape]
-            If output_type="trajectory": Full trajectory [num_steps, batch_shape + y_shape]
+        Make predictions using ODE solver integration.        
+        Requires x is not None... use sample method for unconditional generation.
         """
-        
-        # Optimized: disable gradient tracking through parameters for inference
         params_no_grad = jax.lax.stop_gradient(params)
-        
-        # Generate initial latent state z_0
         batch_shape = x.shape[:-self.x_ndims]
+        
+        # Generate flattened initial latent state z_0
         if prng_key is not None:
-            # Generative mode: sample from unit normal distribution
             z_0 = jr.normal(prng_key, batch_shape + (self.z_dim,))
         else:
-            # Regression mode: start from zero
             z_0 = jnp.zeros(batch_shape + (self.z_dim,))  # ode expects vectorized z
         
-        # Optimized: define the vector field for ODE integration using flow_model method
         def vector_field(params, z, x, t):
-            # Only unflatten/flatten if necessary (avoid for 1D z)
-            if len(self.z_shape) <= 1:
-                dz_dt = self.apply(params, z, x, t, method='flow_model', training=False)
-                return dz_dt
-            else:
-                z_structured = self._unflatten_z(z)  # flow_model expects structured z
-                dz_dt_structured = self.apply(params, z_structured, x, t, method='flow_model', training=False)
-                return self._flatten_z(dz_dt_structured)  # ODE solver expects flattened z
+            z = self._unflatten_z(z)
+            dz_dt = self.apply(params, z, x, t, method='dz_dt', training=False)
+            return self._flatten_z(dz_dt)  # ODE solver expects flattened z
         
         # Integrate the ODE from t=0 to t=1
-        z_trajectory = integrate_ode(
+        z = integrate_ode(
             vector_field=vector_field,
             params=params_no_grad,
             z0=z_0,
@@ -337,48 +268,41 @@ class VAE_flow(nn.Module):
             method=integration_method,
             output_type=output_type
         )
-        
-        if output_type == "trajectory":
-            # For trajectory output, decode the entire trajectory
-            if len(self.z_shape) <= 1:
-                z_trajectory_structured = z_trajectory
-            else:
-                z_trajectory_structured = self._unflatten_z(z_trajectory)
-            
-            # Decode each time step of the trajectory
-            decoded_trajectory = []
-            for t_step in range(z_trajectory_structured.shape[0]):
-                z_t = z_trajectory_structured[t_step]
-                decoded_t = self.apply(params, z_t, method='decoder', training=False)
-                decoded_trajectory.append(decoded_t)
-            
-            return jnp.array(decoded_trajectory)
-        else:
-            # For end_point output, decode only the final latent state
-            if len(self.z_shape) <= 1:
-                z_trajectory_structured = z_trajectory
-            else:
-                z_trajectory_structured = self._unflatten_z(z_trajectory)
-            return self.apply(params, z_trajectory_structured, method='decoder', training=False)
+        z = self._unflatten_z(z)
+        return self.apply(params, z, method='decoder', training=False)
     
-    def get_dzdt(self, params: dict, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))  # self, num_steps, integration_method, output_type are static arguments
+    def sample(self, params: dict, prng_key: jr.PRNGKey, batch_shape: Tuple[int, ...], num_steps: int = 20, integration_method: str = "euler", output_type: str = "end_point") -> jnp.ndarray:
         """
-        Compute dz/dt (vector field) for given z, x, t.
-        On input and output z is flattened.
-        Args:
-            params: Model parameters
-            z: Latent state [batch_size, latent_dim]
-            x: Conditional input [batch_size, input_dim]
-            t: Time [batch_size] or scalar
-            
+        Generate samples using ODE solver for situations without conditional input (x=None).  
+        Noise is injected at the initial timestep for the solver.
         Returns:
-            dz/dt [batch_size, latent_dim]
+            If output_type="end_point": Final samples [batch_shape + y_shape]
+            If output_type="trajectory": Full trajectory [num_steps, batch_shape + y_shape]
         """
-        z = self._unflatten_z(z)  # flow_model expects structured z
-        dz_dt = self.apply(params, z, x, t, method='flow_model', training=False)
-        return self._flatten_z(z)
+        params_no_grad = jax.lax.stop_gradient(params)
+        z_0 = jr.normal(prng_key, batch_shape + (self.z_dim,))
+        # Define the vector field for ODE integration using flow_model method with x=None
+        def vector_field(params, z, x, t):
+            z = self._unflatten_z(z)
+            dz_dt = self.apply(params, z, None, t, method='dz_dt', training=False)
+            return self._flatten_z(dz_dt)
+        
+        # Integrate the ODE from t=0 to t=1
+        z_trajectory = integrate_ode(
+            vector_field=vector_field,
+            params=params_no_grad,
+            z0=z_0,
+            x=None,  # No conditional input
+            time_span=(0.0, 1.0),
+            num_steps=num_steps,
+            method=integration_method,
+            output_type=output_type
+        )
+        return self.apply(params, z_trajectory, method='decoder', training=False)
+    
 
-    @partial(jax.jit, static_argnums=(0, 5))  # self and optimizer are static arguments
+    @partial(jax.jit, static_argnums=(0, 5, 7))  # self, optimizer, and training are static arguments
     def train_step(self, params: dict, x: jnp.ndarray, y: jnp.ndarray, opt_state: dict, optimizer, key: jr.PRNGKey, training: bool = True) -> Tuple[dict, dict, jnp.ndarray, dict]:
         """
         JIT-compiled training step for VAE with flow model.
@@ -412,35 +336,18 @@ class VAE_flow(nn.Module):
         
         return params, opt_state, loss, metrics
     
-    @partial(jax.jit, static_argnums=(0, 5))  # self and optimizer are static arguments
-    def train_step_with_dropout(self, params: dict, x: jnp.ndarray, y: jnp.ndarray, opt_state: dict, optimizer, key: jr.PRNGKey) -> Tuple[dict, dict, jnp.ndarray, dict]:
-        """JIT-compiled training step with dropout enabled."""
-
+    @partial(jax.jit, static_argnums=(0, 5, 7))  # self and optimizer are static arguments
+    def train_step_without_dropout(self, params: dict, x: jnp.ndarray, y: jnp.ndarray, opt_state: dict, optimizer, key: jr.PRNGKey, training: bool = False) -> Tuple[dict, dict, jnp.ndarray, dict]:
+        # Compute loss and gradients
         def loss_fn(params):
-            return self.loss(params, x, y, key, training=True)
+            return self.loss(params, x, y, key, training=training)  
         
         (loss, metrics), grads = jax.value_and_grad(
             loss_fn, has_aux=True
         )(params)
         
+        # Update parameters using optimizer
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         
         return params, opt_state, loss, metrics
-    
-    @partial(jax.jit, static_argnums=(0, 5))  # self and optimizer are static arguments
-    def train_step_without_dropout(self, params: dict, x: jnp.ndarray, y: jnp.ndarray, opt_state: dict, optimizer, key: jr.PRNGKey) -> Tuple[dict, dict, jnp.ndarray, dict]:
-        """JIT-compiled training step with dropout disabled."""
-        def loss_fn(params):
-            return self.loss(params, x, y, key, training=False)
-        
-        (loss, metrics), grads = jax.value_and_grad(
-            loss_fn, has_aux=True
-        )(params)
-        
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
-        
-        return params, opt_state, loss, metrics
-
-

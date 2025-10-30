@@ -36,6 +36,7 @@ def apply_output_transformation(output: jnp.ndarray, decoder_type: str) -> jnp.n
         # Apply additional Dense layer
         return nn.Dense(output.shape[-1])(output)
     elif decoder_type == "softmax":
+        # Apply softmax along the last axis for classification outputs
         return jax.nn.softmax(output, axis=-1)
     elif decoder_type == "none":
         return output  # No transformation
@@ -199,12 +200,29 @@ class IdentityDecoder(nn.Module):
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        # Identity decoder maps from latent space to output space
-        # First apply linear transformation from latent_dim to output_dim
-        output = nn.Dense(self.output_shape[0])(x)
-        
-        # Then apply output transformation based on decoder type
+        # For identity behavior: if decoder_type is 'none', return x as-is (reshape if needed)
         decoder_type = self.config.get("decoder_type", "linear")
+        if decoder_type == "none":
+            # Determine desired batch shape and reshape if total elements match
+            batch_ndims = x.ndim - len(self.latent_shape) if self.latent_shape is not None else x.ndim - len(self.output_shape)
+            batch_ndims = max(batch_ndims, 1)
+            batch_shape = x.shape[:batch_ndims]
+            # If already in desired output shape, return directly
+            if x.shape[-len(self.output_shape):] == self.output_shape:
+                return x
+            # Attempt reshape to output shape if sizes match
+            total_current = 1
+            for d in x.shape[batch_ndims:]:
+                total_current *= d
+            total_target = 1
+            for d in self.output_shape:
+                total_target *= d
+            if total_current == total_target:
+                return x.reshape(batch_shape + self.output_shape)
+            # Fallback to linear projection only if shapes incompatible
+        
+        # Linear mapping fallback (e.g., when decoder_type != 'none' or shapes incompatible)
+        output = nn.Dense(self.output_shape[0])(x)
         return apply_output_transformation(output, decoder_type)
 
 
