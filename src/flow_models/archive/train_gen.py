@@ -17,10 +17,10 @@ import jax.random as jr
 import numpy as np
 from flax.core import FrozenDict
 
-from src.flow_models.trainer_gen_v2 import GenerationTrainer
-from src.flow_models.fm_v2 import VAEFlowConfig as FMConfig
-from src.flow_models.df_v2 import VAEFlowConfig as DFConfig
-from src.flow_models.ct_v2 import VAEFlowConfig as CTConfig
+from src.flow_models.trainer_gen import GenerationTrainer
+from src.flow_models.fm import VAEFlowConfig as FMConfig
+from src.flow_models.df import VAEFlowConfig as DFConfig
+from src.flow_models.ct import VAEFlowConfig as CTConfig
 
 
 def load_two_moons_data(data_path: str = "data/two_moons_formatted.pkl"):
@@ -44,8 +44,7 @@ def build_config(model: str,
                  recon_loss_type: str,
                  reg_weight: float,
                  recon_weight: float,
-                 noise_schedule: str,
-                 noise_schedule_learnable: bool = True):
+                 noise_schedule: str):
     main = FrozenDict({
         'input_shape': input_shape,
         'output_shape': output_shape,
@@ -53,10 +52,11 @@ def build_config(model: str,
         'recon_loss_type': recon_loss_type,
         'recon_weight': recon_weight,
         'reg_weight': reg_weight,
-        'integration_method': 'midpoint' if model in ('ct', 'diffusion') else 'euler',
+        'integration_method': 'midpoint' if model == 'ct' else 'euler',
         'sigma': 0.02,
-        'noise_schedule': noise_schedule,  # Legacy support
     })
+    if model == 'ct':
+        main = main.copy(add_or_replace={'noise_schedule': noise_schedule})
 
     crn = FrozenDict({
         'model_type': crn_type,
@@ -88,20 +88,9 @@ def build_config(model: str,
     })
 
     if model == 'diffusion':
-        # Add noise schedule config for diffusion model
-        noise_schedule_config = FrozenDict({
-            'schedule_type': noise_schedule,
-            'learnable': noise_schedule_learnable,
-        })
-        return DFConfig(main=main, noise_schedule=noise_schedule_config, crn=crn, encoder=enc, decoder=dec)
+        return DFConfig(main=main, crn=crn, encoder=enc, decoder=dec)
     if model == 'ct':
-        # Add noise schedule config for CT model
-        noise_schedule_config = FrozenDict({
-            'schedule_type': noise_schedule,
-            'learnable': noise_schedule_learnable,
-        })
-        return CTConfig(main=main, noise_schedule=noise_schedule_config, crn=crn, encoder=enc, decoder=dec)
-    # Flow matching doesn't use noise schedule
+        return CTConfig(main=main, crn=crn, encoder=enc, decoder=dec)
     return FMConfig(main=main, crn=crn, encoder=enc, decoder=dec)
 
 
@@ -122,13 +111,7 @@ def main():
     parser.add_argument('--recon_weight', type=float, default=0.0)
     parser.add_argument('--recon_loss_type', type=str, default='mse', choices=['mse', 'cross_entropy', 'none'])
     parser.add_argument('--reg_weight', type=float, default=0.0)
-    parser.add_argument('--noise_schedule', type=str, default='linear',
-                        choices=['linear', 'cosine', 'sigmoid', 'exponential', 'cauchy', 'laplace', 'logistic', 'quadratic', 'polynomial', 'monotonic_nn', 'learnable', 'network'],
-                        help='Noise schedule for CT and diffusion models')
-    parser.add_argument('--noise_schedule_learnable', action='store_true', default=True,
-                        help='Make noise schedule parameters learnable (default: True)')
-    parser.add_argument('--noise_schedule_fixed', dest='noise_schedule_learnable', action='store_false',
-                        help='Freeze noise schedule parameters (opposite of --noise_schedule_learnable)')
+    parser.add_argument('--noise_schedule', type=str, default='simple_learnable', choices=['linear', 'cosine', 'sigmoid', 'learnable', 'simple_learnable'])
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--save_dir', type=str, default=None)
     parser.add_argument('--verbose', action='store_true')
@@ -163,7 +146,6 @@ def main():
         reg_weight=args.reg_weight,
         recon_weight=args.recon_weight,
         noise_schedule=args.noise_schedule,
-        noise_schedule_learnable=args.noise_schedule_learnable,
     )
 
     trainer = GenerationTrainer(

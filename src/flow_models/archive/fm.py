@@ -193,13 +193,12 @@ class VAE_flow(nn.Module):
         """
         Compute the loss by calling individual @nn.compact methods with proper rngs.
         """
-        # Split keys for random sampling operations (not dropout)
         key, t_key, z_0_key, z_t_noise_key, z_target_key = jr.split(key, 5)
-        # Keep key for dropout RNGs - will be automatically managed by @nn.compact
+        key, dropout_key1, dropout_key2, dropout_key3 = jr.split(key, 4)
         batch_shape = y.shape[:-self.y_ndims]
         
-        # Encode Target (noisy latent) - @nn.compact methods handle RNG automatically
-        mu_z_target, logvar_z_target = self.apply(params, y, method='encoder', training=training, rngs={'dropout': key})
+        # Encode Target (noisy latent)
+        mu_z_target, logvar_z_target = self.apply(params, y, method='encoder', training=training, rngs={'dropout': dropout_key1})
         z_target = mu_z_target + jnp.exp(0.5 * logvar_z_target) * jr.normal(z_target_key, mu_z_target.shape)
 
         # Sample initial latent state and time
@@ -212,11 +211,10 @@ class VAE_flow(nn.Module):
         z_t = z_t + jr.normal(z_t_noise_key, z_t.shape) * self.config.main["sigma"]
 
         # Compute Flow Field, estimate target, and predicted output
-        # All @nn.compact methods will automatically use RNG from rngs
         squeezed_t = t.squeeze(tuple(range(-self.z_ndims, 0)))
-        dz_dt = self.apply(params, z_t, x, squeezed_t, method='dz_dt', training=training, rngs={'dropout': key})    
+        dz_dt = self.apply(params, z_t, x, squeezed_t, method='dz_dt', training=training, rngs={'dropout': dropout_key2})    
         z_target_est = dz_dt * (1.0-t) + z_t
-        y_pred = self.apply(params, z_target_est, method='decoder', training=training, rngs={'dropout': key})
+        y_pred = self.apply(params, z_target_est, method='decoder', training=training, rngs={'dropout': dropout_key3})
 
         # Compute Lossess
         reg_loss = jnp.mean(dz_dt ** 2)

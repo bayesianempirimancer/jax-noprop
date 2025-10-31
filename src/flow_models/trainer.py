@@ -70,9 +70,14 @@ class VAEFlowTrainer:
         elif isinstance(config, CTConfig):
             self.model = CTModel(config=config)
             self.model_type = "ct"
-        else:  # FlowMatchingConfig
+        elif isinstance(config, FlowMatchingConfig):
             self.model = FlowMatchingModel(config=config)
             self.model_type = "flow_matching"
+        else:
+            raise ValueError(
+                f"Unknown config type: {type(config)}. "
+                f"Expected one of: DiffusionConfig, CTConfig, or FlowMatchingConfig"
+            )
         
         # Initialize optimizer
         if optimizer_name.lower() == "adam":

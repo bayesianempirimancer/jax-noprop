@@ -22,9 +22,9 @@ from mpl_toolkits.mplot3d import Axes3D
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from src.flow_models.fm_v2 import VAE_flow as FlowMatchingModel, VAEFlowConfig as FlowMatchingConfig
-from src.flow_models.df_v2 import VAE_flow as DiffusionModel, VAEFlowConfig as DiffusionConfig
-from src.flow_models.ct_v2 import VAE_flow as CTModel, VAEFlowConfig as CTConfig
+from src.flow_models.fm import VAE_flow as FlowMatchingModel, VAEFlowConfig as FlowMatchingConfig
+from src.flow_models.df import VAE_flow as DiffusionModel, VAEFlowConfig as DiffusionConfig
+from src.flow_models.ct import VAE_flow as CTModel, VAEFlowConfig as CTConfig
 from flax import traverse_util
 
 # Optional plotting imports (with try-except for graceful degradation)
@@ -70,14 +70,9 @@ class VAEFlowTrainer:
         elif isinstance(config, CTConfig):
             self.model = CTModel(config=config)
             self.model_type = "ct"
-        elif isinstance(config, FlowMatchingConfig):
+        else:  # FlowMatchingConfig
             self.model = FlowMatchingModel(config=config)
             self.model_type = "flow_matching"
-        else:
-            raise ValueError(
-                f"Unknown config type: {type(config)}. "
-                f"Expected one of: DiffusionConfig, CTConfig, or FlowMatchingConfig"
-            )
         
         # Initialize optimizer
         if optimizer_name.lower() == "adam":

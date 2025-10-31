@@ -15,19 +15,6 @@ from src.utils.ode_integration import integrate_ode
 from src.models.vae.encoders import create_encoder
 from src.models.vae.decoders import create_decoder
 from src.flow_models.crn import create_conditional_resnet
-from src.embeddings.noise_schedules_v2 import (
-    create_noise_schedule,
-    NoiseSchedule,
-    LinearNoiseSchedule,
-    CosineNoiseSchedule,
-    SigmoidNoiseSchedule,
-    ExponentialNoiseSchedule,
-    CauchyNoiseSchedule,
-    LaplaceNoiseSchedule,
-    LogisticNoiseSchedule,
-    NoiseScheduleNetwork,
-    LearnableNoiseSchedule  # Alias for NoiseScheduleNetwork
-)
 
 
 @dataclass(frozen=True)
@@ -43,35 +30,8 @@ class VAEFlowConfig(BaseConfig):
         "recon_loss_type": "cross_entropy", # Options: "cross_entropy", "mse", "none".  Should be consistent with decoder type
         "recon_weight": 0.1,  # Weight for reconstruction loss in total loss
         "reg_weight": 0.0,  # Weight for regularization loss in total loss
-        "integration_method": "midpoint",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
+        "integration_method": "euler",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
                                            # Only use midpoint for diffusion model.  singularities at t=0 break forward integration.
-        "noise_schedule": "linear",  # Options: "linear", "cosine", "sigmoid", "exponential", "cauchy", "laplace", "logistic", "quadratic", "polynomial", "monotonic_nn", "learnable", "network"
-    }))
-    
-    noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "schedule_type": "linear",  # Type of schedule
-        "learnable": True,  # Whether schedule parameters are learnable (False uses stop_gradient)
-        "hidden_dims": (64, 64),  # Hidden dimensions for NoiseScheduleNetwork schedule
-        # Comprehensive default parameters for all schedules (common naming convention)
-        "default_params": FrozenDict({
-            # Linear, Exponential, Cauchy, Laplace schedules
-            "alpha_bar_min": 0.01,
-            "alpha_bar_max": 0.99,
-            # Cosine schedule
-            "s": 0.008,
-            # Sigmoid, Logistic schedules
-            "k": 10.0,
-            "t_mid": 0.5,
-            # Exponential schedule
-            "beta": 2.0,
-            # Cauchy, Laplace schedules
-            "loc": 0.5,
-            "scale": 0.1,
-            # Polynomial schedule
-            "power": 2.0,
-            # NoiseScheduleNetwork schedule
-            "gamma_range": (-4.0, 4.0),
-        }),
     }))
 
     crn: FrozenDict = field(default_factory=lambda: FrozenDict({
@@ -111,47 +71,12 @@ class VAE_flow(nn.Module):
     config: VAEFlowConfig
     
     def setup(self):
-        """Initialize the CRN model and noise schedule as fields."""
+        """Initialize the CRN model as a field."""
         self.crn_model = create_conditional_resnet(
             self.config.crn,
             latent_shape=self.z_shape,
             input_shape=self.config.main["input_shape"],
             output_shape=self.z_shape
-        )
-        
-        # Initialize noise schedule using factory function
-        # Get schedule type from noise_schedule config or fallback to main config
-        schedule_config = self.config.noise_schedule if hasattr(self.config, 'noise_schedule') else FrozenDict()
-        schedule_type = schedule_config.get("schedule_type", self.config.main.get("noise_schedule", "linear"))
-        
-        # Store whether schedule parameters should be learnable
-        self.noise_schedule_learnable = schedule_config.get("learnable", True)
-        
-        # Extract initial parameter values from config (if provided)
-        # Start with default_params, then override with any schedule-specific values
-        default_params = schedule_config.get("default_params", FrozenDict())
-        schedule_kwargs = dict(default_params)  # Start with defaults
-        
-        # Add hidden_dims from top level if present (for NoiseScheduleNetwork schedule)
-        if "hidden_dims" in schedule_config:
-            schedule_kwargs["hidden_dims"] = schedule_config["hidden_dims"]
-        
-        # Override with any schedule-specific parameters if provided
-        # These take precedence over defaults
-        param_names = [
-            "alpha_bar_min", "alpha_bar_max", "s", "k", "t_mid",
-            "beta", "loc", "scale", "power", "gamma_range"
-        ]
-        for param_name in param_names:
-            if param_name in schedule_config:
-                schedule_kwargs[param_name] = schedule_config[param_name]
-        
-        # Create schedule using factory - pass learnable flag to schedule
-        # The schedule will handle stop_gradient internally if learnable=False
-        self.noise_schedule = create_noise_schedule(
-            schedule_type, 
-            learnable=self.noise_schedule_learnable,
-            **schedule_kwargs
         )
     
     def _broadcast_inputs(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -207,16 +132,6 @@ class VAE_flow(nn.Module):
         return z.reshape(z.shape[:-1] + self.z_shape)
     
     @nn.compact
-    def get_alpha_bar_gamma_prime_t(self, t: jnp.ndarray):
-        """Get noise schedule output using @nn.compact method."""
-        # Use the noise schedule initialized in setup()
-        # The new interface returns (alpha_bar, gamma_prime)
-        # Note: stop_gradient is now handled inside the NoiseSchedule class itself
-        # based on the learnable field, so we don't need to apply it here anymore
-        alpha_bar_t, gamma_prime_t = self.noise_schedule.get_alpha_bar_gamma_prime(t)
-        return alpha_bar_t, gamma_prime_t
-    
-    @nn.compact
     def pred_noise(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         """Flow model that computes dz/dt using CRN."""
         # Optimized: minimize broadcasting and avoid redundant operations
@@ -266,9 +181,6 @@ class VAE_flow(nn.Module):
         dummy_z = jnp.zeros(batch_shape + self.z_shape)
         dummy_t = jnp.zeros(batch_shape)
         
-        # Call get_alpha_bar_gamma_prime_t to initialize noise schedule parameters
-        self.get_alpha_bar_gamma_prime_t(dummy_t)
-        
         # Call pred_noise to initialize the CRN model parameters
         flow_output = self.pred_noise(dummy_z, x, dummy_t, training)
         
@@ -290,41 +202,45 @@ class VAE_flow(nn.Module):
         L_diff = E[||model_output - noise||²/beta], where beta is 1/t for the linear noise schedule.
         """
         key, encoder_key, t_key, noise_key = jr.split(key, 4)
-        key, dropout_key1, dropout_key2 = jr.split(key, 3)
+        key, dropout_key1, dropout_key2  = jr.split(key, 3)
         batch_shape = y.shape[:-self.y_ndims]
         # Encode Target (noisy latent)
         mu_z_target, logvar_z_target = self.apply(params, y, method='encoder', training=training, rngs={'dropout': encoder_key})
         z_target = mu_z_target + jnp.exp(0.5 * logvar_z_target) * jr.normal(key, mu_z_target.shape)
                 
         # Sample noise and time
-        t = jr.uniform(t_key, batch_shape, minval=0.0, maxval=1.0)
+        t = jr.uniform(t_key, batch_shape + self.z_ndims*(1,), minval=0.0, maxval=1.0)
+        t_squeezed = t.squeeze(tuple(range(-self.z_ndims, 0)))
         noise = jr.normal(noise_key, z_target.shape)
 
-        # Get noise schedule parameters
-        t_expanded = jnp.expand_dims(t, axis=tuple(range(-self.z_ndims, 0)))
-        alpha, gamma_prime = self.apply(params, t_expanded, method='get_alpha_bar_gamma_prime_t')
-        
+        # Compute noise schedule parameters
+        alpha, gamma_prime = self.apply(params, t, method='get_alpha_bar_gamma_prime_t')
         sqrt_alpha = jnp.sqrt(alpha)
-        sqrt_1_minus_alpha = jnp.sqrt(1.0 - alpha)
-        snr_weight = 1.0/(1-alpha)/gamma_prime         # alpha/alpha_prime
-        # Expand t to match z dimensions for pred_noise call
-        
+        sqrt_1_minus_alpha = jnp.sqrt(1-alpha)
+
+        use_snr_weight = self.config.main.get("use_snr_weight", True)
+        if use_snr_weight:
+            snr_weight = (1.0/(1-alpha)/gamma_prime).squeeze(tuple(range(-self.z_ndims, 0)))  # alpha/alpha_prime
+        else:
+            snr_weight = 1.0
+
         # Compute noisy latent state at time t and predicted noise, and predicted output
         z_t =  sqrt_alpha* z_target +  sqrt_1_minus_alpha * noise # noisy latent
         predicted_noise = self.apply(params, z_t, x, t, method='pred_noise', training=training, rngs={'dropout': dropout_key1})
-        z_target_est = (z_t - predicted_noise * sqrt_1_minus_alpha)/(sqrt_alpha)
+        z_target_est = (z_t - predicted_noise * sqrt_1_minus_alpha)/(sqrt_alpha + 1e-4)
         y_pred = self.apply(params, z_target_est, method='decoder', training=training, rngs={'dropout': dropout_key2})
         
         # Compute Losses
-        reg_loss = jnp.mean(self.apply(params, z_t, x, t, method='dz_dt', training=training, rngs={'dropout': key})**2)
         squared_error = jnp.mean((predicted_noise - noise) ** 2, axis=tuple(range(-self.z_ndims, 0)))  # has batch_shape
-#        snr_weight_mean = jnp.mean(alpha_over_alpha_prime)
-        snr_weighted_loss = jnp.mean(squared_error*snr_weight)
-        
-        recon_loss_type = self.config.main.get("recon_loss_type", "none")
-        if recon_loss_type == "cross_entropy":   recon_loss = -jnp.mean(y * jnp.log(y_pred + 1e-8))
-        else:                                    recon_loss =  jnp.mean((y - y_pred)**2)
+        snr_weighted_loss = jnp.mean(squared_error*snr_weight)        
 
+        reg_loss = jnp.mean(self.dz_dt_lazy(z_t, t, predicted_noise, alpha, gamma_prime)**2, axis=tuple(range(-self.z_ndims, 0)))
+        reg_loss = jnp.mean(snr_weight * reg_loss)
+
+        recon_loss_type = self.config.main.get("recon_loss_type", "none")
+        if recon_loss_type == "cross_entropy":   recon_loss = -jnp.mean(y * jnp.log(y_pred + 1e-8), axis=tuple(range(-self.y_ndims, 0)))
+        else:                                    recon_loss =  jnp.mean((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
+        recon_loss = jnp.mean(snr_weight * recon_loss)
 
         # Reconstruction loss
         reg_weight = self.config.main.get("reg_weight", 0.0)
@@ -341,28 +257,24 @@ class VAE_flow(nn.Module):
         }
 
     
-    @nn.compact
-    def dz_dt(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = False) -> jnp.ndarray:
+    def dz_dt(self, params: dict, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = False) -> jnp.ndarray:
         """
         Compute dz/dt (diffusion vector field) for given z, x, t.
         For diffusion: dz/dt = 0.5*z - predicted_noise
-        
-        Uses noise schedule: alpha = sigmoid(gamma(t)), alpha_prime = gamma_prime(t)*alpha*(1-alpha)
-        Usual Equation: dz_dt = 0.5*alpha_prime/alpha * z - predicted_noise*alpha_prime/alpha/sqrt(1-alpha)
         """
-        predicted_noise = self.pred_noise(z, x, t, training=training)
-        t_expanded = jnp.expand_dims(jnp.asarray(t), axis=tuple(range(-self.z_ndims, 0)))
-         
-        # Rescaled Equation:   s = (alpha(t) - alpha(0))/(alpha(1) - alpha(0))
-        # s_0 = alpha(0.0)
-        # delta_alpha = alpha(1.0) - s_0
-        # alpha_s = alpha(0) + delta_alpha * s   # so that s = 0 at alpha(0) and s = 1 at alpha(1)
-        #
-        # dz_ds = delta_alpha/alpha_s * ( 0.5*z  - predicted_noise/jnp.sqrt(1-alpha_s)) 
-        # return dz_ds = dz_ds * s_diff
+        predicted_noise = self.apply(params, z, x, t, method='pred_noise', training=training)
 
-        alpha, gamma_prime = self.get_alpha_bar_gamma_prime_t(t_expanded)
-        return gamma_prime*((1-alpha) * 0.5 * z  - predicted_noise*jnp.sqrt(1-alpha))
+        alpha_prime = 1.0
+        alpha = t
+        """
+        Usual Equation:       dz_dt = 0.5*alpha_prime/alpha * z - predicted_noise*alpha_prime/alpha/jnp.sqrt(1-alpha)
+
+        Rescaled Equation:   alpha = sigmoid(gamma(t)),  alpha_prime = gamma_prime(t)*alpha*(1-alpha)
+                                
+                      -->    dz_ds = ( z*(1-alpha)/2 - predicted_noise*sqrt(1-alpha) ) * gamma_prime
+        """
+        return alpha_prime/alpha*(0.5*z  - predicted_noise/jnp.sqrt(1-alpha))
+
 
     @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, num_steps, integration_method, output_type, and training are static arguments
     def predict(self, params: dict, x: jnp.ndarray, num_steps: int = 20, integration_method: str = "midpoint", output_type: str = "end_point", prng_key: jr.PRNGKey = None) -> jnp.ndarray:
@@ -382,7 +294,7 @@ class VAE_flow(nn.Module):
         # Define the diffusion vector field: dz/dt = 0.5*z - predicted_noise
         def vector_field(params, z, x, t):
             z = self._unflatten_z(z)
-            dz_dt = self.apply(params, z, x, t, method='dz_dt', training=False)
+            dz_dt = self.dz_dt(params, z, x, t)
             return self._flatten_z(dz_dt)
         
         # Integrate the ODE from t=0 to t=1 (reverse diffusion process)
@@ -412,7 +324,7 @@ class VAE_flow(nn.Module):
         # Define the vector field for ODE integration using flow_model method with x=None
         def vector_field(params, z, x, t):
             z = self._unflatten_z(z)
-            dz_dt = self.apply(params, z, None, t, method='dz_dt', training=False)  # Use x=None
+            dz_dt = self.dz_dt(params, z, None, t, training=False)  # Use x=None
             return self._flatten_z(dz_dt)
         
         # Integrate the ODE from t=0 to t=1 (reverse diffusion process)

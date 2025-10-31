@@ -18,10 +18,10 @@ from pathlib import Path
 from flax.core import FrozenDict
 
 # Import flow model configurations and trainer
-from .fm_v2 import VAEFlowConfig as FlowMatchingConfig
-from .df_v2 import VAEFlowConfig as DiffusionConfig
-from .ct_v2 import VAEFlowConfig as CTConfig
-from .trainer_v2 import VAEFlowTrainer
+from .fm import VAEFlowConfig as FlowMatchingConfig
+from .df import VAEFlowConfig as DiffusionConfig
+from .ct import VAEFlowConfig as CTConfig
+from .trainer import VAEFlowTrainer
 
 
 def load_two_moons_data(data_path: str = "data/two_moons_formatted.pkl") -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -192,15 +192,14 @@ def create_vae_config(
     network_type: str = "mlp",
     hidden_dims: Tuple[int, ...] = (64, 64, 64),
     learning_rate: float = 0.001,
-    recon_weight: float = 0.1,
+    recon_weight: float = 0.0,
     decoder_type: str = "none",
     decoder_model: str = "identity",
     encoder_type: str = "identity",
     recon_loss_type: str = "mse",
     reg_weight: float = 0.0,
     model_type: str = "flow_matching",
-    noise_schedule: str = "linear",
-    noise_schedule_learnable: bool = True
+    noise_schedule: str = "linear"
 ):
     """Create VAE flow configuration for two moons dataset."""
     base_config = FrozenDict({
@@ -247,21 +246,14 @@ def create_vae_config(
     })
     
     if model_type == "diffusion":
-        # Add diffusion-specific config with noise schedule
+        # Add diffusion-specific config
         diffusion_config = FrozenDict({
             **base_config,
             "recon_loss_type": recon_loss_type,  # Use passed recon_loss_type
             "reg_weight": 0.00,  # Add regularization for diffusion
-            "noise_schedule": noise_schedule,  # Legacy support
-        })
-        # New noise_schedule config for better control
-        noise_schedule_config = FrozenDict({
-            "schedule_type": noise_schedule,
-            "learnable": noise_schedule_learnable,  # Can be set to False to freeze parameters
         })
         return DiffusionConfig(
             main=diffusion_config, 
-            noise_schedule=noise_schedule_config,
             crn=crn,
             encoder=encoder,
             decoder=decoder
@@ -272,16 +264,10 @@ def create_vae_config(
             **base_config,
             "recon_loss_type": recon_loss_type,
             "reg_weight": reg_weight,
-            "noise_schedule": noise_schedule,  # Legacy support
-        })
-        # New noise_schedule config for better control
-        noise_schedule_config = FrozenDict({
-            "schedule_type": noise_schedule,
-            "learnable": noise_schedule_learnable,  # Can be set to False to freeze parameters
+            "noise_schedule": noise_schedule,
         })
         return CTConfig(
             main=ct_config,
-            noise_schedule=noise_schedule_config,
             crn=crn,
             encoder=encoder,
             decoder=decoder
@@ -333,7 +319,7 @@ def main():
     parser.add_argument('--optimizer', type=str, default='adam', 
                        choices=['adam', 'sgd', 'adagrad'],
                        help='Optimizer')
-    parser.add_argument('--recon_weight', type=float, default=0.1,
+    parser.add_argument('--recon_weight', type=float, default=0.0,
                         help='Reconstruction loss weight (0.0 = no reconstruction, 1.0 = equal weight)')
     parser.add_argument('--decoder_type', type=str, default='none',
                         choices=['none', 'linear', 'softmax'],
@@ -350,12 +336,8 @@ def main():
     parser.add_argument('--reg_weight', type=float, default=0.0,
                         help='Regularization loss weight')
     parser.add_argument('--noise_schedule', type=str, default='linear',
-                        choices=['linear', 'cosine', 'sigmoid', 'exponential', 'cauchy', 'laplace', 'logistic', 'quadratic', 'polynomial', 'monotonic_nn', 'learnable', 'network'],
-                        help='Noise schedule for CT model')
-    parser.add_argument('--noise_schedule_learnable', action='store_true', default=True,
-                        help='Make noise schedule parameters learnable (default: True)')
-    parser.add_argument('--noise_schedule_fixed', dest='noise_schedule_learnable', action='store_false',
-                        help='Freeze noise schedule parameters (opposite of --noise_schedule_learnable)')
+                        choices=['linear', 'cosine', 'sigmoid', 'learnable', 'simple_learnable'],
+                        help='Noise schedule for CT model (linear, cosine, sigmoid, learnable, simple_learnable)')
     parser.add_argument('--reverse', action='store_true',
                         help='Swap x and y: predict moon coordinates from labels (y -> x)')
     parser.add_argument('--experiment_name', type=str, default=None,
@@ -459,8 +441,7 @@ def main():
             recon_loss_type=args.recon_loss_type,
             reg_weight=args.reg_weight,
             model_type=model_type,
-            noise_schedule=args.noise_schedule,
-            noise_schedule_learnable=args.noise_schedule_learnable
+            noise_schedule=args.noise_schedule
         )
     
     # Determine which models to train

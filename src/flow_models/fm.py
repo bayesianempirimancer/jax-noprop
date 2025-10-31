@@ -193,12 +193,13 @@ class VAE_flow(nn.Module):
         """
         Compute the loss by calling individual @nn.compact methods with proper rngs.
         """
+        # Split keys for random sampling operations (not dropout)
         key, t_key, z_0_key, z_t_noise_key, z_target_key = jr.split(key, 5)
-        key, dropout_key1, dropout_key2, dropout_key3 = jr.split(key, 4)
+        # Keep key for dropout RNGs - will be automatically managed by @nn.compact
         batch_shape = y.shape[:-self.y_ndims]
         
-        # Encode Target (noisy latent)
-        mu_z_target, logvar_z_target = self.apply(params, y, method='encoder', training=training, rngs={'dropout': dropout_key1})
+        # Encode Target (noisy latent) - @nn.compact methods handle RNG automatically
+        mu_z_target, logvar_z_target = self.apply(params, y, method='encoder', training=training, rngs={'dropout': key})
         z_target = mu_z_target + jnp.exp(0.5 * logvar_z_target) * jr.normal(z_target_key, mu_z_target.shape)
 
         # Sample initial latent state and time
@@ -208,22 +209,29 @@ class VAE_flow(nn.Module):
         # Sample latent state at time t
         diff_z = z_target - z_0
         z_t = z_0 + t * diff_z
-        z_t = z_t + jr.normal(z_t_noise_key, z_t.shape) * self.config.main["sigma"]
+        snr_weight = t.squeeze(tuple(range(-self.z_ndims, 0)))
+#        z_t = z_t + jr.normal(z_t_noise_key, z_t.shape) * self.config.main["sigma"]
 
         # Compute Flow Field, estimate target, and predicted output
+        # All @nn.compact methods will automatically use RNG from rngs
         squeezed_t = t.squeeze(tuple(range(-self.z_ndims, 0)))
-        dz_dt = self.apply(params, z_t, x, squeezed_t, method='dz_dt', training=training, rngs={'dropout': dropout_key2})    
+        dz_dt = self.apply(params, z_t, x, squeezed_t, method='dz_dt', training=training, rngs={'dropout': key})    
         z_target_est = dz_dt * (1.0-t) + z_t
-        y_pred = self.apply(params, z_target_est, method='decoder', training=training, rngs={'dropout': dropout_key3})
+        y_pred = self.apply(params, z_target_est, method='decoder', training=training, rngs={'dropout': key})
 
         # Compute Lossess
-        reg_loss = jnp.mean(dz_dt ** 2)
-        flow_loss = jnp.mean((dz_dt - diff_z)**2)
+        reg_loss = jnp.mean(dz_dt ** 2, axis=tuple(range(-self.z_ndims, 0)))
+        reg_loss = jnp.mean(snr_weight * reg_loss)
+
+        flow_loss = jnp.mean((dz_dt - diff_z)**2, axis=tuple(range(-self.z_ndims, 0)))
+        flow_loss = jnp.mean(snr_weight * flow_loss)
 
         recon_loss_type = self.config.main["recon_loss_type"]
-        if recon_loss_type == "cross_entropy":  recon_loss = -jnp.mean(y * jnp.log(y_pred + 1e-8))
-        else:                                   recon_loss =  jnp.mean((y - y_pred)**2)
-        
+        if recon_loss_type == "cross_entropy":  recon_loss = -jnp.mean(y * jnp.log(y_pred + 1e-8), axis=tuple(range(-self.y_ndims, 0)))
+        else:                                   recon_loss =  jnp.mean((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
+  
+        recon_loss = jnp.mean(snr_weight * recon_loss)
+
         # Compute recon_weight
         reg_weight = self.config.main["reg_weight"]
         recon_weight = self.config.main["recon_weight"]
