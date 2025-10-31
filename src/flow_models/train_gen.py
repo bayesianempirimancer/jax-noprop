@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
+from flax.core import FrozenDict
 
 from src.flow_models.trainer_gen import GenerationTrainer
 from src.flow_models.fm import VAEFlowConfig as FMConfig
@@ -44,7 +45,7 @@ def build_config(model: str,
                  reg_weight: float,
                  recon_weight: float,
                  noise_schedule: str):
-    main = {
+    main = FrozenDict({
         'input_shape': input_shape,
         'output_shape': output_shape,
         'latent_shape': latent_shape,
@@ -52,11 +53,12 @@ def build_config(model: str,
         'recon_weight': recon_weight,
         'reg_weight': reg_weight,
         'integration_method': 'midpoint' if model == 'ct' else 'euler',
-    }
+        'sigma': 0.02,
+    })
     if model == 'ct':
-        main['noise_schedule'] = noise_schedule
+        main = main.copy(add_or_replace={'noise_schedule': noise_schedule})
 
-    crn = {
+    crn = FrozenDict({
         'model_type': crn_type,
         'network_type': network_type,
         'hidden_dims': tuple(hidden_dims),
@@ -65,8 +67,8 @@ def build_config(model: str,
         'activation_fn': 'swish',
         'use_batch_norm': False,
         'dropout_rate': 0.1,
-    }
-    enc = {
+    })
+    enc = FrozenDict({
         'model_type': 'identity',
         'encoder_type': 'deterministic',
         'input_shape': input_shape,
@@ -74,8 +76,8 @@ def build_config(model: str,
         'hidden_dims': (8,),
         'activation': 'swish',
         'dropout_rate': 0.0,
-    }
-    dec = {
+    })
+    dec = FrozenDict({
         'model_type': 'identity',
         'decoder_type': 'none',
         'latent_shape': latent_shape,
@@ -83,12 +85,13 @@ def build_config(model: str,
         'hidden_dims': (16, 16),
         'activation': 'swish',
         'dropout_rate': 0.0,
-    }
+    })
+
     if model == 'diffusion':
-        return DFConfig(main=jax.tree_util.tree_map(lambda x: x, main), crn=crn, encoder=enc, decoder=dec)
+        return DFConfig(main=main, crn=crn, encoder=enc, decoder=dec)
     if model == 'ct':
-        return CTConfig(main=jax.tree_util.tree_map(lambda x: x, main), crn=crn, encoder=enc, decoder=dec)
-    return FMConfig(main=jax.tree_util.tree_map(lambda x: x, main), crn=crn, encoder=enc, decoder=dec)
+        return CTConfig(main=main, crn=crn, encoder=enc, decoder=dec)
+    return FMConfig(main=main, crn=crn, encoder=enc, decoder=dec)
 
 
 def main():
@@ -112,6 +115,7 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--save_dir', type=str, default=None)
     parser.add_argument('--verbose', action='store_true')
+    parser.add_argument('--unconditional', action='store_true', help='Train for unconditional generation (x=None)')
 
     args = parser.parse_args()
 
@@ -128,9 +132,11 @@ def main():
     val_x, val_y = y_val, x_val
 
     # Build config with reversed shapes
+    # For unconditional generation, set input_shape to empty tuple since x is None
+    input_shape = () if args.unconditional else (args.output_dim,)
     config = build_config(
         model=args.model_type,
-        input_shape=(args.output_dim,),   # now input is label y (dim=2 here)
+        input_shape=input_shape,   # empty for unconditional, otherwise label y (dim=2 here)
         output_shape=(args.input_dim,),  # output is x (2D coordinates)
         latent_shape=(args.latent_dim,),
         crn_type=args.crn_type,
@@ -142,23 +148,36 @@ def main():
         noise_schedule=args.noise_schedule,
     )
 
-    trainer = GenerationTrainer(config=config, learning_rate=args.learning_rate, optimizer_name=args.optimizer, seed=args.seed)
+    trainer = GenerationTrainer(
+        config=config,
+        learning_rate=args.learning_rate,
+        optimizer_name=args.optimizer,
+        seed=args.seed,
+        unconditional=args.unconditional
+    )
 
     # Initialize
-    bs = min(args.batch_size, train_x.shape[0])
-    x_sample = train_x[:bs]
+    bs = min(args.batch_size, train_y.shape[0])
+    if args.unconditional:
+        # For unconditional, pass None for x since CRN input_shape is empty
+        x_sample = None
+    else:
+        x_sample = train_x[:bs]
     y_sample = train_y[:bs]
     z_sample = jr.normal(jr.PRNGKey(args.seed), (bs, args.latent_dim))
     t_sample = jr.uniform(jr.PRNGKey(args.seed+1), (bs,), minval=0.0, maxval=1.0)
     trainer.initialize(x_sample, y_sample, z_sample, t_sample)
 
-    # Train
+    # Train - for unconditional, pass None for x_data
+    train_x_input = None if args.unconditional else train_x
+    val_x_input = None if args.unconditional else val_x
+    
     history = trainer.train(
-        x_data=train_x,
+        x_data=train_x_input,
         y_data=train_y,
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
-        validation_data=(val_x, val_y),
+        validation_data=(val_x_input, val_y),
         dropout_epochs=args.num_epochs,
         verbose=args.verbose,
     )
@@ -168,19 +187,45 @@ def main():
         pickle.dump(history, f)
     trainer.save_params(str(Path(args.save_dir) / 'model_params.pkl'))
 
-    # Conditional generation on a subset of validation labels
-    num_gen = min(2000, val_x.shape[0])
-    cond_y = val_x[:num_gen]  # remember, reversed: cond is labels
+    # Generation
+    num_gen = min(2000, val_y.shape[0])
     prng = jr.PRNGKey(args.seed + 123)
-    x_gen = np.array(trainer.conditional_generate(cond_y, num_steps=20, prng_key=prng))
-    x_real = np.array(val_y[:num_gen])
-    y_labels = np.array(cond_y)
+    
+    if args.unconditional:
+        # Unconditional generation
+        x_gen = np.array(trainer.unconditional_generate(
+            batch_shape=(num_gen,),
+            num_steps=20,
+            prng_key=prng
+        ))
+        x_real = np.array(val_y[:num_gen])
+        y_labels = None
+        cond_y = None
+    else:
+        # Conditional generation
+        cond_y = val_x[:num_gen]  # remember, reversed: cond is labels
+        x_gen = np.array(trainer.conditional_generate(cond_y, num_steps=20, prng_key=prng))
+        x_real = np.array(val_y[:num_gen])
+        y_labels = np.array(cond_y)
 
     # Plot
     trainer.save_generation_plot(x_real=x_real, y_labels=y_labels, x_gen=x_gen, output_dir=args.save_dir)
+    trainer.save_loss_trends_plot(history, output_dir=args.save_dir)
+    
+    # Generate trajectory plot with 40 trajectories
+    trajectory_prng = jr.PRNGKey(args.seed + 456)
+    trainer.save_trajectory_plot(
+        cond_y=cond_y,
+        num_trajectories=40,
+        num_steps=20,
+        prng_key=trajectory_prng,
+        output_dir=args.save_dir
+    )
 
     if args.verbose:
         print(f"Saved generation assets to {args.save_dir}")
+        print(f"Saved loss trends plot to {args.save_dir}/loss_trends.png")
+        print(f"Saved trajectory plot to {args.save_dir}/latent_trajectories.png")
 
 
 if __name__ == '__main__':

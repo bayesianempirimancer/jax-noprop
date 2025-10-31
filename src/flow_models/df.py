@@ -249,12 +249,12 @@ class VAE_flow(nn.Module):
         }
 
     
-    def dzdt(self, params: dict, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
+    def dzdt(self, params: dict, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = False) -> jnp.ndarray:
         """
         Compute dz/dt (diffusion vector field) for given z, x, t.
         For diffusion: dz/dt = 0.5*z - predicted_noise
         """
-        predicted_noise = self.apply(params, z, x, t, method='pred_noise', training=False)
+        predicted_noise = self.apply(params, z, x, t, method='pred_noise', training=training)
         t = jnp.expand_dims(jnp.asarray(t), axis=tuple(range(-self.z_ndims, 0)))
 
 #        return 0.5*z/jnp.sqrt(t+1e-6) - predicted_noise
@@ -309,7 +309,7 @@ class VAE_flow(nn.Module):
         # Define the vector field for ODE integration using flow_model method with x=None
         def vector_field(params, z, x, t):
             z = self._unflatten_z(z)
-            dz_dt = self.dzdt(params, z, None, t)  # Use x=None
+            dz_dt = self.dzdt(params, z, None, t, training=False)  # Use x=None
             return self._flatten_z(dz_dt)
         
         # Integrate the ODE from t=0 to t=1 (reverse diffusion process)

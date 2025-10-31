@@ -231,7 +231,7 @@ class VAE_flow(nn.Module):
     def __call__(self, x: jnp.ndarray, y: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> jnp.ndarray:
         # For initialization, we need to call the nn compact methods to initialize parameters
 
-        batch_shape = x.shape[:-self.x_ndims]
+        batch_shape = y.shape[:-self.y_ndims]
                 
         # Call flow_model to initialize its parameters (need dummy z and t)
         dummy_z = jnp.zeros(batch_shape + self.z_shape)
@@ -362,7 +362,8 @@ class VAE_flow(nn.Module):
         z = self._unflatten_z(z)
         return self.apply(params, z, method='decoder', training=False)
 
-    @partial(jax.jit, static_argnums=(0, 2, 3, 4))  # self, num_steps, integration_method, output_type are static arguments
+
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))  # self, num_steps, integration_method, output_type are static arguments
     def sample(self, params: dict, prng_key: jr.PRNGKey, batch_shape: Tuple[int, ...], num_steps: int = 20, integration_method: str = "midpoint", output_type: str = "end_point") -> jnp.ndarray:
         """
         Generate samples using continuous-time flow integration without conditional input.
@@ -382,6 +383,7 @@ class VAE_flow(nn.Module):
             If output_type="end_point": Final samples [batch_shape + y_shape]
             If output_type="trajectory": Full trajectory [num_steps, batch_shape + y_shape]
         """
+        # batch_shape should already be a tuple of Python integers from the caller
         # Disable gradient tracking through parameters for inference
         params_no_grad = jax.lax.stop_gradient(params)
         
@@ -391,7 +393,7 @@ class VAE_flow(nn.Module):
         # Define the CT vector field: dz/dt = tau_inverse(t) * (sqrt(alpha(t))*model_output - (1+alpha(t))/2*z)
         def vector_field(params, z, x, t):
             z = self._unflatten_z(z)
-            dz_dt = self.dz_dt(params, z, None, t)  # Use x=None
+            dz_dt = self.apply(params, z, None, t, method='dz_dt', training=False)  # Use x=None
             return self._flatten_z(dz_dt)
         
         # Integrate the ODE from t=0 to t=1 (CT flow process)
