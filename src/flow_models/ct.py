@@ -4,7 +4,7 @@ import jax.random as jr
 import flax.linen as nn
 from flax.core import FrozenDict
 import optax
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 from dataclasses import dataclass, field
 
 from functools import partial, cached_property
@@ -132,31 +132,28 @@ class VAE_flow(nn.Module):
         # Store whether schedule parameters should be learnable
         self.noise_schedule_learnable = schedule_config.get("learnable", True)
         
-        # Extract initial parameter values from config (if provided)
-        # Start with default_params, then override with any schedule-specific values
-        default_params = schedule_config.get("default_params", FrozenDict())
-        schedule_kwargs = dict(default_params)  # Start with defaults
-        
-        # Add hidden_dims from top level if present (for NoiseScheduleNetwork schedule)
-        if "hidden_dims" in schedule_config:
-            schedule_kwargs["hidden_dims"] = schedule_config["hidden_dims"]
-        
-        # Override with any schedule-specific parameters if provided
-        # These take precedence over defaults
-        param_names = [
-            "alpha_bar_min", "alpha_bar_max", "s", "k", "t_mid",
-            "beta", "loc", "scale", "power", "gamma_range"
-        ]
-        for param_name in param_names:
-            if param_name in schedule_config:
-                schedule_kwargs[param_name] = schedule_config[param_name]
-        
         # Create schedule using factory - pass learnable flag to schedule
         # The schedule will handle stop_gradient internally if learnable=False
+        # Schedule classes use their own defaults for parameters
         self.noise_schedule = create_noise_schedule(
             schedule_type, 
-            learnable=self.noise_schedule_learnable,
-            **schedule_kwargs
+            learnable=self.noise_schedule_learnable
+        )
+        
+        # Initialize encoder and decoder
+        # Encoder input is output_shape (since it encodes y)
+        encoder_input_shape = self.config.main["output_shape"]
+        self.encoder = create_encoder(
+            self.config.encoder,
+            input_shape=encoder_input_shape,
+            latent_shape=self.z_shape
+        )
+        
+        # Decoder maps from latent to output
+        self.decoder = create_decoder(
+            self.config.decoder,
+            latent_shape=self.z_shape,
+            output_shape=self.config.main["output_shape"]
         )
     
     def _broadcast_inputs(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -212,14 +209,11 @@ class VAE_flow(nn.Module):
         return z.reshape(z.shape[:-1] + self.z_shape)
     
     @nn.compact
-    def get_alpha_bar_gamma_prime_t(self, t: jnp.ndarray):
+    def get_noise_params(self, t: jnp.ndarray):
         """Get noise schedule output using @nn.compact method."""
-        # Use the noise schedule initialized in setup()
-        # The new interface returns (alpha_bar, gamma_prime)
-        # Note: stop_gradient is now handled inside the NoiseSchedule class itself
-        # based on the learnable field, so we don't need to apply it here anymore
-        alpha_bar_t, gamma_prime_t = self.noise_schedule.get_alpha_bar_gamma_prime(t)
-        return alpha_bar_t, gamma_prime_t
+
+        alpha_t, gamma_prime_t = self.noise_schedule.get_alpha_bar_gamma_prime(t)
+        return alpha_t, gamma_prime_t
     
     @nn.compact
     def crn_output(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = True) -> jnp.ndarray:
@@ -227,45 +221,18 @@ class VAE_flow(nn.Module):
         return self.crn_model(z, x, t, training=training)
         
     @nn.compact
-    def encoder(self, x: jnp.ndarray, training: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Encoder that maps x to latent space using single factory function.
-        
-        Returns:
-            Tuple of (mu, logvar) where:
-            - For normal encoders: encoder returns (mu, logvar) directly
-            - For deterministic encoders: encoder returns z, we return (z, -jnp.inf)
-        """
-        # Use direct factory function: create_encoder(config_dict, input_shape, latent_shape)
-        encoder = create_encoder(
-            self.config.encoder,
-            input_shape=(x.shape[-1],),  # Use flattened input dimension
-            latent_shape=self.z_shape  # Use structured latent shape
-        )
-
-        # Get encoder output - could be tuple (mu, logvar) or single tensor z
-        encoder_output = encoder(x, training)
-        
-        # Optimized: move assertions outside JIT compilation for better performance
-        # (Assertions are kept for debugging but will be compiled out in optimized builds)
-        
-        # Handle both normal and deterministic cases
+    def encode(self, x: jnp.ndarray, training: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """Encoder that maps x to latent space."""
+        encoder_output = self.encoder(x, training)
         if isinstance(encoder_output, tuple):
-            # Normal encoder returns (mu, logvar) tuple
-            return encoder_output
+            return encoder_output   # Normal encoder returns (mu, logvar) tuple
         else:
-            # Deterministic encoder returns z, we return (z, -jnp.inf) for consistency
-            return encoder_output, -jnp.inf
+            return encoder_output, -jnp.inf  # Deterministic encoder returns z, we return (z, -jnp.inf) for consistency
 
     @nn.compact
-    def decoder(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        """Decoder that maps latent z to output space using single factory function."""
-        # Create decoder network using direct factory
-        decoder = create_decoder(
-            self.config.decoder,
-            latent_shape=self.z_shape,  # Use structured latent shape
-            output_shape=self.config.main["output_shape"]  # Use full output_shape
-        )
-        return decoder(x, training)
+    def decode(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+        """Decoder that maps latent z to output space."""
+        return self.decoder(x, training)
 
     @nn.compact
     def dz_dt(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = True) -> jnp.ndarray:
@@ -275,16 +242,52 @@ class VAE_flow(nn.Module):
         z, x, t = self._broadcast_inputs(z, x, t)
 
         crn_output = self.crn_output(z, x, t, training=training)
-        # Get alpha_bar and gamma_prime directly from noise schedule
+        # Get alpha_t and gamma_prime directly from noise schedule
         t_expanded = jnp.expand_dims(jnp.asarray(t), axis=tuple(range(-self.z_ndims, 0)))
-        alpha_t, tau_inverse = self.get_alpha_bar_gamma_prime_t(t_expanded)
-        return self.dz_dt_lazy(z, alpha_t, tau_inverse, crn_output)
+        alpha_t, gamma_prime_t = self.get_noise_params(t_expanded)
+        return self.lazy_flow(z, crn_output, alpha_t, gamma_prime_t)
     
-    def dz_dt_lazy(self, z, alpha_t, tau_inverse, crn_output):
-        """Lazy version of dz_dt that takes precomputed CRN output and noise schedule parameters."""
-        return tau_inverse * (jnp.sqrt(alpha_t) * crn_output - 0.5*(1 + alpha_t) * z)
+    def lazy_flow(self, z_t, z_target, alpha_t, gamma_prime_t):
+        return gamma_prime_t * (jnp.sqrt(alpha_t)*z_target - 0.5*(1+alpha_t)*z_t)
 
+    # KL divergence with SNR weighting: SNR_noise_weight = gamma_prime
+    # Note:  0.5 is dropped and the proof is here: https://arxiv.org/html/2312.10393v1
+    def lazy_snr_weight(self, alpha_t, gamma_prime_t):
+        # SNR weight for CT model: SNR'(t) = gamma_prime * alpha / (1-alpha)
+        return gamma_prime_t * alpha_t / (1.0 - alpha_t)
+    
+    def lazy_noise_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t
+    def lazy_target_snr(self, alpha_t, gamma_prime_t): return gamma_prime_t * alpha_t / (1.0 - alpha_t)
+    def lazy_error_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t / (1.0 - alpha_t)
+    def lazy_score_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t * (1.0 - alpha_t)
+    def lazy_flow_snr(self, alpha_t, gamma_prime_t):   return  1.0 / ((1.0 - alpha_t) * alpha_t * gamma_prime_t)
 
+    def lazy_score(self, z_t, z_target, alpha_t):     return (jnp.sqrt(alpha_t)*z_target - z_t) / (1.0 - alpha_t)
+    def lazy_error(self, z_t, z_target, alpha_t):     return z_t - jnp.sqrt(alpha_t)* z_target
+    def lazy_noise(self, z_t, z_target, alpha_t):     return self.lazy_error(z_t, z_target, alpha_t) / jnp.sqrt(1.0 - alpha_t)
+
+    def lazy_KL_from_target(self, z_target_est, z_target, alpha_t, gamma_prime_t):
+        diff = z_target - z_target_est
+        return self.lazy_target_snr(alpha_t, gamma_prime_t) * jnp.sum(diff ** 2, axis=tuple(range(-self.z_ndims, 0)))
+
+    def lazy_KL_from_noise(self, noise_est, z_t, z_target, alpha_t, gamma_prime_t):
+        noise_diff = self.lazy_noise(z_t, z_target, alpha_t) - noise_est
+        return self.lazy_noise_snr(alpha_t, gamma_prime_t) * jnp.sum(noise_diff ** 2, axis=tuple(range(-self.z_ndims, 0)))
+
+    def lazy_KL_from_score(self, score_est, z_t, z_target, alpha_t, gamma_prime_t):
+        score_diff = self.lazy_score(z_t, z_target, alpha_t) - score_est
+        return self.lazy_score_snr(alpha_t, gamma_prime_t) * jnp.sum(score_diff ** 2, axis=tuple(range(-self.z_ndims, 0)))
+
+    def lazy_KL_from_error(self, error_est, z_t, z_target, alpha_t, gamma_prime_t):
+        error_diff = self.lazy_error(z_t, z_target, alpha_t) - error_est
+        return self.lazy_error_snr(alpha_t, gamma_prime_t) * jnp.sum(error_diff ** 2, axis=tuple(range(-self.z_ndims, 0)))
+
+    def lazy_KL_from_flow(self, flow_est, z_t, z_target, alpha_t, gamma_prime_t):
+        noise = self.lazy_noise(z_t, z_target, alpha_t)
+        flow_diff = self.lazy_flow(z_t, noise, alpha_t, gamma_prime_t) - flow_est
+        return self.lazy_flow_snr * jnp.sum(flow_diff ** 2, axis=tuple(range(-self.z_ndims, 0))) / (gamma_prime_t ** 2)
+            
+            
     def __call__(self, x: jnp.ndarray, y: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> jnp.ndarray:
         # For initialization, we need to call the nn compact methods to initialize parameters
 
@@ -294,13 +297,13 @@ class VAE_flow(nn.Module):
         dummy_z = jnp.zeros(batch_shape + self.z_shape)
         dummy_t = jnp.zeros(batch_shape)
         
-        # Call flow_model to initialize the CRN model parameters and alpha_bar_gamma_prime_t
+        # Call flow_model to initialize the CRN model parameters and alpha_gamma_prime_t
         dz_dt = self.dz_dt(dummy_z, x, dummy_t, training)
         
         # Call encoder and decoder to initialize their parameters
         # These @nn.compact methods need to be called during initialization to create parameters
-        encoder_output = self.encoder(y, training)
-        decoder_output = self.decoder(dummy_z, training)
+        encoder_output = self.encode(y, training)
+        decoder_output = self.decode(dummy_z, training)
         
         # For initialization, we just return a dummy output
         # The actual forward pass logic is handled by the individual methods
@@ -308,7 +311,7 @@ class VAE_flow(nn.Module):
 
 # JIT with training static to avoid traced bool in Dropout
     @partial(jax.jit, static_argnums=(0, 5))
-    def loss(self, params: dict, x: jnp.ndarray, y: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> Tuple[jnp.ndarray, dict]:
+    def loss(self, params: dict, x: Optional[jnp.ndarray], y: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> Tuple[jnp.ndarray, dict]:
         """
         Compute the CT-style SNR-weighted loss.
         """
@@ -316,53 +319,52 @@ class VAE_flow(nn.Module):
         key, t_key, noise_key, z_target_key = jr.split(key, 4)
         batch_shape = y.shape[:-self.y_ndims]
         # Encode Target (noisy latent)  
-        mu_z_target, logvar_z_target = self.apply(params, y, method='encoder', training=training, rngs={'dropout': key})
+        mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})
         z_target = mu_z_target + jnp.exp(0.5 * logvar_z_target) * jr.normal(z_target_key, mu_z_target.shape)
                 
 
-        # Sample time and get noise schedule parameters and noise latent at time t
+        # Sample time and get noise schedule parameters and noisy latent at time t
         t = jr.uniform(t_key, batch_shape + self.z_ndims*(1,), minval=0.0, maxval=1.0)
-        alpha_bar_t, gamma_prime_t = self.apply(params, t, method='get_alpha_bar_gamma_prime_t')
-        z_t = jnp.sqrt(alpha_bar_t) * z_target +  jnp.sqrt(1.0 - alpha_bar_t) * jr.normal(noise_key, z_target.shape)
+        alpha_t, gamma_prime_t = self.apply(params, t, method='get_noise_params')
+        z_t = jnp.sqrt(alpha_t) * z_target +  jnp.sqrt(1.0 - alpha_t) * jr.normal(noise_key, z_target.shape)
         
         t = t.squeeze(tuple(range(-self.z_ndims, 0)))
         z_target_est = self.apply(params, z_t, x, t, method='crn_output', training=training, rngs={'dropout': key})
-        y_pred = self.apply(params, z_target_est, method='decoder', training=training, rngs={'dropout': key})
+        y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})
 
-
-        # SNR weight = gamma_prime * exp(gamma) = gamma_prime * (alpha_bar / (1 - alpha_bar))
-        # Since alpha_bar = sigmoid(gamma), exp(gamma) = alpha_bar / (1 - alpha_bar)
         use_snr_weight = self.config.main.get("use_snr_weight", True)
         if use_snr_weight:
-            snr_weight = gamma_prime_t * alpha_bar_t / (1.0 - alpha_bar_t)
-            snr_weight = snr_weight.squeeze(tuple(range(-self.z_ndims, 0)))
-        else:
+            snr_weight = self.lazy_snr_weight(alpha_t, gamma_prime_t).squeeze(tuple(range(-self.z_ndims, 0)))
+        else: 
             snr_weight = 1.0
-#        snr_weight_mean = jnp.mean(snr_weight)
+        snr_weight_mean = jnp.mean(snr_weight)
 
-        squared_error = jnp.mean((z_target_est - z_target) ** 2, axis=tuple(range(-self.z_ndims, 0)))
+        squared_error = jnp.sum((z_target_est - z_target) ** 2, axis=tuple(range(-self.z_ndims, 0)))
         snr_loss = jnp.mean(snr_weight * squared_error)
 
-        dz_dt = self.dz_dt_lazy(z_t, alpha_bar_t, gamma_prime_t, z_target_est)
-        reg_loss = jnp.mean(dz_dt**2, axis=tuple(range(-self.z_ndims, 0)))  # has batch_shape
+        dz_dt = self.lazy_flow(z_t, z_target_est, alpha_t, gamma_prime_t)
+        reg_loss = jnp.sum(dz_dt**2, axis=tuple(range(-self.z_ndims, 0)))  # has batch_shape
+#        alpha_t_squeezed = alpha_t.squeeze(tuple(range(-self.z_ndims, 0)))
+#        gamma_prime_t_squeezed = gamma_prime_t.squeeze(tuple(range(-self.z_ndims, 0)))
+#        reg_loss = jnp.mean(self.lazy_flow_snr(alpha_t_squeezed, gamma_prime_t_squeezed) * reg_loss)
         reg_loss = jnp.mean(snr_weight * reg_loss)
 
         recon_loss_type = self.config.main.get("recon_loss_type", "mse")
         if recon_loss_type == "cross_entropy":
-            recon_loss = jnp.mean(-y * jnp.log(y_pred + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
+            recon_loss = jnp.sum(-y * jnp.log(y_pred + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
         elif recon_loss_type == "mse":
-            recon_loss = jnp.mean((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
+            recon_loss = jnp.sum((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
         else:
             recon_loss = 0.0
+ #       recon_loss = jnp.mean(self.lazy_target_snr(alpha_t_squeezed, gamma_prime_t_squeezed)*recon_loss)  # Average over batch dimension if needed        
+        recon_loss = jnp.mean(snr_weight*recon_loss)  # Average over batch dimension if needed        
 
-        recon_loss = jnp.mean(snr_weight * recon_loss)        
         reg_weight = self.config.main.get("reg_weight", 0.0)
         recon_weight = self.config.main.get("recon_weight", 0.0)
-        if recon_loss_type == "none":
-            recon_weight = 0.0
 
         total_loss = snr_loss + recon_weight * recon_loss + reg_weight * reg_loss
-
+        # total_loss = total_loss/snr_weight_mean
+        
         return total_loss, {
             'flow_loss': snr_loss,
             'recon_loss': recon_loss, 
@@ -423,7 +425,7 @@ class VAE_flow(nn.Module):
         )
         
         z = self._unflatten_z(z)
-        return self.apply(params, z, method='decoder', training=False)
+        return self.apply(params, z, method='decode', training=False)
 
 
     @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))  # self, num_steps, integration_method, output_type are static arguments
@@ -472,11 +474,11 @@ class VAE_flow(nn.Module):
         )
         
         z = self._unflatten_z(z)
-        return self.apply(params, z, method='decoder', training=False)
+        return self.apply(params, z, method='decode', training=False)
 
 
     @partial(jax.jit, static_argnums=(0, 5, 7))  # self, optimizer, training are static
-    def train_step(self, params: dict, x: jnp.ndarray, y: jnp.ndarray, opt_state: dict, optimizer, key: jr.PRNGKey, training: bool = True) -> Tuple[dict, dict, jnp.ndarray, dict]:
+    def train_step(self, params: dict, x: Optional[jnp.ndarray], y: jnp.ndarray, opt_state: dict, optimizer, key: jr.PRNGKey, training: bool = True) -> Tuple[dict, dict, jnp.ndarray, dict]:
         """
         JIT-compiled training step for VAE with flow model.
         

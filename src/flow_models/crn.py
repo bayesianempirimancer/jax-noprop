@@ -8,7 +8,7 @@ the specific input/output requirements for each NoProp variant.
 For image-based models, see crn_image.py.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional, Tuple, Union, Dict, Any
 from functools import cached_property
 
@@ -38,7 +38,7 @@ class Config(BaseConfig):
     model_name: str = "conditional_resnet"
     
     # Hierarchical configuration structure
-    config: dict = field(default_factory=lambda: {
+    config: FrozenDict = field(default_factory=lambda: FrozenDict({
         "model_type": "vanilla",  # Options: "vanilla", "geometric", "potential", "natural"
         "network_type": "mlp",  # Options: "mlp", "bilinear", "convex"
         "latent_shape": "NA",  # Will be set based on z_dim
@@ -50,7 +50,7 @@ class Config(BaseConfig):
         "dropout_rate": 0.1,
         "activation_fn": "swish",
         "use_batch_norm": False,
-    })
+    }))
 
 
 ########  CRN CLASSES AVAILABLE   ###########
@@ -96,27 +96,31 @@ def create_conditional_resnet(config_dict: Union[Dict[str, Any], FrozenDict], la
     if output_shape is None:
         output_shape = latent_shape
     
-    # Create config with proper shapes and all necessary fields
-    config = Config.with_shapes(
-        latent_shape=latent_shape,
-        output_shape=output_shape,
-        input_shape=input_shape
-    )
+    # Create config with default values
+    config = Config()
     
-    # Add missing fields that CRN classes need using append
+    # Merge in shapes
+    shape_updates = {
+        "latent_shape": latent_shape,
+        "output_shape": output_shape,
+        "input_shape": input_shape
+    }
+    config = replace(config, config=config.merge_frozen_dict('config', shape_updates))
+    
+    # Add missing fields that CRN classes need (convex network)
     if network_type == "convex":
         additional_fields = {
             "use_bias": True,
             "use_projection": False
         }
-        config = config.append(additional_fields)
+        config = replace(config, config=config.merge_frozen_dict('config', additional_fields))
     
     # Update with additional parameters from config_dict (excluding model_type and network_type)
     resnet_config = {k: v for k, v in final_config.items() if k not in ["model_type", "network_type"]}
-    final_config_obj = config.update_config(resnet_config)
+    config = replace(config, config=config.merge_frozen_dict('config', resnet_config))
     
     # Filter out model_type and network_type from the final config before passing to CRN classes
-    crn_config = {k: v for k, v in final_config_obj.config.items() if k not in ["model_type", "network_type"]}
+    crn_config = {k: v for k, v in config.config.items() if k not in ["model_type", "network_type"]}
     
     # Create the base ResNet
     if network_type == "mlp":

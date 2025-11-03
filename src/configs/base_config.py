@@ -2,69 +2,44 @@
 Lightweight base configuration utilities for frozen dataclasses.
 
 This module provides the essential functionality for working with frozen dataclasses
-in JAX/Flax applications, focusing on the ability to create updated configs with
-modified values while maintaining immutability and hashability.
+in JAX/Flax applications, focusing on the ability to merge updates into FrozenDict
+fields while maintaining immutability and hashability.
 
 Usage Examples:
-    # Basic usage with a config class
+    # Basic usage with FrozenDict fields
     @dataclass(frozen=True)
     class MyConfig(BaseConfig):
         model_name: str = "my_model"
-        config: dict = field(default_factory=lambda: {
+        main: FrozenDict = field(default_factory=lambda: FrozenDict({
             "dropout_rate": 0.1,
-            "encoder_config": {
+            "encoder": FrozenDict({
                 "dropout_rate": 0.1,
                 "hidden_dims": (64, 32)
-            }
-        })
+            })
+        }))
     
     # Create config instance
     config = MyConfig()
     
-    # Clean interface for config dict updates
-    new_config = config.update_config({"dropout_rate": 0.3})
-    new_config = config.update_config({
-        "encoder_config": {
-            "dropout_rate": 0.5  # Only updates encoder dropout
+    # Merge updates into FrozenDict fields
+    from dataclasses import replace
+    updated_main = config.merge_frozen_dict('main', {
+        "dropout_rate": 0.3,
+        "encoder": {
+            "dropout_rate": 0.5  # Recursively merges nested FrozenDicts
         }
     })
+    new_config = replace(config, main=updated_main)
     
-    # Update multiple entries in the same nested path
-    new_config = config.update_config({
-        "encoder_config": {
-            "dropout_rate": 0.4,
-            "hidden_dims": (128, 64),
-            "activation": "swish"  # Updates multiple fields in encoder_config
-        }
-    })
-    
-    # Add new fields to config
-    new_config = config.append({"new_param": 42})
-    new_config = config.append({
-        "new_nested": {
-            "sub_param": "value"
-        }
-    })
-    
-    # Multiple config updates at once (mixed levels)
-    new_config = config.update_config({
-        "dropout_rate": 0.2,
-        "encoder_config": {
-            "dropout_rate": 0.4,
-            "hidden_dims": (128, 64)  # Updates both dropout and hidden_dims
-        }
-    })
-    
-    # Error handling - invalid keys raise KeyError with helpful messages
-    try:
-        config.update_config({"invalid_key": "value"})
-    except KeyError as e:
-        print(f"Error: {e}")  # Shows available config keys
+    # Multiple field updates
+    updated_main = config.merge_frozen_dict('main', {"dropout_rate": 0.2})
+    new_config = replace(config, main=updated_main)
 """
 
-from dataclasses import dataclass, fields, replace
-from typing import Dict, Any, TypeVar, Type
+from dataclasses import dataclass, fields
+from typing import Dict, Any, TypeVar, Union
 import copy
+from flax.core import FrozenDict
 
 
 T = TypeVar('T', bound='BaseConfig')
@@ -84,205 +59,101 @@ class BaseConfig:
     # === MODEL IDENTIFICATION ===
     model_name: str = "base_model_network"
     
-    def _deep_merge_dicts(self, base_dict: dict, update_dict: dict, path: str = "") -> dict:
+    def merge_frozen_dict(self, field_name: str, updates: Union[FrozenDict, dict]) -> FrozenDict:
         """
-        Recursively merge update_dict into base_dict, creating a new dict.
-        Validates that all keys in update_dict exist in base_dict.
-
-        Args:
-            base_dict: The base dictionary to merge into
-            update_dict: The dictionary with updates to apply
-            path: Current path for error reporting
-
-        Returns:
-            New dictionary with merged values
-
-        Raises:
-            KeyError: If a key in update_dict doesn't exist in base_dict
-        """
-        result = copy.deepcopy(base_dict)
+        Merge updates into a FrozenDict field of this config, creating a new FrozenDict.
+        Always returns a FrozenDict for consistency.
         
-        for key, value in update_dict.items():
-            current_path = f"{path}.{key}" if path else key
+        Args:
+            field_name: Name of the field (e.g., 'main', 'crn', 'encoder', 'decoder')
+            updates: FrozenDict or dict with updates to apply to the field
             
-            if key not in result:
-                raise KeyError(f"Key '{current_path}' not found in config. Available keys: {list(result.keys())}. Use append() to add new fields.")
+        Returns:
+            New FrozenDict with merged values
             
-            if isinstance(result[key], dict) and isinstance(value, dict):
-                # Both are dicts, merge recursively
-                result[key] = self._deep_merge_dicts(result[key], value, current_path)
+        Raises:
+            AttributeError: If the field doesn't exist on this config
+        """
+        # Get the base from self
+        if not hasattr(self, field_name):
+            raise AttributeError(f"{self.__class__.__name__} has no field '{field_name}'")
+        
+        base = getattr(self, field_name)
+        
+        # Convert to dict for merging
+        if isinstance(base, FrozenDict):
+            result = dict(base)
+        else:
+            result = copy.deepcopy(base)
+        
+        # Convert updates to dict if needed
+        if isinstance(updates, FrozenDict):
+            updates_dict = dict(updates)
+        else:
+            updates_dict = updates
+        
+        # Merge updates into result
+        for key, value in updates_dict.items():
+            if key in result and isinstance(result[key], (FrozenDict, dict)) and isinstance(value, (FrozenDict, dict)):
+                # Recursively merge nested FrozenDicts/dicts
+                # Temporarily set the field to access it in recursion
+                temp_field = result[key]
+                if isinstance(temp_field, FrozenDict):
+                    result[key] = self.merge_frozen_dict_impl(temp_field, value)
+                else:
+                    result[key] = self.merge_frozen_dict_impl(temp_field, value)
             else:
-                # Replace the value
-                result[key] = copy.deepcopy(value)
+                # Replace or add the value
+                if isinstance(value, FrozenDict):
+                    result[key] = dict(value)  # Convert FrozenDict to dict for merging
+                elif isinstance(value, dict):
+                    result[key] = copy.deepcopy(value)
+                else:
+                    result[key] = value
         
-        return result
+        # Always return FrozenDict
+        return FrozenDict(result)
     
-    def update_config(self: T, updates: Dict[str, Any]) -> T:
+    def merge_frozen_dict_impl(self, base: Union[FrozenDict, dict], updates: Union[FrozenDict, dict]) -> FrozenDict:
         """
-        Create a new config instance with updated values in the config dictionary.
-
-        Args:
-            updates: Dictionary of config keys and new values to update.
-                    Supports nested updates by providing nested dictionaries.
-
-        Returns:
-            New config instance with updated config values
-
-        Raises:
-            KeyError: If any key in updates doesn't exist in the config dict
-            TypeError: If updates is not a dictionary
-            AttributeError: If the config class doesn't have a 'config' field
-
-        Example:
-            config = MyConfig(model_name="test", config={"dropout_rate": 0.1, "encoder": {"dim": 64}})
-            new_config = config.update_config({
-                "dropout_rate": 0.2,
-                "encoder": {"dim": 128}  # This will merge with existing encoder dict
-            })
-            # Result: MyConfig(model_name="test", config={"dropout_rate": 0.2, "encoder": {"dim": 128}})
-        """
-        if not isinstance(updates, dict):
-            raise TypeError(f"Expected updates to be a dictionary, got {type(updates).__name__}")
-
-        if not updates:
-            return self
-
-        # Check if config field exists
-        if not hasattr(self, 'config'):
-            raise AttributeError("Config class must have a 'config' field to use update_config()")
-
-        # Get current field values
-        current_values = {}
-        for field_info in fields(self):
-            current_values[field_info.name] = getattr(self, field_info.name)
-
-        # Apply updates to the config dict recursively with validation
-        updated_config = self._deep_merge_dicts(current_values['config'], updates)
-        current_values['config'] = updated_config
-
-        # Create new instance with updated values
-        return replace(self, **current_values)
-
-    def append(self: T, new_fields: Dict[str, Any]) -> T:
-        """
-        Create a new config instance with new fields added to the config dictionary.
+        Internal helper method to merge updates into a base FrozenDict/dict.
+        This is used recursively for nested merging.
         
-        Unlike update_config(), this method allows adding new keys that don't exist
-        in the current config. Supports nested additions by providing nested dictionaries.
-
         Args:
-            new_fields: Dictionary of new field names and values to add.
-                       Supports nested additions by providing nested dictionaries.
-
+            base: Base FrozenDict or dict to merge into
+            updates: FrozenDict or dict with updates to apply
+            
         Returns:
-            New config instance with added fields
-
-        Raises:
-            TypeError: If new_fields is not a dictionary
-            AttributeError: If the config class doesn't have a 'config' field
-
-        Example:
-            config = MyConfig(model_name="test", config={"dropout_rate": 0.1})
-            new_config = config.append({
-                "new_param": 42,
-                "new_nested": {
-                    "sub_param": "value"
-                }
-            })
-            # Result: MyConfig(model_name="test", config={
-            #     "dropout_rate": 0.1,
-            #     "new_param": 42,
-            #     "new_nested": {"sub_param": "value"}
-            # })
+            New FrozenDict with merged values
         """
-        if not isinstance(new_fields, dict):
-            raise TypeError(f"Expected new_fields to be a dictionary, got {type(new_fields).__name__}")
-
-        if not new_fields:
-            return self
-
-        # Check if config field exists
-        if not hasattr(self, 'config'):
-            raise AttributeError("Config class must have a 'config' field to use append()")
-
-        # Get current field values
-        current_values = {}
-        for field_info in fields(self):
-            current_values[field_info.name] = getattr(self, field_info.name)
-
-        # Deep merge new fields into config (allows adding new keys)
-        updated_config = self._deep_merge_dicts_append(current_values['config'], new_fields)
-        current_values['config'] = updated_config
-
-        # Create new instance with updated values
-        return replace(self, **current_values)
-
-    def _deep_merge_dicts_append(self, base_dict: dict, new_dict: dict, path: str = "") -> dict:
-        """
-        Recursively merge new_dict into base_dict, creating a new dict.
-        Unlike _deep_merge_dicts, this allows adding new keys that don't exist in base_dict.
-
-        Args:
-            base_dict: The base dictionary to merge into
-            new_dict: The dictionary with new fields to add
-            path: Current path for error reporting (unused in append mode)
-
-        Returns:
-            New dictionary with merged values
-        """
-        result = copy.deepcopy(base_dict)
+        # Convert to dict for merging
+        if isinstance(base, FrozenDict):
+            result = dict(base)
+        else:
+            result = copy.deepcopy(base)
         
-        for key, value in new_dict.items():
-            if isinstance(result.get(key), dict) and isinstance(value, dict):
-                # Both are dicts, merge recursively
-                result[key] = self._deep_merge_dicts_append(result[key], value, path)
+        # Convert updates to dict if needed
+        if isinstance(updates, FrozenDict):
+            updates_dict = dict(updates)
+        else:
+            updates_dict = updates
+        
+        # Merge updates into result
+        for key, value in updates_dict.items():
+            if key in result and isinstance(result[key], (FrozenDict, dict)) and isinstance(value, (FrozenDict, dict)):
+                # Recursively merge nested FrozenDicts/dicts
+                result[key] = self.merge_frozen_dict_impl(result[key], value)
             else:
-                # Add or replace the value
-                result[key] = copy.deepcopy(value)
+                # Replace or add the value
+                if isinstance(value, FrozenDict):
+                    result[key] = dict(value)  # Convert FrozenDict to dict for merging
+                elif isinstance(value, dict):
+                    result[key] = copy.deepcopy(value)
+                else:
+                    result[key] = value
         
-        return result
-    
-    @classmethod
-    def with_shapes(cls, latent_shape: tuple, output_shape: tuple, input_shape: tuple, **kwargs):
-        """
-        Create a Config with specific input, output, and x shapes.
-        
-        This is a convenience method for creating configs with the required shape parameters
-        for CRN modules. The shapes are added to the config dictionary.
-        
-        Note: This method requires the config class to have a 'config' field.
-        
-        Args:
-            latent_shape: Latent shape tuple (e.g., (8,) for 1D)
-            output_shape: Output shape tuple (e.g., (8,) for 1D)
-            input_shape: Conditional input shape tuple (e.g., (4,) for 1D)
-            **kwargs: Additional keyword arguments to pass to the config constructor
-            
-        Returns:
-            New config instance with the specified shapes
-            
-        Raises:
-            AttributeError: If the config class doesn't have a 'config' field
-        """
-        # Create a new instance with the provided kwargs
-        instance = cls(**kwargs)
-        
-        # Check if the instance has a config field
-        if not hasattr(instance, 'config'):
-            raise AttributeError(f"{cls.__name__} must have a 'config' field to use with_shapes()")
-        
-        shapes = {
-            "latent_shape": latent_shape,
-            "output_shape": output_shape,
-            "input_shape": input_shape
-        }
-        
-        # Try to update existing keys first, fall back to append if keys don't exist
-        try:
-            return instance.update_config(shapes)
-        except KeyError:
-            # If keys don't exist in config, use append to add them
-            return instance.append(shapes)
+        # Always return FrozenDict
+        return FrozenDict(result)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary using introspection."""

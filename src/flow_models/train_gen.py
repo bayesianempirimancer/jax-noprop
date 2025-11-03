@@ -23,13 +23,36 @@ from src.flow_models.df import VAEFlowConfig as DFConfig
 from src.flow_models.ct import VAEFlowConfig as CTConfig
 
 
-def load_two_moons_data(data_path: str = "data/two_moons_formatted.pkl"):
+def center_and_scale(data: jnp.ndarray, scale_factor: float = 2.0) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Center data by subtracting mean and scale by factor.
+    
+    Args:
+        data: Data to center and scale
+        scale_factor: Factor to multiply data after centering (default: 2.0)
+    
+    Returns:
+        transformed_data: Centered and scaled data
+        mean: Mean used for centering
+    """
+    mean = jnp.mean(data, axis=0, keepdims=True)
+    transformed = (data - mean) * scale_factor
+    return transformed, mean
+
+
+def load_two_moons_data(data_path: str = "data/two_moons_formatted.pkl", center_and_scale_x: bool = True, scale_factor: float = 2.0):
     with open(data_path, 'rb') as f:
         data = pickle.load(f)
     x_train = jnp.array(data['train']['x'])
     y_train = jnp.array(data['train']['y'])
     x_val = jnp.array(data['val']['x'])
     y_val = jnp.array(data['val']['y'])
+    
+    # Center and scale point cloud data (x) if requested
+    if center_and_scale_x:
+        x_train, x_mean = center_and_scale(x_train, scale_factor=scale_factor)
+        # Use training mean to center validation data, then scale
+        x_val = (x_val - x_mean) * scale_factor
+    
     # labels {-1,1} already
     return x_train, y_train, x_val, y_val
 
@@ -46,7 +69,9 @@ def build_config(model: str,
                  recon_weight: float,
                  noise_schedule: str,
                  noise_schedule_learnable: bool = False,
-                 use_snr_weight: bool = None):
+                 use_snr_weight: bool = None,
+                 encoder_type: str = None,
+                 decoder_type: str = None):
     # Default use_snr_weight based on model type
     if use_snr_weight is None:
         # Default to False for flow_matching, True for others
@@ -74,8 +99,15 @@ def build_config(model: str,
         'use_batch_norm': False,
         'dropout_rate': 0.1,
     })
+    # Determine encoder/decoder model types
+    # If latent_dim > 2, use linear encoder and identity decoder with linear type; otherwise use identity
+    latent_dim = latent_shape[0] if len(latent_shape) > 0 else 2
+    encoder_model_type = encoder_type if encoder_type is not None else ('linear' if latent_dim > 2 else 'identity')
+    decoder_model_type = decoder_type if decoder_type is not None else ('identity' if latent_dim > 2 else 'identity')
+    decoder_output_type = 'linear' if latent_dim > 2 else 'none'
+    
     enc = FrozenDict({
-        'model_type': 'identity',
+        'model_type': encoder_model_type,
         'encoder_type': 'deterministic',
         'input_shape': input_shape,
         'latent_shape': latent_shape,
@@ -84,8 +116,8 @@ def build_config(model: str,
         'dropout_rate': 0.0,
     })
     dec = FrozenDict({
-        'model_type': 'identity',
-        'decoder_type': 'none',
+        'model_type': decoder_model_type,
+        'decoder_type': decoder_output_type,
         'latent_shape': latent_shape,
         'output_shape': output_shape,
         'hidden_dims': (16, 16),
@@ -93,22 +125,18 @@ def build_config(model: str,
         'dropout_rate': 0.0,
     })
 
+    # Create noise schedule config for all models (default: linear, not learnable)
+    noise_schedule_config = FrozenDict({
+        'schedule_type': noise_schedule,
+        'learnable': noise_schedule_learnable,
+    })
+    
     if model == 'diffusion':
-        # Add noise schedule config for diffusion model
-        noise_schedule_config = FrozenDict({
-            'schedule_type': noise_schedule,
-            'learnable': noise_schedule_learnable,
-        })
         return DFConfig(main=main, noise_schedule=noise_schedule_config, crn=crn, encoder=enc, decoder=dec)
     if model == 'ct':
-        # Add noise schedule config for CT model
-        noise_schedule_config = FrozenDict({
-            'schedule_type': noise_schedule,
-            'learnable': noise_schedule_learnable,
-        })
         return CTConfig(main=main, noise_schedule=noise_schedule_config, crn=crn, encoder=enc, decoder=dec)
-    # Flow matching doesn't use noise schedule
-    return FMConfig(main=main, crn=crn, encoder=enc, decoder=dec)
+    # Flow matching also uses noise schedule (default: linear)
+    return FMConfig(main=main, noise_schedule=noise_schedule_config, crn=crn, encoder=enc, decoder=dec)
 
 
 def main():
@@ -237,6 +265,9 @@ def main():
         x_real = np.array(val_y[:num_gen])
         y_labels = np.array(cond_y)
 
+    # Compute Chamfer Distance on generated samples
+    chamfer_dist = trainer.compute_chamfer_distance(jnp.array(x_gen), jnp.array(x_real))
+    
     # Plot
     trainer.save_generation_plot(x_real=x_real, y_labels=y_labels, x_gen=x_gen, output_dir=args.save_dir)
     trainer.save_loss_trends_plot(history, output_dir=args.save_dir)
@@ -252,6 +283,9 @@ def main():
     )
 
     if args.verbose:
+        print(f"Final Chamfer Distance: {chamfer_dist:.6f}")
+        if history.get('val_chamfer_distances') and len(history['val_chamfer_distances']) > 0:
+            print(f"Final Validation Chamfer Distance: {history['val_chamfer_distances'][-1]:.6f}")
         print(f"Saved generation assets to {args.save_dir}")
         print(f"Saved loss trends plot to {args.save_dir}/loss_trends.png")
         print(f"Saved trajectory plot to {args.save_dir}/latent_trajectories.png")

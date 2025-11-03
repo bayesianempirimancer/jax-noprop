@@ -95,6 +95,7 @@ class GenerationTrainer:
             'val_flow_losses': [],
             'val_recon_losses': [],
             'val_reg_losses': [],
+            'val_chamfer_distances': [],
         }
 
         num_samples = y_data.shape[0]
@@ -125,6 +126,35 @@ class GenerationTrainer:
                 history['val_flow_losses'].append(val_metrics['flow_loss'])
                 history['val_recon_losses'].append(val_metrics['recon_loss'])
                 history['val_reg_losses'].append(val_metrics['reg_loss'])
+                
+                # Compute Chamfer Distance: generate samples and compare with real validation data
+                num_eval_samples = min(1000, vy.shape[0])  # Limit to 1000 samples for efficiency
+                self.rng, gen_rng = jr.split(self.rng)
+                if self.unconditional:
+                    # Unconditional generation
+                    x_gen_eval = self.unconditional_generate(
+                        batch_shape=(num_eval_samples,),
+                        num_steps=20,
+                        prng_key=gen_rng
+                    )
+                else:
+                    # Conditional generation: use validation conditions
+                    cond_eval = vx[:num_eval_samples] if vx is not None else None
+                    if cond_eval is None:
+                        x_gen_eval = self.unconditional_generate(
+                            batch_shape=(num_eval_samples,),
+                            num_steps=20,
+                            prng_key=gen_rng
+                        )
+                    else:
+                        x_gen_eval = self.conditional_generate(
+                            cond_eval,
+                            num_steps=20,
+                            prng_key=gen_rng
+                        )
+                x_real_eval = vy[:num_eval_samples]
+                chamfer_dist = self.compute_chamfer_distance(x_gen_eval, x_real_eval)
+                history['val_chamfer_distances'].append(chamfer_dist)
 
         return history
 
@@ -159,6 +189,56 @@ class GenerationTrainer:
                 metrics_sum[key] += float(metrics.get(key, 0.0))
             steps += 1
         return {key: val / max(steps, 1) for key, val in metrics_sum.items()}
+
+    def compute_chamfer_distance(self, generated_samples: jnp.ndarray, real_samples: jnp.ndarray) -> float:
+        """
+        Compute Chamfer Distance between generated and real point clouds.
+        
+        Chamfer Distance measures the average distance from each generated point to its
+        nearest neighbor in the real data, and from each real point to its nearest neighbor
+        in the generated data.
+        
+        Args:
+            generated_samples: Generated samples [num_gen, feature_dim]
+            real_samples: Real samples [num_real, feature_dim]
+            
+        Returns:
+            Chamfer Distance (scalar), or float('inf') if generation failed (NaN/Inf present)
+        """
+        # Check for NaN or Inf in generated samples - indicates generation failure
+        gen_has_invalid = jnp.any(~jnp.isfinite(generated_samples))
+        real_has_invalid = jnp.any(~jnp.isfinite(real_samples))
+        
+        if gen_has_invalid or real_has_invalid:
+            # Return inf to indicate failure (we want to minimize, so inf is worst case)
+            return float('inf')
+        
+        # Compute pairwise squared distances: [num_gen, num_real]
+        # ||g_i - r_j||^2 = ||g_i||^2 - 2*g_i*r_j + ||r_j||^2
+        gen_norm_sq = jnp.sum(generated_samples ** 2, axis=1, keepdims=True)  # [num_gen, 1]
+        real_norm_sq = jnp.sum(real_samples ** 2, axis=1)  # [num_real,]
+        dot_product = jnp.dot(generated_samples, real_samples.T)  # [num_gen, num_real]
+        pairwise_dist_sq = gen_norm_sq - 2 * dot_product + real_norm_sq  # [num_gen, num_real]
+        
+        # Check for negative values due to numerical errors and clip
+        pairwise_dist_sq = jnp.maximum(pairwise_dist_sq, 0.0)
+        
+        # Distance from each generated point to nearest real point
+        min_dist_gen_to_real = jnp.sqrt(jnp.min(pairwise_dist_sq, axis=1))  # [num_gen,]
+        chamfer_gen_to_real = jnp.mean(min_dist_gen_to_real)
+        
+        # Distance from each real point to nearest generated point
+        min_dist_real_to_gen = jnp.sqrt(jnp.min(pairwise_dist_sq, axis=0))  # [num_real,]
+        chamfer_real_to_gen = jnp.mean(min_dist_real_to_gen)
+        
+        # Bidirectional Chamfer Distance (average of both directions)
+        chamfer_distance = (chamfer_gen_to_real + chamfer_real_to_gen) / 2.0
+        
+        # Final check for NaN/Inf (shouldn't happen now, but safety check)
+        if not jnp.isfinite(chamfer_distance):
+            return float('inf')
+        
+        return float(chamfer_distance)
 
     def conditional_generate(
         self,
@@ -241,7 +321,12 @@ class GenerationTrainer:
         import matplotlib.pyplot as plt
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        # Check if we have Chamfer Distance to determine subplot layout
+        has_chamfer = history.get('val_chamfer_distances') and len(history['val_chamfer_distances']) > 0
+        if has_chamfer:
+            fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        else:
+            fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle(f'Loss Trends - {self.model_type.title()} Model', fontsize=16, fontweight='bold')
         
         epochs = range(len(history['train_losses']))
@@ -289,6 +374,17 @@ class GenerationTrainer:
         ax.set_ylabel('Loss')
         ax.legend()
         ax.grid(True, alpha=0.3)
+        
+        # Chamfer Distance (if available)
+        if has_chamfer:
+            ax = axes[1, 2]
+            chamfer_epochs = range(len(history['val_chamfer_distances']))
+            ax.plot(chamfer_epochs, history['val_chamfer_distances'], label='Val Chamfer', color='darkorange', linewidth=2, linestyle='--')
+            ax.set_title('Chamfer Distance', fontsize=12, fontweight='bold')
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel('Distance')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
         
         fig.tight_layout()
         fig.savefig(os.path.join(output_dir, 'loss_trends.png'), dpi=200, bbox_inches='tight')

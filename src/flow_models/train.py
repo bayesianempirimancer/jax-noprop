@@ -16,6 +16,8 @@ import pickle
 from datetime import datetime
 from pathlib import Path
 from flax.core import FrozenDict
+from dataclasses import replace
+from src.configs.base_config import BaseConfig
 
 # Import flow model configurations and trainer
 from .fm import VAEFlowConfig as FlowMatchingConfig
@@ -202,8 +204,20 @@ def create_vae_config(
     noise_schedule_learnable: bool = True,
     use_snr_weight: bool = True
 ):
-    """Create VAE flow configuration for two moons dataset."""
-    base_config = FrozenDict({
+    """Create VAE flow configuration by updating defaults from config classes."""
+    # Get the default config instance based on model type
+    if model_type == "diffusion":
+        config = DiffusionConfig()
+        integration_method = "midpoint"
+    elif model_type == "ct":
+        config = CTConfig()
+        integration_method = "midpoint"
+    else:  # flow_matching
+        config = FlowMatchingConfig()
+        integration_method = "euler"
+    
+    # Build updates to main config
+    main_updates = {
         "input_shape": input_shape,
         "output_shape": output_shape,
         "latent_shape": latent_shape,
@@ -211,89 +225,63 @@ def create_vae_config(
         "recon_weight": recon_weight,
         "reg_weight": reg_weight,
         "use_snr_weight": use_snr_weight,
-        "integration_method": "euler",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
-        "num_timesteps": 20,
+        "integration_method": integration_method,
         "sigma": 0.02,
-    })
+    }
+    if model_type == "diffusion":
+        main_updates["noise_schedule"] = noise_schedule  # Legacy support
+    elif model_type == "ct":
+        main_updates["noise_schedule"] = noise_schedule  # Legacy support
     
-    crn = FrozenDict({
+    # Build updates to CRN config
+    crn_updates = {
         "model_type": crn_type,
         "network_type": network_type,
         "hidden_dims": hidden_dims,
         "time_embed_dim": 32,
-        "time_embed_method": "sinusoidal",
-        "dropout_rate": 0.1,
-        "activation_fn": "swish",
-        "use_batch_norm": False
-    })
+    }
     
-    encoder = FrozenDict({
+    # Build updates to encoder config
+    encoder_updates = {
         "model_type": encoder_type,
-        "encoder_type": "deterministic",
         "input_shape": input_shape,
         "latent_shape": latent_shape,
-        "hidden_dims": (16,32,16,),  # Very simple architecture
-        "activation": "swish",
-        "dropout_rate": 0.0  # No dropout for simplicity
-    })
+        "hidden_dims": (16, 32, 16),
+        "dropout_rate": 0.0,
+    }
     
-    decoder = FrozenDict({
+    # Build updates to decoder config
+    decoder_updates = {
         "model_type": decoder_model,
         "decoder_type": decoder_type,
         "latent_shape": latent_shape,
         "output_shape": output_shape,
-        "hidden_dims": (16,32,16,),  # Very simple architecture
-        "activation": "swish",
-        "dropout_rate": 0.0  # No dropout for simplicity
+        "hidden_dims": (16, 32, 16),
+        "dropout_rate": 0.0,
+    }
+    
+    # Build noise schedule config (minimal, just schedule_type and learnable)
+    noise_schedule_config = FrozenDict({
+        "schedule_type": noise_schedule,
+        "learnable": noise_schedule_learnable,
     })
     
-    if model_type == "diffusion":
-        # Add diffusion-specific config with noise schedule
-        diffusion_config = FrozenDict({
-            **base_config,
-            "recon_loss_type": recon_loss_type,  # Use passed recon_loss_type
-            "reg_weight": 0.00,  # Add regularization for diffusion
-            "noise_schedule": noise_schedule,  # Legacy support
-        })
-        # New noise_schedule config for better control
-        noise_schedule_config = FrozenDict({
-            "schedule_type": noise_schedule,
-            "learnable": noise_schedule_learnable,  # Can be set to False to freeze parameters
-        })
-        return DiffusionConfig(
-            main=diffusion_config, 
-            noise_schedule=noise_schedule_config,
-            crn=crn,
-            encoder=encoder,
-            decoder=decoder
-        )
-    elif model_type == "ct":
-        # Add CT-specific config with noise schedule
-        ct_config = FrozenDict({
-            **base_config,
-            "recon_loss_type": recon_loss_type,
-            "reg_weight": reg_weight,
-            "noise_schedule": noise_schedule,  # Legacy support
-        })
-        # New noise_schedule config for better control
-        noise_schedule_config = FrozenDict({
-            "schedule_type": noise_schedule,
-            "learnable": noise_schedule_learnable,  # Can be set to False to freeze parameters
-        })
-        return CTConfig(
-            main=ct_config,
-            noise_schedule=noise_schedule_config,
-            crn=crn,
-            encoder=encoder,
-            decoder=decoder
-        )
-    else:  # flow_matching
-        return FlowMatchingConfig(
-            main=base_config, 
-            crn=crn,
-            encoder=encoder,
-            decoder=decoder
-        )
+    # Merge all updates with defaults using merge_frozen_dict
+    # The method merges updates into the config's fields
+    updated_main = config.merge_frozen_dict('main', main_updates)
+    updated_crn = config.merge_frozen_dict('crn', crn_updates)
+    updated_encoder = config.merge_frozen_dict('encoder', encoder_updates)
+    updated_decoder = config.merge_frozen_dict('decoder', decoder_updates)
+    
+    # Create new config instance with updated values
+    return replace(
+        config,
+        main=updated_main,
+        crn=updated_crn,
+        encoder=updated_encoder,
+        decoder=updated_decoder,
+        noise_schedule=noise_schedule_config
+    )
 
 
 def main():
