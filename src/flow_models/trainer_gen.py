@@ -65,9 +65,23 @@ class GenerationTrainer:
         self.rng, train_rng = jr.split(self.rng)
         # For unconditional generation, pass None for x_batch
         x_input = None if (self.unconditional or x_batch is None) else x_batch
-        self.params, self.opt_state, loss, metrics = self.model.train_step(
-            self.params, x_input, y_batch, self.opt_state, self.optimizer, train_rng, training=use_dropout
-        )
+        
+        # Use dropout-free train step when dropout is disabled for efficiency
+        if use_dropout:
+            self.params, self.opt_state, loss, metrics = self.model.train_step(
+                self.params, x_input, y_batch, self.opt_state, self.optimizer, train_rng, training=True
+            )
+        else:
+            # Use the optimized dropout-free method
+            if hasattr(self.model, 'train_step_without_dropout'):
+                self.params, self.opt_state, loss, metrics = self.model.train_step_without_dropout(
+                    self.params, x_input, y_batch, self.opt_state, self.optimizer, train_rng
+                )
+            else:
+                # Fallback to regular train_step with training=False
+                self.params, self.opt_state, loss, metrics = self.model.train_step(
+                    self.params, x_input, y_batch, self.opt_state, self.optimizer, train_rng, training=False
+                )
         return metrics
 
     def train(

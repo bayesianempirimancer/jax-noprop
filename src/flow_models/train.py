@@ -342,7 +342,7 @@ def main():
                         help='Reconstruction loss type')
     parser.add_argument('--reg_weight', type=float, default=0.0,
                         help='Regularization loss weight')
-    parser.add_argument('--noise_schedule', type=str, default='linear',
+    parser.add_argument('--noise_schedule', type=str, default='exponential',
                         choices=['linear', 'cosine', 'sigmoid', 'exponential', 'cauchy', 'laplace', 'logistic', 'quadratic', 'polynomial', 'monotonic_nn', 'learnable', 'network'],
                         help='Noise schedule for CT model')
     parser.add_argument('--noise_schedule_learnable', action='store_true', default=True,

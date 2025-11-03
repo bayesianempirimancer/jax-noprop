@@ -49,9 +49,9 @@ class VAEFlowConfig(BaseConfig):
     }))
     
     noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "schedule_type": "linear",  # Type of schedule
-        "learnable": True,  # Whether schedule parameters are learnable (False uses stop_gradient)
-        "hidden_dims": (64, 64),  # Hidden dimensions for NoiseScheduleNetwork schedule
+        "schedule_type": "exponential",  # Type of schedule (linear, exponential, cosine, sigmoid, cauchy, laplace, logistic, quadratic, polynomial, monotonic_nn, learnable, network)
+        "learnable": False,  # Whether schedule parameters are learnable (False uses stop_gradient)
+        "hidden_dims": (32, 32),  # Hidden dimensions for NoiseScheduleNetwork schedule
         # Comprehensive default parameters for all schedules (common naming convention)
         "default_params": FrozenDict({
             # Linear, Exponential, Cauchy, Laplace schedules
@@ -77,8 +77,8 @@ class VAEFlowConfig(BaseConfig):
     crn: FrozenDict = field(default_factory=lambda: FrozenDict({
         "model_type": "vanilla", # Options: "vanilla", "geometric", "potential", "natural"
         "network_type": "mlp", # Options: "mlp", "bilinear", "convex"
-        "hidden_dims": (64, 64, 64),
-        "time_embed_dim": 64,
+        "hidden_dims": (32, 32, 32, 32, 32),
+        "time_embed_dim": 32,
         "time_embed_method": "sinusoidal",
         "activation_fn": "swish",
         "use_batch_norm": False,
@@ -90,7 +90,7 @@ class VAEFlowConfig(BaseConfig):
         "encoder_type": "deterministic",  # Options: "deterministic", "normal", 
         "input_shape": "NA",  # Will be set from main config if not specified
         "latent_shape": "NA",
-        "hidden_dims": (8,),
+        "hidden_dims": (16,16),
         "activation": "swish",
         "dropout_rate": 0.1,
     }))
@@ -100,7 +100,7 @@ class VAEFlowConfig(BaseConfig):
         "decoder_type": "none", # Options: "linear", "softmax", "none"
         "latent_shape": "NA",  # Will be set from main config if not specified
         "output_shape": "NA",
-        "hidden_dims": (64, 32, 16),
+        "hidden_dims": (32, 16,),
         "activation": "swish",
         "dropout_rate": 0.1,
     }))

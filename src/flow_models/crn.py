@@ -23,6 +23,7 @@ from src.layers.concatsquash import ConcatSquash
 from src.layers.convex import ConvexResNetBivariate
 
 from src.utils.activation_utils import get_activation_function
+from src.flow_models.crn_seq import TransformerSeq2SeqConditionalResnet
 
 
 
@@ -61,6 +62,7 @@ def get_crn_class(crn_type: str):
         'mlp': ConditionalResnet_MLP,
         'bilinear': BilinearConditionalResnet,
         'convex': ConvexConditionalResnet,
+        'transformer_seq2seq': TransformerSeq2SeqConditionalResnet,
     }
 
     if crn_type not in CRN_CLASSES:
@@ -129,8 +131,10 @@ def create_conditional_resnet(config_dict: Union[Dict[str, Any], FrozenDict], la
         base_resnet = ConvexConditionalResnet(**crn_config)
     elif network_type == "bilinear":
         base_resnet = BilinearConditionalResnet(**crn_config)
+    elif network_type == "transformer_seq2seq":
+        base_resnet = TransformerSeq2SeqConditionalResnet(**crn_config)
     else:
-        raise ValueError(f"Unknown network_type: {network_type}. Supported types: mlp, bilinear, convex")
+        raise ValueError(f"Unknown network_type: {network_type}. Supported types: mlp, bilinear, convex, transformer_seq2seq")
     
     # Apply wrapper if specified
     if model_type == "vanilla":
@@ -558,6 +562,4 @@ class ConvexConditionalResnet(nn.Module):
         # 4. output projection to match desired output dimension
         output = nn.Dense(self.output_dim, kernel_init=jax.nn.initializers.xavier_normal())(z)
         return output.reshape(batch_shape + self.output_shape)
-
-
 

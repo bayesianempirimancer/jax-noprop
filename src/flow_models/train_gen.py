@@ -71,7 +71,8 @@ def build_config(model: str,
                  noise_schedule_learnable: bool = False,
                  use_snr_weight: bool = None,
                  encoder_type: str = None,
-                 decoder_type: str = None):
+                 decoder_type: str = None,
+                 decoder_model_type: str = None):
     # Default use_snr_weight based on model type
     if use_snr_weight is None:
         # Default to False for flow_matching, True for others
@@ -93,25 +94,25 @@ def build_config(model: str,
         'model_type': crn_type,
         'network_type': network_type,
         'hidden_dims': tuple(hidden_dims),
-        'time_embed_dim': 64,
+        'time_embed_dim': 32,
         'time_embed_method': 'sinusoidal',
         'activation_fn': 'swish',
         'use_batch_norm': False,
-        'dropout_rate': 0.1,
+        'dropout_rate': 0.0,
     })
     # Determine encoder/decoder model types
     # If latent_dim > 2, use linear encoder and identity decoder with linear type; otherwise use identity
     latent_dim = latent_shape[0] if len(latent_shape) > 0 else 2
     encoder_model_type = encoder_type if encoder_type is not None else ('linear' if latent_dim > 2 else 'identity')
-    decoder_model_type = decoder_type if decoder_type is not None else ('identity' if latent_dim > 2 else 'identity')
-    decoder_output_type = 'linear' if latent_dim > 2 else 'none'
+    decoder_model_type = decoder_model_type if decoder_model_type is not None else ('identity' if latent_dim > 2 else 'identity')
+    decoder_output_type = decoder_type if decoder_type is not None else ('linear' if latent_dim > 2 else 'none')
     
     enc = FrozenDict({
         'model_type': encoder_model_type,
         'encoder_type': 'deterministic',
         'input_shape': input_shape,
         'latent_shape': latent_shape,
-        'hidden_dims': (8,),
+        'hidden_dims': (16,16),
         'activation': 'swish',
         'dropout_rate': 0.0,
     })
@@ -120,7 +121,7 @@ def build_config(model: str,
         'decoder_type': decoder_output_type,
         'latent_shape': latent_shape,
         'output_shape': output_shape,
-        'hidden_dims': (16, 16),
+        'hidden_dims': (32, 16),
         'activation': 'swish',
         'dropout_rate': 0.0,
     })
@@ -150,6 +151,8 @@ def main():
     parser.add_argument('--network_type', type=str, default='mlp')
     parser.add_argument('--hidden_dims', type=int, nargs='+', default=[32, 32, 32, 32, 32, 32])
     parser.add_argument('--num_epochs', type=int, default=50)
+    parser.add_argument('--dropout_epochs', type=int, default=None,
+                        help='Number of epochs to use dropout. If None, defaults to num_epochs (dropout for all epochs)')
     parser.add_argument('--batch_size', type=int, default=256)
     parser.add_argument('--learning_rate', type=float, default=1e-3)
     parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd'])
@@ -160,13 +163,22 @@ def main():
     parser.add_argument('--no_snr_weight', dest='use_snr_weight', action='store_const', const=False,
                         help='Disable SNR weighting for reconstruction loss')
     parser.add_argument('--reg_weight', type=float, default=0.0)
-    parser.add_argument('--noise_schedule', type=str, default='linear',
+    parser.add_argument('--noise_schedule', type=str, default='exponential',
                         choices=['linear', 'cosine', 'sigmoid', 'exponential', 'cauchy', 'laplace', 'logistic', 'quadratic', 'polynomial', 'monotonic_nn', 'learnable', 'network'],
                         help='Noise schedule for CT and diffusion models')
     parser.add_argument('--noise_schedule_learnable', action='store_const', const=True, default=False,
                         help='Make noise schedule parameters learnable (default: False)')
     parser.add_argument('--noise_schedule_fixed', dest='noise_schedule_learnable', action='store_const', const=False,
                         help='Freeze noise schedule parameters (default: False)')
+    parser.add_argument('--encoder_model_type', type=str, default=None,
+                        choices=['mlp', 'mlp_normal', 'resnet', 'resnet_normal', 'identity', 'linear'],
+                        help='Encoder model type. If None, determined automatically based on latent_dim.')
+    parser.add_argument('--decoder_model_type', type=str, default=None,
+                        choices=['mlp', 'resnet', 'identity'],
+                        help='Decoder model type. If None, determined automatically based on latent_dim.')
+    parser.add_argument('--decoder_type', type=str, default=None,
+                        choices=['linear', 'softmax', 'none'],
+                        help='Decoder output type (linear transformation, softmax, or none). If None, determined automatically based on latent_dim.')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--save_dir', type=str, default=None)
     parser.add_argument('--verbose', action='store_true')
@@ -203,6 +215,9 @@ def main():
         noise_schedule=args.noise_schedule,
         noise_schedule_learnable=args.noise_schedule_learnable,
         use_snr_weight=args.use_snr_weight,
+        encoder_type=args.encoder_model_type,
+        decoder_type=args.decoder_type,
+        decoder_model_type=args.decoder_model_type,
     )
 
     trainer = GenerationTrainer(
@@ -229,13 +244,16 @@ def main():
     train_x_input = None if args.unconditional else train_x
     val_x_input = None if args.unconditional else val_x
     
+    # Set dropout_epochs: if None, use num_epochs (all epochs), otherwise use specified value
+    dropout_epochs = args.dropout_epochs if args.dropout_epochs is not None else args.num_epochs
+    
     history = trainer.train(
         x_data=train_x_input,
         y_data=train_y,
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
         validation_data=(val_x_input, val_y),
-        dropout_epochs=0,
+        dropout_epochs=dropout_epochs,
         verbose=args.verbose,
     )
 

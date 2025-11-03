@@ -742,10 +742,12 @@ class CauchyNoiseSchedule(NoiseSchedule):
         delta_alpha = delta_fraction * delta_max
         alpha_bar_max = alpha_bar_min + delta_alpha  # Guaranteed to be in [alpha_bar_min, 0.999]
         
+        # Clamp t to slightly above 0 and below 1 for numerical stability
+        t_clamped = jnp.clip(t, 1e-7, 1.0 - 1e-7)
         # Optimized: cache 1/scale and 1/pi
         scale_inv = 1.0 / scale  # Cache 1/scale
         pi_inv = 1.0 / jnp.pi  # Cache 1/pi
-        normalized = (t - loc) * scale_inv  # More efficient than (t - loc) / scale
+        normalized = (t_clamped - loc) * scale_inv  # More efficient than (t - loc) / scale
         cdf_val = 0.5 + pi_inv * jnp.arctan(normalized)  # Cache CDF value
         alpha_bar_t = alpha_bar_min + delta_alpha * cdf_val
         return jnp.clip(alpha_bar_t, 0.001, 0.999)
@@ -787,10 +789,12 @@ class CauchyNoiseSchedule(NoiseSchedule):
         delta_alpha = delta_fraction * delta_max
         alpha_bar_max = alpha_bar_min + delta_alpha  # Guaranteed to be in [alpha_bar_min, 0.999]
         
+        # Clamp t to slightly above 0 and below 1 for numerical stability
+        t_clamped = jnp.clip(t, 1e-7, 1.0 - 1e-7)
         # Optimized: cache 1/scale and 1/pi
         scale_inv = 1.0 / scale  # Cache 1/scale
         pi_inv = 1.0 / jnp.pi  # Cache 1/pi
-        normalized = (t - loc) * scale_inv  # More efficient than (t - loc) / scale
+        normalized = (t_clamped - loc) * scale_inv  # More efficient than (t - loc) / scale
         normalized_sq = normalized * normalized  # Cache normalized^2
         cdf_val = 0.5 + pi_inv * jnp.arctan(normalized)  # Cache CDF value
         alpha_bar_t = alpha_bar_min + delta_alpha * cdf_val
@@ -883,9 +887,11 @@ class LaplaceNoiseSchedule(NoiseSchedule):
         delta_alpha = delta_fraction * delta_max
         alpha_bar_max = alpha_bar_min + delta_alpha  # Guaranteed to be in [alpha_bar_min, 0.999]
         
+        # Clamp t to slightly above 0 and below 1 for numerical stability
+        t_clamped = jnp.clip(t, 1e-7, 1.0 - 1e-7)
         # Optimized: cache 1/scale and compute normalized efficiently
         scale_inv = 1.0 / scale  # Cache 1/scale
-        normalized = (t - loc) * scale_inv  # More efficient than (t - loc) / scale
+        normalized = (t_clamped - loc) * scale_inv  # More efficient than (t - loc) / scale
         sign = jnp.sign(normalized)
         abs_val = jnp.abs(normalized)
         exp_neg_abs = jnp.exp(-abs_val)  # Cache exp(-abs_val)
@@ -930,9 +936,11 @@ class LaplaceNoiseSchedule(NoiseSchedule):
         delta_alpha = delta_fraction * delta_max
         alpha_bar_max = alpha_bar_min + delta_alpha  # Guaranteed to be in [alpha_bar_min, 0.999]
         
+        # Clamp t to slightly above 0 and below 1 for numerical stability
+        t_clamped = jnp.clip(t, 1e-7, 1.0 - 1e-7)
         # Optimized: cache 1/scale and compute normalized efficiently
         scale_inv = 1.0 / scale  # Cache 1/scale
-        normalized = (t - loc) * scale_inv  # More efficient than (t - loc) / scale
+        normalized = (t_clamped - loc) * scale_inv  # More efficient than (t - loc) / scale
         sign = jnp.sign(normalized)
         abs_val = jnp.abs(normalized)
         exp_neg_abs = jnp.exp(-abs_val)  # Cache exp(-abs_val)
@@ -1011,7 +1019,11 @@ class QuadraticNoiseSchedule(NoiseSchedule):
         alpha_bar_max = alpha_bar_min + delta_alpha  # Guaranteed to be in [alpha_bar_min, 0.999]
         
         # Quadratic: alpha_bar(t) = alpha_bar_min + (alpha_bar_max - alpha_bar_min) * t^2
-        alpha_bar_t = alpha_bar_min + (alpha_bar_max - alpha_bar_min) * t ** 2
+        # Clamp t to slightly above 0 and below 1 for numerical stability
+        t_clamped = jnp.clip(t, 1e-7, 1.0 - 1e-7)
+        t_squared = t_clamped * t_clamped  # t^2 in [0, 1]
+        alpha_bar_t = alpha_bar_min + (alpha_bar_max - alpha_bar_min) * t_squared
+        # Final clipping ensures alpha_bar_t in [0.001, 0.999] for numerical stability
         alpha_bar_t = jnp.clip(alpha_bar_t, 0.001, 0.999)
         return alpha_bar_t
     
@@ -1048,13 +1060,15 @@ class QuadraticNoiseSchedule(NoiseSchedule):
         alpha_bar_max = alpha_bar_min + delta_alpha  # Guaranteed to be in [alpha_bar_min, 0.999]
         
         # Quadratic: alpha_bar(t) = alpha_bar_min + delta_alpha * t^2
-        # Use t * t instead of t ** 2 for efficiency
-        t_squared = t * t
+        # Clamp t to [0, 1] to ensure t^2 is in [0, 1]
+        t_clamped = jnp.clip(t, 0.0, 1.0)
+        t_squared = t_clamped * t_clamped  # t^2 in [0, 1]
         alpha_bar_t = alpha_bar_min + delta_alpha * t_squared
+        # Final clipping ensures alpha_bar_t in [0.001, 0.999] for numerical stability
         alpha_bar_t = jnp.clip(alpha_bar_t, 0.001, 0.999)
         
-        # Derivative: d/dt [t^2] = 2*t
-        alpha_bar_prime_t = delta_alpha * 2.0 * t
+        # Derivative: d/dt [t^2] = 2*t (use clamped t for consistency)
+        alpha_bar_prime_t = delta_alpha * 2.0 * t_clamped
         
         # Compute gamma_prime efficiently
         alpha_bar_t_one_minus = alpha_bar_t * (1.0 - alpha_bar_t)
@@ -1134,8 +1148,11 @@ class PolynomialNoiseSchedule(NoiseSchedule):
         alpha_bar_max = alpha_bar_min + delta_alpha  # Guaranteed to be in [alpha_bar_min, 0.999]
         
         # Polynomial: alpha_bar(t) = alpha_bar_min + delta_alpha * t^power
-        t_power = t ** power
+        # Clamp t to slightly above 0 and below 1 for numerical stability
+        t_clamped = jnp.clip(t, 1e-7, 1.0 - 1e-7)
+        t_power = t_clamped ** power  # t^power in [0, 1] when t in [0, 1] and power >= 1
         alpha_bar_t = alpha_bar_min + delta_alpha * t_power
+        # Final clipping ensures alpha_bar_t in [0.001, 0.999] for numerical stability
         return jnp.clip(alpha_bar_t, 0.001, 0.999)
 
     @nn.compact
@@ -1174,13 +1191,17 @@ class PolynomialNoiseSchedule(NoiseSchedule):
         alpha_bar_max = alpha_bar_min + delta_alpha  # Guaranteed to be in [alpha_bar_min, 0.999]
         
         # Polynomial: alpha_bar(t) = alpha_bar_min + delta_alpha * t^power
-        t_power = t ** power
+        # Clamp t to slightly above 0 and below 1 for numerical stability
+        t_clamped = jnp.clip(t, 1e-7, 1.0 - 1e-7)
+        t_power = t_clamped ** power  # t^power in [0, 1] when t in [0, 1] and power >= 1
         alpha_bar_t = alpha_bar_min + delta_alpha * t_power
+        # Final clipping ensures alpha_bar_t in [0.001, 0.999] for numerical stability
         alpha_bar_t = jnp.clip(alpha_bar_t, 0.001, 0.999)
         
         # Derivative: d/dt [t^power] = power * t^(power-1)
+        # Use clamped t for derivative as well
         power_minus_one = power - 1.0
-        t_power_minus_one = t ** power_minus_one
+        t_power_minus_one = jnp.where(t_clamped > 0, t_clamped ** power_minus_one, 0.0)
         alpha_bar_prime_t = delta_alpha * power * t_power_minus_one
         
         # Compute gamma_prime efficiently
