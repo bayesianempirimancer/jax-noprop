@@ -34,12 +34,12 @@ def test_fixed_z_variable_x():
     output_shape = (z_seq_len, z_features)
     
     # Model configuration
-    # Note: z and x should already be embedded to model_dim
-    # So latent_shape and input_shape should be (seq_len, model_dim)
-    model_dim = 256
-    latent_shape = (z_seq_len, model_dim)  # Already embedded
-    input_shape = (x_seq_lengths[0], model_dim)  # Already embedded (will test variable length)
-    output_shape = (z_seq_len, model_dim)  # Output is also in model_dim
+    # Note: z and x should already be embedded to embed_dim
+    # So latent_shape and input_shape should be (seq_len, embed_dim)
+    embed_dim = 256
+    latent_shape = (z_seq_len, embed_dim)  # Already embedded
+    input_shape = (x_seq_lengths[0], embed_dim)  # Already embedded (will test variable length)
+    output_shape = (z_seq_len, embed_dim)  # Output is also in embed_dim
     
     model = TransformerSeq2SeqConditionalResnet(
         latent_shape=latent_shape,
@@ -58,7 +58,7 @@ def test_fixed_z_variable_x():
     
     print(f"\nModel configuration:")
     print(f"  z sequence shape: {latent_shape}")
-    print(f"  z model dim: {model.model_dim}")
+    print(f"  z embed dim: {model.embed_dim}")
     print(f"  output shape: {output_shape}")
     
     # Test with different x sequence lengths
@@ -70,14 +70,14 @@ def test_fixed_z_variable_x():
         print(f"{'='*60}")
         
         # Create fake inputs
-        # Note: z and x should already be embedded to model_dim
+        # Note: z and x should already be embedded to embed_dim
         key, z_key, x_key, t_key = jr.split(key, 4)
         
-        # z has fixed shape (batch, z_seq_len, model_dim) - already embedded
-        z = jr.normal(z_key, (batch_size, z_seq_len, model_dim))
+        # z has fixed shape (batch, z_seq_len, embed_dim) - already embedded
+        z = jr.normal(z_key, (batch_size, z_seq_len, embed_dim))
         
-        # x has variable shape (batch, x_seq_len, model_dim) - already embedded
-        x = jr.normal(x_key, (batch_size, x_seq_len, model_dim))
+        # x has variable shape (batch, x_seq_len, embed_dim) - already embedded
+        x = jr.normal(x_key, (batch_size, x_seq_len, embed_dim))
         
         # t is scalar or (batch,)
         t = jr.uniform(t_key, (batch_size,), minval=0.0, maxval=1.0)
@@ -109,7 +109,7 @@ def test_fixed_z_variable_x():
             
             # Use actual z and x tensors - x can have variable length
             z_for_test = z.reshape(batch_size, *latent_shape)
-            x_for_test = x  # Can have variable length (batch, x_seq_len, model_dim)
+            x_for_test = x  # Can have variable length (batch, x_seq_len, embed_dim)
             
             output = model.apply(params, z_for_test, x_for_test, t, training=False, rngs=rngs)
             print(f"  Output shape: {output.shape}")

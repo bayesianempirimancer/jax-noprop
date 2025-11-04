@@ -36,6 +36,7 @@ class VAEFlowConfig(BaseConfig):
         "sigma": 0.02,  # Noise level for flow matching
         "integration_method": "euler",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
                                            # Only use midpoint for diffusion model.  singularities at t=0 break forward integration.
+        "encode_x": False,  # Whether to encode x before passing to CRN (True for sequences, False for backward compatibility)
     }))
     
     noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
@@ -86,7 +87,7 @@ class VAEFlowConfig(BaseConfig):
     }))
     
     decoder: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "model_type": "identity", # Options: "mlp", "resnet", "identity"
+        "model_type": "identity", # Options: "mlp", "resnet", "identity", 'linear'
         "decoder_type": "none", # Options: "linear", "softmax", "none"
         "latent_shape": "NA",  # Will be set from main config if not specified
         "output_shape": "NA",
@@ -132,19 +133,19 @@ class VAE_flow(nn.Module):
         )
         
         # Initialize encoder and decoder
-        # Encoder input is output_shape (since it encodes y)
-        encoder_input_shape = self.config.main["output_shape"]
+        # Use shapes directly from encoder/decoder configs
+        # For sequences, these should be feature-only shapes (e.g., (2,) instead of (48, 2))
         self.encoder = create_encoder(
             self.config.encoder,
-            input_shape=encoder_input_shape,
-            latent_shape=self.z_shape
+            input_shape=self.config.encoder["input_shape"],
+            latent_shape=self.config.encoder["latent_shape"]
         )
         
         # Decoder maps from latent to output
         self.decoder = create_decoder(
             self.config.decoder,
-            latent_shape=self.z_shape,
-            output_shape=self.config.main["output_shape"]
+            latent_shape=self.config.decoder["latent_shape"],
+            output_shape=self.config.decoder["output_shape"]
         )
     
 
@@ -205,6 +206,11 @@ class VAE_flow(nn.Module):
         # Optimized: minimize broadcasting and avoid redundant operations
         t = jnp.asarray(t)
         z, x, t = self._broadcast_inputs(z, x, t)
+        
+        # For seq to seq models we must encode x in the same manner as y before passing to seq_crn
+        if self.config.main.get("encode_x", False) and x is not None:
+            x = self.encode(x, training)[0]
+        
         dz_dt = self.crn_model(z, x, t, training=training)            
         return dz_dt
 
@@ -324,21 +330,21 @@ class VAE_flow(nn.Module):
         y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})
 
         # Compute Lossess
-        reg_loss = jnp.sum(dz_dt ** 2, axis=tuple(range(-self.z_ndims, 0)))
+        reg_loss = jnp.mean(dz_dt ** 2, axis=tuple(range(-self.z_ndims, 0)))
         reg_loss = jnp.mean(snr_weight * reg_loss)
 
 #        dz_dt_target = self.lazy_flow(z_t, z_target, alpha_t, gamma_prime_t)
-        flow_loss = jnp.sum((dz_dt - diff_z)**2, axis=tuple(range(-self.z_ndims, 0)))
+        flow_loss = jnp.mean((dz_dt - diff_z)**2, axis=tuple(range(-self.z_ndims, 0)))
         flow_loss = jnp.mean(snr_weight * flow_loss)
 
-        reg_loss = jnp.sum(dz_dt**2, axis=tuple(range(-self.z_ndims, 0)))  # has batch_shape
+        reg_loss = jnp.mean(dz_dt**2, axis=tuple(range(-self.z_ndims, 0)))  # has batch_shape
         reg_loss = jnp.mean(snr_weight * reg_loss)
 
         recon_loss_type = self.config.main.get("recon_loss_type", "mse")
         if recon_loss_type == "cross_entropy":
-            recon_loss = jnp.sum(-y * jnp.log(y_pred + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
+            recon_loss = jnp.mean(-y * jnp.log(y_pred + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
         elif recon_loss_type == "mse":
-            recon_loss = jnp.sum((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
+            recon_loss = jnp.mean((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
         else:
             recon_loss = 0.0
         recon_loss = jnp.mean(self.lazy_target_snr(alpha_t, gamma_prime_t)*recon_loss)  # Average over batch dimension if needed        

@@ -19,7 +19,7 @@ class Config:
     """Configuration for decoder networks."""
     model_name: str = "decoder"
     config: dict = field(default_factory=lambda: {
-        "model_type": "mlp", # Options: "mlp", "resnet", "identity"
+        "model_type": "mlp", # Options: "mlp", "resnet", "identity", "linear"
         "decoder_type": "linear",  # Options: "linear", "softmax", "none"
         "input_shape": "NA",  # Will be set from main config if not specified
         "output_shape": "NA",
@@ -49,6 +49,7 @@ def get_decoder_class(decoder_type: str):
         'mlp': MLPDecoder,
         'resnet': ResNetDecoder,
         'identity': IdentityDecoder,
+        'linear': LinearDecoder,
     }
     
     if decoder_type not in DECODER_CLASSES:
@@ -226,3 +227,38 @@ class IdentityDecoder(nn.Module):
         return apply_output_transformation(output, decoder_type)
 
 
+class LinearDecoder(nn.Module):
+    """Linear decoder that applies a single Dense layer."""
+    config: dict
+    latent_shape: Tuple[int, ...]
+    output_shape: Tuple[int, ...]
+
+    @cached_property
+    def latent_dim(self) -> int:
+        total_dim = 1
+        for dim in self.latent_shape:
+            total_dim *= dim
+        return total_dim
+
+    @cached_property
+    def output_dim(self) -> int:
+        total_dim = 1
+        for dim in self.output_shape:
+            total_dim *= dim
+        return total_dim
+    
+    @nn.compact
+    def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+        # Flatten input
+        batch_shape = x.shape[:-len(self.latent_shape)]
+        x_flat = x.reshape(-1, self.latent_dim)
+        
+        # Apply linear transformation
+        output = nn.Dense(self.output_dim)(x_flat)
+        
+        # Reshape to output shape
+        output = output.reshape(batch_shape + self.output_shape)
+        
+        # Apply output transformation based on decoder type
+        decoder_type = self.config.get("decoder_type", "linear")
+        return apply_output_transformation(output, decoder_type)

@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 from functools import cached_property
 
 import jax.numpy as jnp
+import jax
 import flax.linen as nn
 
 from src.embeddings.time_embeddings import create_time_embedding
@@ -27,11 +28,14 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
     - x sequence is processed through encoder blocks (self-attention)
     - z sequence is processed through decoder blocks (self-attention + cross-attention to x)
     - Time embedding is integrated into the processing
+    - Positional embeddings (RoPE) are applied internally, with x positions relative to z
+    - Static features (x_static) are optionally embedded and appended to x as an additional timestep after positional embeddings
     
     Args:
-        latent_shape: Latent sequence shape tuple (e.g., (seq_len, model_dim)) - z is already embedded
-        output_shape: Output sequence shape tuple (e.g., (seq_len, model_dim)) - output is in model_dim
-        input_shape: Conditional input sequence shape tuple (e.g., (seq_len, model_dim)) - x is already embedded
+        latent_shape: Latent sequence shape tuple (e.g., (seq_len, 2)) - z is 2D (price, volume)
+        output_shape: Output sequence shape tuple (e.g., (seq_len, embed_dim)) - output is in embed_dim
+        input_shape: Conditional input sequence shape tuple (e.g., (seq_len, 2)) - x is 2D (price, volume)
+        embed_dim: Embedding dimension for transformer (default: 20)
         hidden_dims: Tuple of hidden layer dimensions for embeddings and MLPs
         time_embed_dim: Dimension of time embedding
         time_embed_method: Method for time embedding
@@ -42,10 +46,14 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         num_heads: Number of attention heads
         mlp_ratio: Ratio for MLP hidden dimension relative to model dimension
         qkv_bias: Whether to use bias in QKV projections
+        rope_base: Base for RoPE frequency calculation (default: 10000.0)
+        projection_seed: Random seed for 2D->embed_dim projection matrix (default: 42)
+        x_static_dim: Dimension of static features x_static (default: 0, meaning no static features)
     """
     latent_shape: Tuple[int, ...]
     input_shape: Tuple[int, ...]
     output_shape: Tuple[int, ...]
+    embed_dim: int = 20
     hidden_dims: Tuple[int, ...] = (256,)
     time_embed_dim: int = 64
     time_embed_method: str = "sinusoidal"
@@ -56,6 +64,9 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
     num_heads: int = 8
     mlp_ratio: float = 4.0
     qkv_bias: bool = True
+    rope_base: float = 10000.0
+    projection_seed: int = 42
+    x_static_dim: int = 0  # 0 means no static features
     
     @cached_property
     def latent_dim(self) -> int:
@@ -82,24 +93,59 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         return dim
     
     @cached_property
-    def model_dim(self) -> int:
-        """Model dimension (embedding dimension) for transformer."""
-        return self.hidden_dims[0] if len(self.hidden_dims) > 0 else 256
+    def input_feature_dim(self) -> int:
+        """Input feature dimension (2D for price, volume)."""
+        if len(self.latent_shape) >= 2:
+            return self.latent_shape[-1]
+        elif len(self.input_shape) >= 2:
+            return self.input_shape[-1]
+        else:
+            return 2  # Default: price, volume
     
     def setup(self):
         """Initialize all components of the model."""
         # Convert activation function string to callable
         activation_fn = get_activation_function(self.activation_fn)
         
+        # Projection from 2D (price, volume) to embed_dim
+        # Use fixed seed for reproducibility and later inversion
+        # Note: This is a fixed (non-learned) matrix, so we store it as a regular attribute
+        key = jax.random.PRNGKey(self.projection_seed)
+        projection_matrix = jax.random.normal(key, (self.input_feature_dim, self.embed_dim))
+        # Scale by 1/sqrt(embed_dim) to preserve variance
+        projection_matrix = projection_matrix * (1.0 / jnp.sqrt(float(self.embed_dim)))
+        self.projection_matrix = projection_matrix   # Could be learned
+        
+        # Static feature embedding (if enabled)
+        if self.x_static_dim > 0:
+            # MLP to embed x_static from x_static_dim to embed_dim
+            activation_fn = get_activation_function(self.activation_fn)
+            self.x_static_embed = Mlp(
+                hidden_features=int(self.embed_dim * self.mlp_ratio),
+                out_features=self.embed_dim,
+                act_layer=activation_fn,
+                dropout_rate=0.0,  # No dropout for static embedding
+                name='x_static_embed'
+            )
+        
         # Time embedding module
         self.time_embed = create_time_embedding(embed_dim=self.time_embed_dim, method=self.time_embed_method)
         
         # Time embedding projection
-        self.t_proj = nn.Dense(self.model_dim, name='t_proj')
+        self.t_proj = nn.Dense(self.embed_dim, name='t_proj')
+        
+        # Output projection: embed_dim -> 2D (to match latent_shape)
+        # Use pseudo-inverse of projection matrix for inverse projection
+        # W: [2, embed_dim], so W^T: [embed_dim, 2]
+        # Pseudo-inverse: (W^T @ W)^(-1) @ W^T, or simpler: W^T scaled
+        # For simplicity, use transpose and scale by 1/embed_dim to preserve scale
+        # Actually, we can learn this projection or use a fixed inverse
+        # For now, let's use a learned projection
+        self.output_proj = nn.Dense(self.input_feature_dim, name='output_proj')
         
         # Attention configurations
         self.attn_config = AttentionConfig(
-            dim=self.model_dim,
+            dim=self.embed_dim,
             num_heads=self.num_heads,
             qkv_bias=self.qkv_bias,
             attn_drop=self.dropout_rate,
@@ -107,7 +153,7 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         )
         
         self.cross_attn_config = CrossAttentionConfig(
-            dim=self.model_dim,
+            dim=self.embed_dim,
             num_heads=self.num_heads,
             qkv_bias=self.qkv_bias,
             attn_drop=self.dropout_rate,
@@ -120,8 +166,8 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         self.x_encoder_norms2 = [nn.LayerNorm(name=f'x_encoder_norm2_{i}') for i in range(self.num_layers)]
         self.x_encoder_mlps = [
             Mlp(
-                hidden_features=int(self.model_dim * self.mlp_ratio),
-                out_features=self.model_dim,
+                hidden_features=int(self.embed_dim * self.mlp_ratio),
+                out_features=self.embed_dim,
                 act_layer=activation_fn,
                 dropout_rate=self.dropout_rate,
                 name=f'x_encoder_mlp_{i}'
@@ -142,8 +188,8 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         self.z_mlp_norms = [nn.LayerNorm(name=f'z_mlp_norm_{i}') for i in range(self.num_layers)]
         self.z_mlps = [
             Mlp(
-                hidden_features=int(self.model_dim * self.mlp_ratio),
-                out_features=self.model_dim,
+                hidden_features=int(self.embed_dim * self.mlp_ratio),
+                out_features=self.embed_dim,
                 act_layer=activation_fn,
                 dropout_rate=self.dropout_rate,
                 name=f'z_mlp_{i}'
@@ -159,8 +205,8 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         self.x_mlp_norms = [nn.LayerNorm(name=f'x_mlp_norm_{i}') for i in range(self.num_layers)]
         self.x_mlps = [
             Mlp(
-                hidden_features=int(self.model_dim * self.mlp_ratio),
-                out_features=self.model_dim,
+                hidden_features=int(self.embed_dim * self.mlp_ratio),
+                out_features=self.embed_dim,
                 act_layer=activation_fn,
                 dropout_rate=self.dropout_rate,
                 name=f'x_mlp_{i}'
@@ -168,18 +214,70 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
             for i in range(self.num_layers)
         ]
     
+    def _apply_rope_1d(self, x: jnp.ndarray, position_offset: int = 0) -> jnp.ndarray:
+        """Apply 1D RoPE positional encoding to sequence data.
+        
+        Args:
+            x: Input sequences [batch, seq_len, embed_dim]
+            position_offset: Starting position offset (negative for x relative to z)
+            
+        Returns:
+            Sequences with RoPE applied [batch, seq_len, embed_dim]
+        """
+        batch_size, seq_len, embed_dim = x.shape
+        
+        # Create frequency tensor
+        inv_freq = 1.0 / (self.rope_base ** (jnp.arange(0, embed_dim, 2, dtype=jnp.float32) / embed_dim))
+        
+        # Create position tensor with offset
+        positions = jnp.arange(position_offset, position_offset + seq_len, dtype=jnp.float32)
+        
+        # Create angle tensor [seq_len, embed_dim//2]
+        angle = positions[:, None] * inv_freq[None, :]
+        
+        # Create RoPE encoding [seq_len, embed_dim]
+        rope_encoding = jnp.zeros((seq_len, embed_dim), dtype=x.dtype)
+        rope_encoding = rope_encoding.at[:, 0::2].set(jnp.sin(angle))
+        rope_encoding = rope_encoding.at[:, 1::2].set(jnp.cos(angle))
+        
+        # Normalize entire embedding vector to unit length
+        norms = jnp.linalg.norm(rope_encoding, axis=1, keepdims=True)
+        norms = jnp.maximum(norms, 1e-8)
+        rope_encoding = rope_encoding / norms
+        
+        # Apply RoPE by rotating pairs of dimensions
+        # Reshape to separate pairs
+        x_reshaped = x.reshape(batch_size, seq_len, embed_dim // 2, 2)
+        rope_reshaped = rope_encoding.reshape(seq_len, embed_dim // 2, 2)
+        
+        # Apply rotation: [cos, sin; -sin, cos] @ [x_i, x_{i+1}]
+        cos_vals = rope_reshaped[:, :, 1]  # cos components
+        sin_vals = rope_reshaped[:, :, 0]  # sin components
+        
+        # Rotation matrix: [cos, -sin; sin, cos]
+        x_rotated = jnp.stack([
+            x_reshaped[:, :, :, 0] * cos_vals[None, :, :] - x_reshaped[:, :, :, 1] * sin_vals[None, :, :],
+            x_reshaped[:, :, :, 0] * sin_vals[None, :, :] + x_reshaped[:, :, :, 1] * cos_vals[None, :, :]
+        ], axis=-1)
+        
+        return x_rotated.reshape(batch_size, seq_len, embed_dim)
+    
     @nn.compact
-    def __call__(self, z: jnp.ndarray, x: Optional[jnp.ndarray] = None, t: Optional[jnp.ndarray] = None, training: bool = True) -> jnp.ndarray:
+    def __call__(self, z: jnp.ndarray, x: Optional[jnp.ndarray] = None, t: Optional[jnp.ndarray] = None, 
+                 x_static: Optional[jnp.ndarray] = None, training: bool = True) -> jnp.ndarray:
         """Forward pass through sequence-to-sequence transformer.
         
         Args:
-            z: Current state sequence already embedded [batch_size, z_seq_len, model_dim] or [batch_size, *latent_shape]
-            x: Conditional input sequence already embedded [batch_size, x_seq_len, model_dim] or [batch_size, *input_shape] (optional)
+            z: Current state sequence in 2D format [batch_size, z_seq_len, 2] or [batch_size, *latent_shape]
+               where last dimension is (price, volume)
+            x: Conditional input sequence in 2D format [batch_size, x_seq_len, 2] or [batch_size, *input_shape] (optional)
+               where last dimension is (price, volume), variable length allowed
             t: Time values [batch_size] or scalar (optional)
+            x_static: Static features [batch_size, x_static_dim] or [batch_shape, x_static_dim] (optional, only used if x_static_dim > 0)
             training: Whether in training mode
             
         Returns:
-            Updated state sequence [batch_size, *output_shape]
+            Updated state sequence [batch_size, *output_shape] in embed_dim
         """
         # Handle broadcasting and determine batch shape
         batch_shape_z = z.shape[:-len(self.latent_shape)]
@@ -193,18 +291,29 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         if t is not None:
             t = jnp.asarray(t)
             batch_shape = jnp.broadcast_shapes(batch_shape, t.shape)
+        
+        if x_static is not None:
+            x_static = jnp.asarray(x_static)
+            # x_static shape should be (batch_shape, x_static_dim)
+            # Extract batch shape from x_static (everything except last dimension)
+            if x_static.ndim >= 1:
+                x_static_batch_shape = x_static.shape[:-1]
+                batch_shape = jnp.broadcast_shapes(batch_shape, x_static_batch_shape)
+            else:
+                raise ValueError(f"x_static must have shape (batch_shape, x_static_dim), got shape {x_static.shape}")
 
         z = jnp.broadcast_to(z, batch_shape + z.shape[-len(self.latent_shape):])
         
-        # z and x are already embedded to model_dim outside the CRN
-        # They should be in (batch, seq_len, model_dim) format or can be reshaped to that
+        # z and x are in 2D format (price, volume)
+        # Reshape to flatten batch for processing
+        z_flat_batch = z.reshape(-1, *self.latent_shape)
+        z_seq_len = self.latent_shape[-2] if len(self.latent_shape) >= 2 else self.latent_shape[0]
         
-        # Reshape z to (batch, seq_len, model_dim)
-        # Assuming latent_shape is (seq_len, model_dim) or just (seq_len,) if model_dim is inferred
-        z_ndims = len(self.latent_shape)
-        z_seq_len = self.latent_shape[-2]
-                
-        # Process x sequence if provided (already embedded, variable length)
+        # Project z from 2D to embed_dim: [batch, seq_len, 2] -> [batch, seq_len, embed_dim]
+        z_2d = z_flat_batch.reshape(-1, z_seq_len, self.input_feature_dim)
+        z_embed = jnp.dot(z_2d, self.projection_matrix)  # [batch, seq_len, embed_dim]
+        
+        # Process x sequence if provided (2D format, variable length)
         x_embed = None
         if x is not None:
             # Get actual shape dimensions (excluding batch)
@@ -217,20 +326,36 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
             # Get actual sequence length from input tensor (variable length)
             x_ndims = len(x_trailing_dims)
             if x_ndims >= 2:
-                # Actual sequence length from input tensor
                 x_seq_len = x_trailing_dims[-2]  # Variable length
-                # x is already embedded, last dim should be model_dim
-                x_embed = x_flat_batch.reshape(-1, x_seq_len, self.model_dim)
+                x_2d = x_flat_batch.reshape(-1, x_seq_len, self.input_feature_dim)
             else:
-                # Single dimension: treat as (seq_len,), assume model_dim
                 x_seq_len = x_trailing_dims[-1]
-                x_embed = x_flat_batch.reshape(-1, x_seq_len, self.model_dim)
+                x_2d = x_flat_batch.reshape(-1, x_seq_len, self.input_feature_dim)
+            
+            # Project x from 2D to embed_dim
+            x_embed = jnp.dot(x_2d, self.projection_matrix)  # [batch, seq_len, embed_dim]
         
-        # Reshape z to (batch, seq_len, model_dim)
-        z_ndims = len(self.latent_shape)
-        z_seq_len = self.latent_shape[-2] if z_ndims >= 2 else self.latent_shape[0]
-        z_flat_batch = z.reshape(-1, *self.latent_shape)
-        z_embed = z_flat_batch.reshape(-1, z_seq_len, self.model_dim)
+        # Apply RoPE positional encodings
+        # z starts at position 0
+        z_embed = self._apply_rope_1d(z_embed, position_offset=0)
+        
+        if x_embed is not None:
+            # x positions are relative to z (negative offsets)
+            # x_seq_len positions before z: positions [-x_seq_len, ..., -1]
+            x_embed = self._apply_rope_1d(x_embed, position_offset=-x_seq_len)
+        
+        # Apply static feature embeddings if enabled
+        if self.x_static_dim > 0 and x_static is not None:
+            # Flatten batch for processing
+            x_static_flat = x_static.reshape(-1, self.x_static_dim)  # [batch, x_static_dim]
+            # Embed x_static using MLP: [batch, x_static_dim] -> [batch, embed_dim]
+            x_static_emb = self.x_static_embed(x_static_flat, x_static_flat.shape[-1])  # [batch, embed_dim]
+            # Expand to sequence dimension and append to x_embed as if it were a part of the sequence
+            # x_static_emb: [batch, embed_dim] -> [batch, 1, embed_dim]
+            x_static_emb_expanded = x_static_emb[:, None, :]  # [batch, 1, embed_dim]
+            if x_embed is not None:
+                # Concatenate along sequence dimension (axis=-2): [batch, seq_len, embed_dim] + [batch, 1, embed_dim] -> [batch, seq_len+1, embed_dim]
+                x_embed = jnp.concatenate([x_embed, x_static_emb_expanded], axis=-2)  # [batch, seq_len+1, embed_dim]
         
         # Process time embedding
         if t is not None:
@@ -253,7 +378,7 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
                 
                 # MLP block for x
                 x_norm2 = self.x_encoder_norms2[i](x_embed)
-                x_mlp_out = self.x_encoder_mlps[i](x_norm2, self.model_dim)
+                x_mlp_out = self.x_encoder_mlps[i](x_norm2, self.embed_dim)
                 x_embed = x_embed + nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x_mlp_out)
         
         # Step 2: Repeated block with interleaved cross-attention and self-attention
@@ -272,7 +397,7 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
                 
                 # z MLP
                 z_norm3 = self.z_mlp_norms[i](z_embed)
-                z_mlp_out = self.z_mlps[i](z_norm3, self.model_dim)
+                z_mlp_out = self.z_mlps[i](z_norm3, self.embed_dim)
                 z_embed = z_embed + nn.Dropout(rate=self.dropout_rate, deterministic=not training)(z_mlp_out)
                 
                 # x = cross_attention(x, z)
@@ -282,7 +407,7 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
                 
                 # x MLP
                 x_norm_mlp = self.x_mlp_norms[i](x_embed)
-                x_mlp_block_out = self.x_mlps[i](x_norm_mlp, self.model_dim)
+                x_mlp_block_out = self.x_mlps[i](x_norm_mlp, self.embed_dim)
                 x_embed = x_embed + nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x_mlp_block_out)
         else:
             # If no x, just process z with self-attention
@@ -294,14 +419,16 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
                 
                 # MLP block for z
                 z_norm_mlp = self.z_mlp_norms[i](z_embed)
-                z_mlp_out = self.z_mlps[i](z_norm_mlp, self.model_dim)
+                z_mlp_out = self.z_mlps[i](z_norm_mlp, self.embed_dim)
                 z_embed = z_embed + nn.Dropout(rate=self.dropout_rate, deterministic=not training)(z_mlp_out)
         
-        # Output is already in model_dim (no projection needed)
-        # z_embed shape: (batch, seq_len, model_dim)
+        # Project back from embed_dim to 2D (to match latent_shape)
+        # z_embed shape: (batch, seq_len, embed_dim)
+        z_output = self.output_proj(z_embed)  # (batch, seq_len, 2)
+        
         # Reshape back to original batch shape and output shape
-        # Output shape should match latent_shape (seq_len, model_dim)
-        output = z_embed.reshape((-1, *self.output_shape))
+        # Output shape should match latent_shape (seq_len, 2)
+        output = z_output.reshape((-1, *self.output_shape))
         output = output.reshape(batch_shape + self.output_shape)
         
         return output

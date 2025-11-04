@@ -1,0 +1,8 @@
+---
+alwaysApply: true
+---
+When creating new files use the appropriate directory.  
+Test files go in the test directory.
+Data acquisition and preprocessing files go in the data directory.
+Case specific plotting and training go in examples directory.
+Model Output and log files go in artifacts directory.
