@@ -35,7 +35,8 @@ def build_config(model: str,
                  num_heads: int = 8,
                  mlp_ratio: float = 4.0,
                  encoder_config=None,
-                 decoder_config=None):
+                 decoder_config=None,
+                 crn_embed_dim: int = 20):
     main = FrozenDict({
         'input_shape': input_shape,
         'output_shape': output_shape,
@@ -43,6 +44,7 @@ def build_config(model: str,
         'recon_loss_type': 'mse',
         'recon_weight': 1.0,
         'reg_weight': 0.0,
+        'vae_weight': 0.0,
         'use_snr_weight': False if model == 'flow_matching' else True,
         'integration_method': 'midpoint' if model in ('ct', 'diffusion') else 'euler',
         'sigma': 0.02,
@@ -53,7 +55,7 @@ def build_config(model: str,
     crn = FrozenDict({
         'model_type': 'vanilla',
         'network_type': 'transformer_seq2seq',
-        'embed_dim': 20,  # Embedding dimension (after projection from 2D)
+        'embed_dim': crn_embed_dim,  # Embedding dimension (should match latent_dim)
         'hidden_dims': tuple(hidden_dims),
         'time_embed_dim': 32,
         'time_embed_method': 'sinusoidal',
@@ -72,22 +74,22 @@ def build_config(model: str,
     # Use provided encoder/decoder configs or create defaults
     if encoder_config is None:
         encoder_config = FrozenDict({
-            'model_type': 'identity',
+            'model_type': 'mlp',
             'encoder_type': 'deterministic',
             'input_shape': input_shape,
             'latent_shape': latent_shape,
-            'hidden_dims': (16, 16),
+            'hidden_dims': (64, 32, 16),
             'activation': 'swish',
             'dropout_rate': 0.0,
         })
     
     if decoder_config is None:
         decoder_config = FrozenDict({
-            'model_type': 'identity',
+            'model_type': 'mlp',
             'decoder_type': 'none',
             'latent_shape': latent_shape,
             'output_shape': output_shape,
-            'hidden_dims': (32, 16),
+            'hidden_dims': (64, 32, 16),
             'activation': 'swish',
             'dropout_rate': 0.0,
         })
@@ -109,8 +111,8 @@ def main():
     parser.add_argument('--data_path', type=str, default='data/stock_sequences_full_day_2d.pkl', help='Path to 2D preprocessed data pickle file (no positional embeddings)')
     parser.add_argument('--model_type', type=str, default='flow_matching', choices=['flow_matching', 'diffusion', 'ct'])
     parser.add_argument('--num_epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--learning_rate', type=float, default=2e-4)  # Reduced by factor of 5 from 1e-3
+    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--learning_rate', type=float, default=1e-3)  # Default learning rate
     parser.add_argument('--embed_dim', type=int, default=20, help='Embedding dimension (after projection from 2D inside CRN)')
     parser.add_argument('--num_layers', type=int, default=4)
     parser.add_argument('--num_heads', type=int, default=8)
@@ -195,14 +197,27 @@ def main():
     print(f"  Output: {output_shape} (2D: price, volume)")
     print(f"  Encoder: {encoder_input_shape} -> {encoder_latent_shape} (operates per timestep)")
     print(f"  Decoder: {decoder_latent_shape} -> {decoder_output_shape} (operates per timestep)")
-    print(f"  CRN internal embed_dim: {args.embed_dim} (projection happens inside CRN)")
+    print(f"  CRN internal embed_dim: {latent_dim} (should match latent_dim)")
     
-    # Build CRN config with embed_dim
+    # Adjust num_heads to ensure embed_dim is divisible by num_heads
+    # For attention to work properly, embed_dim must be divisible by num_heads
+    if latent_dim % args.num_heads != 0:
+        # Adjust num_heads to be a divisor of latent_dim
+        # Find the largest divisor of latent_dim that is <= args.num_heads
+        adjusted_num_heads = args.num_heads
+        while latent_dim % adjusted_num_heads != 0 and adjusted_num_heads > 1:
+            adjusted_num_heads -= 1
+        if adjusted_num_heads != args.num_heads:
+            print(f"\nNOTE: Adjusted num_heads from {args.num_heads} to {adjusted_num_heads} "
+                  f"to ensure embed_dim ({latent_dim}) is divisible by num_heads.")
+        args.num_heads = adjusted_num_heads
+    
+    # Build CRN config with embed_dim matching latent_dim
     crn_config = FrozenDict({
         'model_type': 'vanilla',
         'network_type': 'transformer_seq2seq',
-        'embed_dim': args.embed_dim,  # Embedding dimension (after projection from 2D)
-        'hidden_dims': (args.embed_dim,),
+        'embed_dim': latent_dim,  # Embedding dimension (should match latent_dim)
+        'hidden_dims': (),
         'time_embed_dim': 32,
         'time_embed_method': 'sinusoidal',
         'activation_fn': 'swish',
@@ -219,20 +234,20 @@ def main():
     
     # Create encoder/decoder configs with feature dimensions only
     enc_config = FrozenDict({
-        'model_type': 'linear',
+        'model_type': 'mlp',
         'encoder_type': 'deterministic',
         'input_shape': encoder_input_shape,  # Only feature dimension: (2,)
         'latent_shape': encoder_latent_shape,  # Only feature dimension: (10,)
-        'hidden_dims': (16, 16),
+        'hidden_dims': (32, 32),
         'activation': 'swish',
         'dropout_rate': 0.0,
     })
     dec_config = FrozenDict({
-        'model_type': 'linear',
-        'decoder_type': 'linear',
+        'model_type': 'mlp',
+        'decoder_type': 'none',
         'latent_shape': decoder_latent_shape,  # Only feature dimension: (10,)
         'output_shape': decoder_output_shape,  # Only feature dimension: (2,)
-        'hidden_dims': (32, 16),
+        'hidden_dims': (32, 32),
         'activation': 'swish',
         'dropout_rate': 0.0,
     })
@@ -242,21 +257,14 @@ def main():
         input_shape=input_shape,
         output_shape=output_shape,
         latent_shape=latent_shape,
-        hidden_dims=[args.embed_dim],  # Hidden dims for MLPs (not used for transformer, but kept for compatibility)
+        hidden_dims=[],
         num_layers=args.num_layers,
         num_heads=args.num_heads,
         mlp_ratio=args.mlp_ratio,
         encoder_config=enc_config,
         decoder_config=dec_config,
+        crn_embed_dim=latent_dim,  # Pass latent_dim to build_config
     )
-    
-    # Replace CRN config with updated one
-    if args.model_type == 'diffusion':
-        config = DFConfig(main=config.main, noise_schedule=config.noise_schedule, crn=crn_config, encoder=config.encoder, decoder=config.decoder)
-    elif args.model_type == 'ct':
-        config = CTConfig(main=config.main, noise_schedule=config.noise_schedule, crn=crn_config, encoder=config.encoder, decoder=config.decoder)
-    else:
-        config = FMConfig(main=config.main, noise_schedule=config.noise_schedule, crn=crn_config, encoder=config.encoder, decoder=config.decoder)
     
     # Create trainer
     trainer = SequenceTrainer(
@@ -318,21 +326,40 @@ def main():
     cond_x, y_real = trainer._create_minibatch_with_random_splits(
         val_sequences, eval_indices, y_seq_len=y_seq_len
     )
-    y_gen = np.array(trainer.conditional_generate(cond_x, num_steps=20, prng_key=gen_key))
+    y_gen = np.array(trainer.conditional_generate(cond_x, num_steps=20))
     print(f"✓ Generated sequences: {y_gen.shape}")
     
     # Compute metrics
     y_real_np = np.array(y_real)
     metrics = trainer.compute_sequence_metrics(jnp.array(y_gen), jnp.array(y_real_np))
     print(f"  Metrics: {metrics}")
+    if 'percent_variance_explained' in metrics:
+        pve = metrics['percent_variance_explained']
+        if np.isfinite(pve):
+            print(f"  Percent Variance Explained: {pve:.2f}%")
+        else:
+            print(f"  Percent Variance Explained: N/A (insufficient variance in data)")
     
     # Save results
     # Always save (default to artifacts/stock_sequences if not specified)
     from datetime import datetime
     Path(args.save_dir).mkdir(parents=True, exist_ok=True)
     
+    # Create results dictionary with all metrics
+    results = {
+        'history': history,
+        'metrics': metrics,
+        'config': config.__dict__ if hasattr(config, '__dict__') else config,
+        'model_type': args.model_type,
+        'num_epochs': args.num_epochs,
+        'batch_size': args.batch_size,
+        'learning_rate': args.learning_rate,
+    }
+    
     with open(Path(args.save_dir) / 'training_history.pkl', 'wb') as f:
         pickle.dump(history, f)
+    with open(Path(args.save_dir) / 'results.pkl', 'wb') as f:
+        pickle.dump(results, f)
     trainer.save_params(str(Path(args.save_dir) / 'model_params.pkl'))
     
     # Generate plots
@@ -341,24 +368,20 @@ def main():
     # 1. Loss trends plot
     trainer.save_loss_trends_plot(history, output_dir=str(args.save_dir))
     
-    # 2. Sequence generation plot (remove positional embeddings and project to 4D)
-    trainer.save_sequence_plot(
-        y_real=y_real_np,
-        x_labels=np.array(cond_x),
-        y_gen=y_gen,
-        output_dir=str(args.save_dir),
-        data_path=args.data_path  # Needed to remove positional embeddings
-    )
-    
-    # 3. Price comparison plot (10:30 AM - 2:30 PM)
-    trainer.save_price_comparison_plot(
+    # 2. Direct comparison plot (in model input/output space)
+    trainer.save_direct_comparison_plot(
         y_real=y_real_np,
         y_pred=y_gen,
-        data_path=args.data_path,  # Path to processed data (contains projection matrix)
         output_dir=str(args.save_dir),
-        num_samples=8,
-        start_time="10:30",
-        end_time="14:30"
+        num_samples=100
+    )
+    
+    # 3. Trajectory comparison plot (raw predictions vs ground truth)
+    trainer.save_trajectory_comparison_plot(
+        y_real=y_real_np,
+        y_pred=y_gen,
+        output_dir=str(args.save_dir),
+        num_samples=20
     )
     
     print(f"\nSaved results and plots to {args.save_dir}")

@@ -33,6 +33,7 @@ def build_config(model: str,
                  recon_loss_type: str,
                  reg_weight: float,
                  recon_weight: float,
+                 vae_weight: float,
                  noise_schedule: str,
                  noise_schedule_learnable: bool = False,
                  use_snr_weight: bool = None,
@@ -53,9 +54,9 @@ def build_config(model: str,
         'recon_loss_type': recon_loss_type,
         'recon_weight': recon_weight,
         'reg_weight': reg_weight,
+        'vae_weight': vae_weight,
         'use_snr_weight': use_snr_weight,
         'integration_method': 'midpoint' if model in ('ct', 'diffusion') else 'euler',
-        'sigma': 0.02,
         'noise_schedule': noise_schedule,  # Legacy support
     })
 
@@ -67,36 +68,36 @@ def build_config(model: str,
         'time_embed_method': 'sinusoidal',
         'activation_fn': 'swish',
         'use_batch_norm': False,
-        'dropout_rate': 0.0,
+        'dropout_rate': 0.1,
         'num_layers': num_layers,
         'num_heads': num_heads,
         'mlp_ratio': mlp_ratio,
         'qkv_bias': True,
     })
     # Determine encoder/decoder model types
-    # For sequences, typically use linear or identity encoders/decoders
+    # Default to MLP for encoder and decoder
     latent_dim = latent_shape[-1] if len(latent_shape) >= 2 else latent_shape[0] if len(latent_shape) > 0 else 256
-    encoder_model_type = encoder_type if encoder_type is not None else ('linear' if latent_dim > 256 else 'identity')
-    decoder_model_type = decoder_model_type if decoder_model_type is not None else ('identity' if latent_dim > 256 else 'identity')
-    decoder_output_type = decoder_type if decoder_type is not None else ('none' if latent_dim > 256 else 'none')
+    encoder_model_type = encoder_type if encoder_type is not None else 'mlp'
+    decoder_model_type = decoder_model_type if decoder_model_type is not None else 'mlp'
+    decoder_output_type = decoder_type if decoder_type is not None else 'none'
     
     enc = FrozenDict({
         'model_type': encoder_model_type,
         'encoder_type': 'deterministic',
         'input_shape': input_shape,
         'latent_shape': latent_shape,
-        'hidden_dims': (16,16),
+        'hidden_dims': (32,32),
         'activation': 'swish',
-        'dropout_rate': 0.0,
+        'dropout_rate': 0.1,
     })
     dec = FrozenDict({
         'model_type': decoder_model_type,
         'decoder_type': decoder_output_type,
         'latent_shape': latent_shape,
         'output_shape': output_shape,
-        'hidden_dims': (32, 16),
+        'hidden_dims': (32, 32),
         'activation': 'swish',
-        'dropout_rate': 0.0,
+        'dropout_rate': 0.1,
     })
 
     # Create noise schedule config for all models (default: linear, not learnable)
@@ -139,6 +140,7 @@ def main():
     parser.add_argument('--no_snr_weight', dest='use_snr_weight', action='store_const', const=False,
                         help='Disable SNR weighting for reconstruction loss')
     parser.add_argument('--reg_weight', type=float, default=0.0)
+    parser.add_argument('--vae_weight', type=float, default=1.0)
     parser.add_argument('--noise_schedule', type=str, default='exponential',
                         choices=['linear', 'cosine', 'sigmoid', 'exponential', 'cauchy', 'laplace', 'logistic', 'quadratic', 'polynomial', 'monotonic_nn', 'learnable', 'network'],
                         help='Noise schedule for CT and diffusion models')
@@ -146,10 +148,10 @@ def main():
                         help='Make noise schedule parameters learnable (default: False)')
     parser.add_argument('--noise_schedule_fixed', dest='noise_schedule_learnable', action='store_const', const=False,
                         help='Freeze noise schedule parameters (default: False)')
-    parser.add_argument('--encoder_model_type', type=str, default=None,
+    parser.add_argument('--encoder_model_type', type=str, default='mlp',
                         choices=['mlp', 'mlp_normal', 'resnet', 'resnet_normal', 'identity', 'linear'],
                         help='Encoder model type. If None, determined automatically based on embed_dim.')
-    parser.add_argument('--decoder_model_type', type=str, default=None,
+    parser.add_argument('--decoder_model_type', type=str, default='mlp',
                         choices=['mlp', 'resnet', 'identity'],
                         help='Decoder model type. If None, determined automatically based on embed_dim.')
     parser.add_argument('--decoder_type', type=str, default=None,
@@ -207,6 +209,7 @@ def main():
         recon_loss_type=args.recon_loss_type,
         reg_weight=args.reg_weight,
         recon_weight=args.recon_weight,
+        vae_weight=args.vae_weight,
         noise_schedule=args.noise_schedule,
         noise_schedule_learnable=args.noise_schedule_learnable,
         use_snr_weight=args.use_snr_weight,

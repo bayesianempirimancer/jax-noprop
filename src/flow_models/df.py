@@ -273,28 +273,6 @@ class VAE_flow(nn.Module):
     def lazy_error(self, z_t, z_target, alpha_t):     return z_t - jnp.sqrt(alpha_t)* z_target
     def lazy_noise(self, z_t, z_target, alpha_t):     return self.lazy_error(z_t, z_target, alpha_t) / jnp.sqrt(1.0 - alpha_t)
 
-    def lazy_KL_from_target(self, z_target_est, z_target, alpha_t, gamma_prime_t):
-        diff = z_target - z_target_est
-        return self.lazy_target_snr(alpha_t, gamma_prime_t) * jnp.sum(diff ** 2, axis=tuple(range(-self.z_ndims, 0)))
-
-    def lazy_KL_from_noise(self, noise_est, z_t, z_target, alpha_t, gamma_prime_t):
-        noise_diff = self.lazy_noise(z_t, z_target, alpha_t) - noise_est
-        return self.lazy_noise_snr(alpha_t, gamma_prime_t) * jnp.sum(noise_diff ** 2, axis=tuple(range(-self.z_ndims, 0)))
-
-    def lazy_KL_from_score(self, score_est, z_t, z_target, alpha_t, gamma_prime_t):
-        score_diff = self.lazy_score(z_t, z_target, alpha_t) - score_est
-        return self.lazy_score_snr(alpha_t, gamma_prime_t) * jnp.sum(score_diff ** 2, axis=tuple(range(-self.z_ndims, 0)))
-
-    def lazy_KL_from_error(self, error_est, z_t, z_target, alpha_t, gamma_prime_t):
-        error_diff = self.lazy_error(z_t, z_target, alpha_t) - error_est
-        return self.lazy_error_snr(alpha_t, gamma_prime_t) * jnp.sum(error_diff ** 2, axis=tuple(range(-self.z_ndims, 0)))
-
-    def lazy_KL_from_flow(self, flow_est, z_t, z_target, alpha_t, gamma_prime_t):
-        noise = self.lazy_noise(z_t, z_target, alpha_t)
-        flow_diff = self.lazy_flow(z_t, noise, alpha_t, gamma_prime_t) - flow_est
-        return self.lazy_flow_snr * jnp.sum(flow_diff ** 2, axis=tuple(range(-self.z_ndims, 0))) / (gamma_prime_t ** 2)
-
-            
     def __call__(self, x: jnp.ndarray, y: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> jnp.ndarray:
         # For initialization, we need to call the nn compact methods to initialize parameters
 

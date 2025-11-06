@@ -21,6 +21,15 @@ from src.flow_models.fm import VAE_flow as FlowMatchingModel, VAEFlowConfig as F
 from src.flow_models.df import VAE_flow as DiffusionModel, VAEFlowConfig as DiffusionConfig
 from src.flow_models.ct import VAE_flow as CTModel, VAEFlowConfig as CTConfig
 
+from src.utils.plotting.plot_loss_trends import plot_loss_trends
+from examples.stock_prediction.plotting import (
+    plot_direct_comparison,
+    plot_trajectory_comparison,
+    plot_sequence_comparison,
+    plot_price_comparison,
+    plot_latent_trajectories,
+)
+
 
 @dataclass
 class SequenceTrainer:
@@ -228,8 +237,7 @@ class SequenceTrainer:
                     # Conditional generation: use validation conditions
                     y_gen_eval = self.conditional_generate(
                         cond_x=eval_x,
-                        num_steps=20,
-                        prng_key=gen_rng
+                        num_steps=20
                     )
                 seq_metrics = self.compute_sequence_metrics(y_gen_eval, eval_y_real)
                 history['val_seq_metrics'].append(seq_metrics)
@@ -305,7 +313,7 @@ class SequenceTrainer:
             real_sequences: Real sequences [num_real, seq_len, embed_dim]
             
         Returns:
-            Dictionary of metrics including MSE, MAE, and cosine similarity
+            Dictionary of metrics including MSE, MAE, cosine similarity, and R² (percent variance explained)
         """
         # Check for NaN or Inf in generated sequences - indicates generation failure
         gen_has_invalid = jnp.any(~jnp.isfinite(generated_sequences))
@@ -313,7 +321,13 @@ class SequenceTrainer:
         
         if gen_has_invalid or real_has_invalid:
             # Return inf to indicate failure
-            return {'mse': float('inf'), 'mae': float('inf'), 'cosine_sim': -1.0}
+            return {
+                'mse': float('inf'), 
+                'mae': float('inf'), 
+                'cosine_sim': -1.0,
+                'r2': float('-inf'),
+                'percent_variance_explained': float('-inf')
+            }
         
         # Flatten sequences for comparison
         gen_flat = generated_sequences.reshape(generated_sequences.shape[0], -1)
@@ -331,17 +345,45 @@ class SequenceTrainer:
         real_norm = real_flat / (jnp.linalg.norm(real_flat, axis=1, keepdims=True) + 1e-8)
         cosine_sim = jnp.mean(jnp.sum(gen_norm * real_norm, axis=1))
         
+        # Compute R² (coefficient of determination) and percent variance explained
+        # Only compute on price (first dimension) - extract price from sequences
+        # Sequences are [batch, seq_len, feature_dim], so price is [:, :, 0]
+        real_price = real_sequences[:, :, 0]  # [batch, seq_len]
+        gen_price = generated_sequences[:, :, 0]  # [batch, seq_len]
+        
+        # Flatten price sequences
+        real_price_flat = real_price.reshape(-1)  # [batch * seq_len]
+        gen_price_flat = gen_price.reshape(-1)  # [batch * seq_len]
+        
+        # Compute R² on price only
+        # R² = 1 - (SS_res / SS_tot)
+        # where SS_res = sum of squared residuals, SS_tot = total sum of squares
+        residuals_price = real_price_flat - gen_price_flat
+        ss_res = jnp.sum(residuals_price ** 2)
+        real_price_mean = jnp.mean(real_price_flat)
+        ss_tot = jnp.sum((real_price_flat - real_price_mean) ** 2)
+        
+        # Avoid division by zero
+        if ss_tot > 1e-10:
+            r2 = 1.0 - (ss_res / ss_tot)
+            percent_variance_explained = r2 * 100.0
+        else:
+            # If variance is zero, R² is undefined (all values are the same)
+            r2 = float('nan')
+            percent_variance_explained = float('nan')
+        
         return {
             'mse': float(mse),
             'mae': float(mae),
-            'cosine_sim': float(cosine_sim)
+            'cosine_sim': float(cosine_sim),
+            'r2': float(r2),
+            'percent_variance_explained': float(percent_variance_explained)
         }
 
     def conditional_generate(
         self,
         cond_x: jnp.ndarray,
         num_steps: int = 20,
-        prng_key: Optional[jr.PRNGKey] = None,
     ) -> jnp.ndarray:
         """
         Generate y sequences conditioned on x sequences using stochastic z_0.
@@ -352,7 +394,7 @@ class SequenceTrainer:
         if self.unconditional:
             raise ValueError("Use unconditional_generate() for unconditional generation")
         # Model predict expects x as conditional input
-        return self.model.predict(self.params, cond_x, num_steps=num_steps, integration_method="midpoint", output_type="end_point", prng_key=prng_key)
+        return self.model.predict(self.params, cond_x, num_steps=num_steps, integration_method="midpoint", output_type="end_point")
     
     def unconditional_generate(
         self,
@@ -385,228 +427,53 @@ class SequenceTrainer:
                           data_path: Optional[str] = None):
         """Plot generated sequences vs real sequences.
         
-        If data_path is provided, removes positional embeddings and projects back to 4D
-        for meaningful visualization (shows actual price/volume/bid/ask features).
+        If data_path is provided, removes positional embeddings and projects back to 2D
+        for meaningful visualization (shows actual price/volume features).
         Otherwise, plots the raw embedding dimensions (may show positional embedding patterns).
         """
-        import matplotlib.pyplot as plt
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        plot_sequence_comparison(y_real, y_gen, output_dir, data_path)
+    
+    def save_direct_comparison_plot(
+        self,
+        y_real: np.ndarray,
+        y_pred: np.ndarray,
+        output_dir: str,
+        num_samples: int = 100
+    ):
+        """
+        Direct comparison plot of predictions vs ground truth in model input/output space (2D).
         
-        seq_len = y_real.shape[1]
-        feature_dim = y_real.shape[2]
-        batch_size = y_real.shape[0]
+        This plots predictions vs ground truth directly without any transformations,
+        showing the model's performance in the standardized 2D space (price, volume).
         
-        # If data_path is provided, handle 2D data or remove embeddings (old format)
-        if data_path is not None:
-            try:
-                import pickle
-                with open(data_path, 'rb') as f:
-                    data = pickle.load(f)
-                
-                # Check if data has projection info (old format) or is 2D (new format)
-                has_projection = 'projection' in data and data['projection'] is not None
-                if has_projection:
-                    projection_matrix = data['projection']['matrix']  # [20, 4]
-                    input_dim = data['projection']['input_dim']  # 2 (price, volume)
-                    rope_base = data.get('rope', {}).get('base', 10000.0)
-                else:
-                    # New format: data is already 2D, no projection needed
-                    input_dim = 2
-                    projection_matrix = None
-                    rope_base = 10000.0
-                
-                # Check if outputs are already 2D (new format) or need projection (old format)
-                feature_dim = y_real.shape[2]
-                if has_projection and feature_dim != input_dim:
-                    # Old format: outputs are in embed_dim, need to remove embeddings and project
-                    embed_dim = feature_dim
-                    
-                    # Get day-of-week embeddings and labels
-                    day_embeddings_dict = data.get('day_of_week', {}).get('embeddings', {})
-                    day_embeddings = {int(k): np.array(v) for k, v in day_embeddings_dict.items()}
-                    all_days_of_week = data.get('day_of_week', {}).get('days_of_week_val', None)
-                    if all_days_of_week is None:
-                        all_days_of_week = np.zeros(batch_size, dtype=np.int32)
-                    if len(all_days_of_week) < batch_size:
-                        all_days_of_week = np.concatenate([
-                            all_days_of_week,
-                            np.zeros(batch_size - len(all_days_of_week), dtype=np.int32)
-                        ])
-                    sample_days_of_week = all_days_of_week[:batch_size]
-                    
-                    # Remove RoPE positional encodings (y sequences use shifted positions)
-                    from src.embeddings.positional_encoding import rotary_positional_encoding
-                    position_offset = -(seq_len - 1)
-                    max_pos_needed = abs(position_offset) + seq_len
-                    rope_encoding_full = np.array(rotary_positional_encoding(max_pos_needed, embed_dim, base=rope_base))
-                    
-                    start_idx = abs(position_offset)
-                    end_idx = start_idx + seq_len
-                    extracted = rope_encoding_full[start_idx:end_idx]
-                    rope_encoding = np.flip(extracted, axis=0)
-                    rope_encoding[:, 0::2] = -rope_encoding[:, 0::2]
-                    
-                    norms = np.linalg.norm(rope_encoding, axis=1, keepdims=True)
-                    norms = np.maximum(norms, 1e-8)
-                    rope_encoding = rope_encoding / norms
-                    
-                    y_real_no_rope = y_real - rope_encoding[None, :, :]
-                    y_gen_no_rope = y_gen - rope_encoding[None, :, :]
-                    
-                    sample_embeddings = np.array([day_embeddings.get(day, day_embeddings.get(0, np.zeros(embed_dim))) 
-                                                for day in sample_days_of_week])
-                    y_real_no_pos = y_real_no_rope - sample_embeddings[:, None, :]
-                    y_gen_no_pos = y_gen_no_rope - sample_embeddings[:, None, :]
-                    
-                    proj_pinv = np.linalg.pinv(projection_matrix)
-                    y_real_4d = y_real_no_pos.reshape(-1, embed_dim) @ proj_pinv.T
-                    y_real_4d = y_real_4d.reshape(batch_size, seq_len, input_dim)
-                    y_gen_4d = y_gen_no_pos.reshape(-1, embed_dim) @ proj_pinv.T
-                    y_gen_4d = y_gen_4d.reshape(batch_size, seq_len, input_dim)
-                else:
-                    # New format: outputs are already 2D (price, volume)
-                    # No need to remove embeddings or project - CRN handles this internally
-                    y_real_4d = y_real  # Already 2D
-                    y_gen_4d = y_gen  # Already 2D
-                
-                # Convert log-normalized values back to original domain
-                # Get previous closes and avg volumes for validation set
-                metadata = data.get('metadata', {})
-                previous_closes = metadata.get('previous_closes_val', None)
-                if previous_closes is None:
-                    previous_closes = data.get('previous_closes', {}).get('val', None)
-                
-                previous_avg_volumes = metadata.get('previous_avg_volumes_val', None)
-                if previous_avg_volumes is None:
-                    previous_avg_volumes = data.get('previous_avg_volumes', {}).get('val', None)
-                
-                # Get standardization parameters from metadata (needed to reverse standardization)
-                std_log_price = metadata.get('std_log_price', 1.0)
-                std_log_volume_diff = metadata.get('std_log_volume_diff', 1.0)
-                volume_scale_factor = metadata.get('volume_scale_factor', 0.05)
-                
-                if previous_closes is not None and len(previous_closes) >= batch_size:
-                    sample_previous_closes = previous_closes[:batch_size]
-                    sample_previous_avg_volumes = previous_avg_volumes[:batch_size] if previous_avg_volumes is not None else None
-                    
-                    # y_real_4d and y_gen_4d are currently standardized:
-                    # - Price/bid/ask: log(price/prev_close) / std_log_price
-                    # - Volume: (log(1+vol) - log(1+prev_avg_vol)) / std_log_volume_diff * volume_scale_factor
-                    
-                    y_real_4d_original = y_real_4d.copy()
-                    y_gen_4d_original = y_gen_4d.copy()
-                    
-                    for i in range(batch_size):
-                        prev_close = sample_previous_closes[i]
-                        
-                        # Convert dim0 (price) from standardized to original
-                        # Step 1: Reverse standardization: multiply by std_log_price
-                        log_norm_real = y_real_4d[i, :, 0] * std_log_price  # log(price / prev_close)
-                        log_norm_gen = y_gen_4d[i, :, 0] * std_log_price    # log(price / prev_close)
-                        
-                        # Step 2: Convert: price = prev_close * exp(log_norm)
-                        exp_real = np.clip(np.exp(log_norm_real), 1e-10, 1e10)
-                        exp_gen = np.clip(np.exp(log_norm_gen), 1e-10, 1e10)
-                        y_real_4d_original[i, :, 0] = prev_close * exp_real
-                        y_gen_4d_original[i, :, 0] = prev_close * exp_gen
-                        
-                        # Ensure prices are positive (safety check)
-                        y_real_4d_original[i, :, 0] = np.maximum(y_real_4d_original[i, :, 0], 1e-6)
-                        y_gen_4d_original[i, :, 0] = np.maximum(y_gen_4d_original[i, :, 0], 1e-6)
-                        
-                        # Convert dim1 (volume) from standardized to original
-                        if sample_previous_avg_volumes is not None and input_dim > 1:
-                            prev_avg_vol = sample_previous_avg_volumes[i]
-                            # Step 1: Reverse volume scaling: divide by volume_scale_factor
-                            vol_scaled = y_real_4d[i, :, 1] / volume_scale_factor
-                            vol_scaled_gen = y_gen_4d[i, :, 1] / volume_scale_factor
-                            
-                            # Step 2: Reverse standardization: multiply by std_log_volume_diff
-                            vol_diff_real = vol_scaled * std_log_volume_diff  # log(1+vol) - log(1+prev_avg_vol)
-                            vol_diff_gen = vol_scaled_gen * std_log_volume_diff
-                            
-                            # Step 3: Convert: exp(vol_diff) = (1+vol) / (1+prev_avg_vol)
-                            # So: vol = (1+prev_avg_vol) * exp(vol_diff) - 1
-                            y_real_4d_original[i, :, 1] = (1.0 + prev_avg_vol) * np.exp(vol_diff_real) - 1.0
-                            y_gen_4d_original[i, :, 1] = (1.0 + prev_avg_vol) * np.exp(vol_diff_gen) - 1.0
-                    
-                    plot_data_real = y_real_4d_original
-                    plot_data_gen = y_gen_4d_original
-                else:
-                    # If no previous closes available, plot log-normalized values
-                    plot_data_real = y_real_4d
-                    plot_data_gen = y_gen_4d
-                
-                # Use 4D features for plotting - only plot dim0 (Price) and dim1 (Volume)
-                num_dims_to_plot = min(2, input_dim)  # Only Price and Volume
-                dim_names = ['Price ($)', 'Volume'][:num_dims_to_plot]
-            except Exception as e:
-                print(f"  Warning: Could not load data_path for embedding removal: {e}")
-                print(f"  Plotting raw feature dimensions instead")
-                plot_data_real = y_real
-                plot_data_gen = y_gen
-                num_dims_to_plot = min(2, feature_dim)  # Price and volume
-                dim_names = ['Price', 'Volume'][:num_dims_to_plot]
-        else:
-            # Plot raw feature dimensions (should be 2D: price, volume)
-            plot_data_real = y_real
-            plot_data_gen = y_gen
-            num_dims_to_plot = min(2, feature_dim)  # Price and volume
-            dim_names = ['Price', 'Volume'][:num_dims_to_plot]
+        Args:
+            y_real: Real sequences [batch, seq_len, 2] in standardized 2D space
+            y_pred: Predicted sequences [batch, seq_len, 2] in standardized 2D space
+            output_dir: Directory to save the plot
+            num_samples: Number of samples to plot (will use first num_samples)
+        """
+        plot_direct_comparison(y_real, y_pred, output_dir, num_samples)
+    
+    def save_trajectory_comparison_plot(
+        self,
+        y_real: np.ndarray,
+        y_pred: np.ndarray,
+        output_dir: str,
+        num_samples: int = 20
+    ):
+        """
+        Plot raw prediction vs ground truth trajectories over time.
         
-        # Plot each dimension separately with many subplots
-        # Each subplot shows one true vs one predicted sequence
-        num_samples_to_plot = min(20, plot_data_real.shape[0])
+        Shows time series plots for a random selection of sequences, comparing
+        predicted and ground truth trajectories for each dimension.
         
-        # Create separate figures for each dimension (dim0 and dim1)
-        for dim_idx in range(num_dims_to_plot):
-            # Calculate subplot layout: 4 rows x 5 cols for 20 samples
-            n_cols = 5
-            n_rows = (num_samples_to_plot + n_cols - 1) // n_cols
-            
-            fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 4*n_rows))
-            if n_rows == 1:
-                axes = axes.reshape(1, -1) if axes.ndim > 1 else axes.reshape(-1)
-            
-            for sample_idx in range(num_samples_to_plot):
-                row = sample_idx // n_cols
-                col = sample_idx % n_cols
-                
-                if n_rows == 1:
-                    ax = axes[col]
-                else:
-                    ax = axes[row, col]
-                
-                # Plot single true and predicted sequence
-                ax.plot(range(seq_len), plot_data_real[sample_idx, :, dim_idx], 
-                       label='True', color='blue', linewidth=2, alpha=0.7)
-                ax.plot(range(seq_len), plot_data_gen[sample_idx, :, dim_idx], 
-                       label='Predicted', color='red', linewidth=2, linestyle='--', alpha=0.7)
-                
-                ax.set_title(f'Sample {sample_idx+1}', fontsize=10, fontweight='bold')
-                ax.set_xlabel('Time Step', fontsize=9)
-                ax.set_ylabel(dim_names[dim_idx], fontsize=9)
-                ax.grid(True, alpha=0.3)
-                if sample_idx == 0:
-                    ax.legend(fontsize=8)
-            
-            # Hide unused subplots
-            for sample_idx in range(num_samples_to_plot, n_rows * n_cols):
-                row = sample_idx // n_cols
-                col = sample_idx % n_cols
-                if n_rows == 1:
-                    axes[col].axis('off')
-                else:
-                    axes[row, col].axis('off')
-            
-            fig.suptitle(f'True vs Predicted {dim_names[dim_idx]} Sequences ({num_samples_to_plot} samples)', 
-                        fontsize=14, fontweight='bold')
-            fig.tight_layout()
-            
-            # Save separate file for each dimension
-            plot_name = f'sequence_comparison_{dim_names[dim_idx].lower()}.png'
-            fig.savefig(os.path.join(output_dir, plot_name), dpi=200, bbox_inches='tight')
-            plt.close(fig)
+        Args:
+            y_real: Real sequences [batch, seq_len, 2] in standardized 2D space
+            y_pred: Predicted sequences [batch, seq_len, 2] in standardized 2D space
+            output_dir: Directory to save the plot
+            num_samples: Number of random sequences to plot
+        """
+        plot_trajectory_comparison(y_real, y_pred, output_dir, num_samples)
     
     def save_price_comparison_plot(
         self,
@@ -630,372 +497,27 @@ class SequenceTrainer:
             start_time: Start time in format "HH:MM"
             end_time: End time in format "HH:MM"
         """
-        import matplotlib.pyplot as plt
-        import matplotlib.dates as mdates
-        from datetime import datetime, timedelta
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        
-        # Load data file to get preprocessing parameters
-        # Note: Since CRN handles embeddings internally, outputs are already 2D
-        with open(data_path, 'rb') as f:
-            data = pickle.load(f)
-        
-        # Check if data has projection info (old format) or is 2D (new format)
-        has_projection = 'projection' in data and data['projection'] is not None
-        if has_projection:
-            projection_matrix = data['projection']['matrix']  # [20, 4]
-            input_dim = data['projection']['input_dim']  # 2 (price, volume)
-        else:
-            # New format: data is already 2D, no projection needed
-            # y_real and y_pred are already in 2D format (price, volume)
-            input_dim = 2
-            projection_matrix = None
-        
-        # Get RoPE parameters
-        rope_base = data.get('rope', {}).get('base', 10000.0)
-        
-        # Get sequence dimensions first
-        batch_size, seq_len, feature_dim = y_real.shape
-        
-        # Check if outputs are already 2D (new format) or need projection (old format)
-        if has_projection and feature_dim != input_dim:
-            # Old format: outputs are in embed_dim, need to remove embeddings and project
-            embed_dim = feature_dim
-            
-            # Get day-of-week embeddings (if available)
-            day_embeddings_dict = data.get('day_of_week', {}).get('embeddings', {})
-            day_embeddings = {int(k): np.array(v) for k, v in day_embeddings_dict.items()}
-            
-            # Get days_of_week labels for validation set
-            all_days_of_week = data.get('day_of_week', {}).get('days_of_week_val', None)
-            if all_days_of_week is None:
-                all_days_of_week = np.zeros(batch_size, dtype=np.int32)
-            if len(all_days_of_week) < batch_size:
-                all_days_of_week = np.concatenate([
-                    all_days_of_week,
-                    np.zeros(batch_size - len(all_days_of_week), dtype=np.int32)
-                ])
-            sample_days_of_week = all_days_of_week[:batch_size]
-            
-            # Remove RoPE and day-of-week embeddings, then project back to 2D
-            from src.embeddings.positional_encoding import rotary_positional_encoding
-            
-            position_offset = -(seq_len - 1)
-            max_pos_needed = abs(position_offset) + seq_len
-            rope_encoding_full = np.array(rotary_positional_encoding(max_pos_needed, embed_dim, base=rope_base))
-            
-            start_idx = abs(position_offset)
-            end_idx = start_idx + seq_len
-            extracted = rope_encoding_full[start_idx:end_idx]
-            rope_encoding = np.flip(extracted, axis=0)
-            rope_encoding[:, 0::2] = -rope_encoding[:, 0::2]
-            
-            norms = np.linalg.norm(rope_encoding, axis=1, keepdims=True)
-            norms = np.maximum(norms, 1e-8)
-            rope_encoding = rope_encoding / norms
-            
-            y_real_no_rope = y_real - rope_encoding[None, :, :]
-            y_pred_no_rope = y_pred - rope_encoding[None, :, :]
-            
-            sample_embeddings = np.array([day_embeddings.get(day, day_embeddings.get(0, np.zeros(embed_dim))) 
-                                         for day in sample_days_of_week])
-            y_real_no_pos = y_real_no_rope - sample_embeddings[:, None, :]
-            y_pred_no_pos = y_pred_no_rope - sample_embeddings[:, None, :]
-            
-            proj_pinv = np.linalg.pinv(projection_matrix)
-            y_real_4d = y_real_no_pos.reshape(-1, embed_dim) @ proj_pinv.T
-            y_real_4d = y_real_4d.reshape(batch_size, seq_len, input_dim)
-            
-            y_pred_4d = y_pred_no_pos.reshape(-1, embed_dim) @ proj_pinv.T
-            y_pred_4d = y_pred_4d.reshape(batch_size, seq_len, input_dim)
-        else:
-            # New format: outputs are already 2D (price, volume)
-            # No need to remove embeddings or project - CRN handles this internally
-            y_real_4d = y_real  # Already 2D
-            y_pred_4d = y_pred  # Already 2D
-        
-        # Debug: Check 2D values
-        print(f"  DEBUG: Data shape (should be 2D): {y_real_4d.shape}")
-        print(f"    y_real_4d[0, :, 0] (price) range: [{y_real_4d[0, :, 0].min():.6f}, {y_real_4d[0, :, 0].max():.6f}], std: {y_real_4d[0, :, 0].std():.6f}")
-        if y_real_4d.shape[2] > 1:
-            print(f"    y_real_4d[0, :, 1] (volume) range: [{y_real_4d[0, :, 1].min():.6f}, {y_real_4d[0, :, 1].max():.6f}], std: {y_real_4d[0, :, 1].std():.6f}")
-        
-        # Convert log-normalized prices back to original domain
-        # Get previous closes for validation set
-        metadata = data.get('metadata', {})
-        previous_closes = metadata.get('previous_closes_val', None)
-        if previous_closes is None:
-            # Try old format
-            previous_closes = data.get('previous_closes', {}).get('val', None)
-        
-        # Get standardization parameters from metadata (needed to reverse standardization)
-        std_log_price = metadata.get('std_log_price', 1.0)
-        std_log_volume_diff = metadata.get('std_log_volume_diff', 1.0)
-        volume_scale_factor = metadata.get('volume_scale_factor', 0.05)
-        
-        if previous_closes is not None and len(previous_closes) >= batch_size:
-            # Note: y_real should be the first batch_size samples from validation set
-            # so we use previous_closes[:batch_size] to match
-            sample_previous_closes = previous_closes[:batch_size]
-            
-            # Debug: Check if previous_closes are all the same
-            if len(sample_previous_closes) > 1:
-                if np.allclose(sample_previous_closes, sample_previous_closes[0]):
-                    print(f"  WARNING: All previous_closes in batch are the same: {sample_previous_closes[0]:.2f}")
-                else:
-                    print(f"  DEBUG: previous_closes vary: min={sample_previous_closes.min():.2f}, max={sample_previous_closes.max():.2f}, std={sample_previous_closes.std():.2f}")
-            
-            # y_real_4d and y_pred_4d are currently standardized:
-            # - Price: log(price/prev_close) / std_log_price
-            # Inverse: price = prev_close * exp(log_normalized * std_log_price)
-            y_real_price = np.zeros((batch_size, seq_len))
-            y_pred_price = np.zeros((batch_size, seq_len))
-            
-            for i in range(batch_size):
-                prev_close = sample_previous_closes[i]
-                # Step 1: Reverse standardization: multiply by std_log_price
-                log_norm_real = y_real_4d[i, :, 0] * std_log_price  # log(price / prev_close)
-                log_norm_pred = y_pred_4d[i, :, 0] * std_log_price  # log(price / prev_close)
-                
-                # Step 2: Convert: price = prev_close * exp(log_norm)
-                exp_real = np.clip(np.exp(log_norm_real), 1e-10, 1e10)
-                exp_pred = np.clip(np.exp(log_norm_pred), 1e-10, 1e10)
-                y_real_price[i, :] = prev_close * exp_real
-                y_pred_price[i, :] = prev_close * exp_pred
-                
-                # Debug: Check if prices have variation (only for first sample)
-                if i == 0 and batch_size > 0:
-                    price_std = y_real_price[i].std()
-                    price_range = y_real_price[i].max() - y_real_price[i].min()
-                    print(f"  DEBUG (sample {i}): Converted prices - range: [{y_real_price[i].min():.2f}, {y_real_price[i].max():.2f}], std: {price_std:.2f}, range: {price_range:.2f}")
-                    if price_std < 0.01:
-                        print(f"    ⚠️  WARNING: Prices appear constant (std={price_std:.6f})")
-                        print(f"       This is likely because log_norm values are very small (std={log_norm_real.std():.6f})")
-                        print(f"       Small log_norm -> exp(log_norm) ≈ 1 -> prices ≈ prev_close (constant)")
-                
-                # Ensure prices are positive (safety check)
-                y_real_price[i, :] = np.maximum(y_real_price[i, :], 1e-6)
-                y_pred_price[i, :] = np.maximum(y_pred_price[i, :], 1e-6)
-        else:
-            # If no previous closes available, plot log-normalized values
-            y_real_price = y_real_4d[:, :, 0]  # [batch, seq_len]
-            y_pred_price = y_pred_4d[:, :, 0]  # [batch, seq_len]
-        
-        # Create time labels (5-minute intervals from start_time to end_time)
-        start_dt = datetime.strptime(start_time, "%H:%M")
-        time_delta = timedelta(minutes=5)
-        time_labels = [start_dt + i * time_delta for i in range(seq_len)]
-        time_strs = [t.strftime("%H:%M") for t in time_labels]
-        
-        # Select samples to plot
-        num_samples = min(num_samples, batch_size)
-        n_cols = 2
-        n_rows = (num_samples + n_cols - 1) // n_cols
-        
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(14, 4*n_rows))
-        if num_samples == 1:
-            axes = axes.reshape(1, -1)
-        elif n_rows == 1:
-            axes = axes.reshape(1, -1)
-        
-        fig.suptitle(f'Actual vs Predicted Price (10:30 AM - 2:30 PM Window)', 
-                     fontsize=16, fontweight='bold')
-        
-        for idx in range(num_samples):
-            row = idx // n_cols
-            col = idx % n_cols
-            ax = axes[row, col]
-            
-            # Plot actual and predicted
-            ax.plot(range(seq_len), y_real_price[idx], 
-                   label='Actual', color='blue', linewidth=2, marker='o', markersize=4, alpha=0.7)
-            ax.plot(range(seq_len), y_pred_price[idx], 
-                   label='Predicted', color='red', linewidth=2, marker='s', markersize=4, 
-                   linestyle='--', alpha=0.7)
-            
-            # Formatting
-            ax.set_title(f'Sample {idx+1}', fontsize=12, fontweight='bold')
-            ax.set_xlabel('Time (5-min intervals)', fontsize=10)
-            ax.set_ylabel('Price ($)', fontsize=10)
-            ax.grid(True, alpha=0.3)
-            ax.legend()
-            
-            # Set x-axis ticks (every 6 timesteps = 30 minutes)
-            tick_step = max(1, seq_len // 8)
-            ax.set_xticks(range(0, seq_len, tick_step))
-            ax.set_xticklabels([time_strs[i] for i in range(0, seq_len, tick_step)], 
-                              rotation=45, ha='right', fontsize=8)
-        
-        # Hide unused subplots
-        for idx in range(num_samples, n_rows * n_cols):
-            row = idx // n_cols
-            col = idx % n_cols
-            axes[row, col].axis('off')
-        
-        fig.tight_layout()
-        plot_path = os.path.join(output_dir, 'price_comparison_10_30_to_14_30.png')
-        fig.savefig(plot_path, dpi=200, bbox_inches='tight')
-        plt.close(fig)
-        
-        print(f"✓ Saved price comparison plot to {plot_path}")
+        plot_price_comparison(y_real, y_pred, data_path, output_dir, num_samples, start_time, end_time)
     
     def save_loss_trends_plot(self, history: Dict[str, Any], output_dir: str):
         """Plot loss terms over training epochs to diagnose training issues."""
-        import matplotlib.pyplot as plt
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        
-        # Check if we have sequence metrics to determine subplot layout
-        has_seq_metrics = history.get('val_seq_metrics') and len(history['val_seq_metrics']) > 0
-        if has_seq_metrics:
-            fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-        else:
-            fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle(f'Loss Trends - {self.model_type.title()} Model (Sequence Data)', fontsize=16, fontweight='bold')
-        
-        epochs = range(len(history['train_losses']))
-        
-        # Total Loss
-        ax = axes[0, 0]
-        ax.plot(epochs, history['train_losses'], label='Train Total', color='blue', linewidth=2)
-        if history.get('val_losses') and len(history['val_losses']) > 0:
-            ax.plot(epochs, history['val_losses'], label='Val Total', color='red', linewidth=2, linestyle='--')
-        ax.set_title('Total Loss', fontsize=12, fontweight='bold')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Loss')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Flow Loss
-        ax = axes[0, 1]
-        ax.plot(epochs, history['train_flow_losses'], label='Train Flow', color='green', linewidth=2)
-        if history.get('val_flow_losses') and len(history['val_flow_losses']) > 0:
-            ax.plot(epochs, history['val_flow_losses'], label='Val Flow', color='orange', linewidth=2, linestyle='--')
-        ax.set_title('Flow Loss', fontsize=12, fontweight='bold')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Loss')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Reconstruction Loss
-        ax = axes[1, 0]
-        ax.plot(epochs, history['train_recon_losses'], label='Train Recon', color='purple', linewidth=2)
-        if history.get('val_recon_losses') and len(history['val_recon_losses']) > 0:
-            ax.plot(epochs, history['val_recon_losses'], label='Val Recon', color='brown', linewidth=2, linestyle='--')
-        ax.set_title('Reconstruction Loss', fontsize=12, fontweight='bold')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Loss')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Regularization Loss
-        ax = axes[1, 1]
-        ax.plot(epochs, history['train_reg_losses'], label='Train Reg', color='cyan', linewidth=2)
-        if history.get('val_reg_losses') and len(history['val_reg_losses']) > 0:
-            ax.plot(epochs, history['val_reg_losses'], label='Val Reg', color='magenta', linewidth=2, linestyle='--')
-        ax.set_title('Regularization Loss', fontsize=12, fontweight='bold')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Loss')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Sequence Metrics (if available)
-        if has_seq_metrics:
-            ax = axes[1, 2]
-            seq_epochs = range(len(history['val_seq_metrics']))
-            mse_vals = [m['mse'] for m in history['val_seq_metrics'] if 'mse' in m]
-            if mse_vals:
-                ax.plot(seq_epochs[:len(mse_vals)], mse_vals, label='MSE', color='darkorange', linewidth=2, linestyle='--')
-            ax.set_title('Sequence Metrics (MSE)', fontsize=12, fontweight='bold')
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel('MSE')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-        
-        fig.tight_layout()
-        fig.savefig(os.path.join(output_dir, 'loss_trends.png'), dpi=200, bbox_inches='tight')
-        plt.close(fig)
+        plot_loss_trends(history, self.model_type, output_dir)
     
     def save_trajectory_plot(self, cond_x: Optional[jnp.ndarray] = None, num_trajectories: int = 20, num_steps: int = 20, prng_key: Optional[jr.PRNGKey] = None, output_dir: str = None):
         """Generate and plot latent z trajectories during integration for sequence data."""
         if self.params is None:
             raise ValueError("Model not initialized. Call initialize() first.")
         
-        import matplotlib.pyplot as plt
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        
-        n_samples = num_trajectories
-        
-        # Generate trajectories
-        if prng_key is None:
-            self.rng, prng_key = jr.split(self.rng)
-        
-        # Split keys for each trajectory
-        prng_keys = jr.split(prng_key, n_samples)
-        trajectories = []
-        
-        integration_method = "midpoint" if self.model_type == "ct" else "euler"
-        
-        for i in range(n_samples):
-            if self.unconditional:
-                # Use sample() for unconditional generation
-                traj = self.model.sample(
-                    self.params,
-                    prng_keys[i],
-                    batch_shape=(1,),
-                    num_steps=num_steps,
-                    integration_method=integration_method,
-                    output_type="trajectory"
-                )
-            else:
-                # Use predict() for conditional generation
-                if cond_x is None:
-                    raise ValueError("cond_x must be provided for conditional generation")
-                cond_subset = cond_x[:n_samples]
-                traj = self.model.predict(
-                    self.params,
-                    cond_subset[i:i+1],  # Single condition with batch dim
-                    num_steps=num_steps,
-                    integration_method=integration_method,
-                    output_type="trajectory",
-                    prng_key=prng_keys[i]
-                )
-            
-            # For sequences, trajectories are [num_steps, 1, seq_len, embed_dim]
-            # We'll flatten to show sequence evolution: [num_steps, seq_len * embed_dim]
-            if traj.ndim >= 4:
-                # Flatten sequence dimensions: [num_steps, 1, seq_len, embed_dim] -> [num_steps, seq_len * embed_dim]
-                traj = traj.reshape(traj.shape[0], -1)
-            elif traj.ndim == 3:
-                traj = traj[:, 0, :]  # Remove batch dim
-            trajectories.append(np.array(traj))
-        
-        trajectories = np.array(trajectories)  # [n_samples, num_steps, flattened_dim]
-        
-        # Plot trajectories - show first 2 principal components or first 2 dims
-        from matplotlib.lines import Line2D
-        fig, ax = plt.subplots(figsize=(10, 8))
-        
-        # Use PCA or just first 2 dims for visualization
-        # For simplicity, just use first 2 dimensions of flattened space
-        for i in range(n_samples):
-            traj = trajectories[i]  # [num_steps, flattened_dim]
-            if traj.shape[1] >= 2:
-                ax.plot(traj[:, 0], traj[:, 1], color='purple', alpha=0.6, linewidth=1.5)
-                # Mark end point
-                ax.scatter(traj[-1, 0], traj[-1, 1], color='purple', s=50, marker='s', edgecolors='black', linewidths=1, zorder=5)
-        
-        ax.set_title(f'Latent z Trajectories During Integration - Sequences ({n_samples} samples)', fontsize=14, fontweight='bold')
-        ax.set_xlabel('z[0]', fontsize=12)
-        ax.set_ylabel('z[1]', fontsize=12)
-        ax.grid(True, alpha=0.3)
-        
-        legend_elements = [
-            Line2D([0], [0], color='purple', linewidth=2, label='Trajectory'),
-            Line2D([0], [0], marker='s', color='w', markerfacecolor='gray', markersize=10, label='End', markeredgecolor='black')
-        ]
-        ax.legend(handles=legend_elements, loc='upper right')
-        
-        fig.tight_layout()
-        fig.savefig(os.path.join(output_dir, 'latent_trajectories.png'), dpi=200, bbox_inches='tight')
-        plt.close(fig)
+        plot_latent_trajectories(
+            model=self.model,
+            params=self.params,
+            model_type=self.model_type,
+            unconditional=self.unconditional,
+            output_dir=output_dir,
+            cond_x=cond_x,
+            num_trajectories=num_trajectories,
+            num_steps=num_steps,
+            prng_key=None,  # Not used - always use MLE (predict with no prng_key)
+            rng=None  # Not used - always use MLE (predict with no prng_key)
+        )
 

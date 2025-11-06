@@ -30,17 +30,17 @@ class VAEFlowConfig(BaseConfig):
         "input_shape": "NA",  # Will be set based on z_dim
         "output_shape": "NA",  # Will be set based on z_dim or z_dim**2
         "latent_shape": "NA",  # Will be set based on x_dim
-        "recon_loss_type": "cross_entropy", # Options: "cross_entropy", "mse", "none".  Should be consistent with decoder type
+        "recon_loss_type": "mse", # Options: "cross_entropy", "mse", "none".  Should be consistent with decoder type
         "recon_weight": 0.1,  # Weight for reconstruction loss in total loss
         "reg_weight": 0.0,  # Weight for regularization loss in total loss
-        "sigma": 0.02,  # Noise level for flow matching
+        "vae_weight": 0.0,  # Weight for VAE loss in total loss
         "integration_method": "euler",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
                                            # Only use midpoint for diffusion model.  singularities at t=0 break forward integration.
         "encode_x": False,  # Whether to encode x before passing to CRN (True for sequences, False for backward compatibility)
     }))
     
     noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "schedule_type": "exponential",  # Type of schedule (linear, exponential, cosine, sigmoid, cauchy, laplace, logistic, quadratic, polynomial, monotonic_nn, learnable, network)
+        "schedule_type": "linear",  # Type of schedule (linear, exponential, cosine, sigmoid, cauchy, laplace, logistic, quadratic, polynomial, monotonic_nn, learnable, network)
         "learnable": True,  # Whether schedule parameters are learnable (False uses stop_gradient)
         "hidden_dims": (64, 64),  # Hidden dimensions for NoiseScheduleNetwork schedule
         # Comprehensive default parameters for all schedules (common naming convention)
@@ -229,26 +229,6 @@ class VAE_flow(nn.Module):
     def lazy_error(self, z_t, z_target, alpha_t):     return z_t - jnp.sqrt(alpha_t)* z_target
     def lazy_noise(self, z_t, z_target, alpha_t):     return self.lazy_error(z_t, z_target, alpha_t) / jnp.sqrt(1.0 - alpha_t)
 
-    def lazy_KL_from_target(self, z_target_est, z_target, alpha_t, gamma_prime_t):
-        diff = z_target - z_target_est
-        return self.lazy_target_snr(alpha_t, gamma_prime_t) * jnp.sum(diff ** 2, axis=tuple(range(-self.z_ndims, 0)))
-
-    def lazy_KL_from_noise(self, noise_est, z_t, z_target, alpha_t, gamma_prime_t):
-        noise_diff = self.lazy_noise(z_t, z_target, alpha_t) - noise_est
-        return self.lazy_noise_snr(alpha_t, gamma_prime_t) * jnp.sum(noise_diff ** 2, axis=tuple(range(-self.z_ndims, 0)))
-
-    def lazy_KL_from_score(self, score_est, z_t, z_target, alpha_t, gamma_prime_t):
-        score_diff = self.lazy_score(z_t, z_target, alpha_t) - score_est
-        return self.lazy_score_snr(alpha_t, gamma_prime_t) * jnp.sum(score_diff ** 2, axis=tuple(range(-self.z_ndims, 0)))
-
-    def lazy_KL_from_error(self, error_est, z_t, z_target, alpha_t, gamma_prime_t):
-        error_diff = self.lazy_error(z_t, z_target, alpha_t) - error_est
-        return self.lazy_error_snr(alpha_t, gamma_prime_t) * jnp.sum(error_diff ** 2, axis=tuple(range(-self.z_ndims, 0)))
-
-    def lazy_KL_from_flow(self, flow_est, z_t, z_target, alpha_t, gamma_prime_t):
-        noise = self.lazy_noise(z_t, z_target, alpha_t)
-        flow_diff = self.lazy_flow(z_t, noise, alpha_t, gamma_prime_t) - flow_est
-        return self.lazy_flow_snr * jnp.sum(flow_diff ** 2, axis=tuple(range(-self.z_ndims, 0))) / (gamma_prime_t ** 2)
 
     @nn.compact
     def get_noise_params(self, t: jnp.ndarray):
@@ -304,6 +284,9 @@ class VAE_flow(nn.Module):
         mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})
         z_target = mu_z_target + jnp.exp(0.5 * logvar_z_target) * jr.normal(z_target_key, mu_z_target.shape)
 
+        y_vae = self.apply(params, z_target, method='decode', training=training, rngs={'dropout': key})
+        vae_loss = jnp.mean((y - y_vae)**2)
+
         # Sample initial latent state and time
         z_0 = jr.normal(z_0_key, batch_shape + self.z_shape)
         t = jr.uniform(t_key, batch_shape + self.z_ndims*(1,), minval=0.0, maxval=1.0)
@@ -347,23 +330,25 @@ class VAE_flow(nn.Module):
             recon_loss = jnp.mean((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
         else:
             recon_loss = 0.0
-        recon_loss = jnp.mean(self.lazy_target_snr(alpha_t, gamma_prime_t)*recon_loss)  # Average over batch dimension if needed        
+#        recon_loss = jnp.mean(self.lazy_target_snr(alpha_t, gamma_prime_t)*recon_loss)  # Average over batch dimension if needed        
+        recon_loss = jnp.mean(snr_weight*recon_loss)  # Average over batch dimension if needed        
    
-
         reg_weight = self.config.main.get("reg_weight", 0.0)
         recon_weight = self.config.main.get("recon_weight", 0.0)
+        vae_weight = self.config.main.get("vae_weight", 0.0)
 
-        total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss
+        total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss
         # total_loss = total_loss/snr_weight_mean
 
         return total_loss, {'flow_loss': flow_loss, 
                             'recon_loss': recon_loss, 
                             'reg_loss': reg_loss, 
+                            'vae_loss': vae_loss,
                             'total_loss': total_loss}
 
 
     @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, num_steps, integration_method, output_type, and training are static arguments
-    def predict(self, params: dict, x: jnp.ndarray, num_steps: int = 20, integration_method: str = "euler", output_type: str = "end_point", prng_key: jr.PRNGKey = None) -> jnp.ndarray:
+    def predict(self, params: dict, x: jnp.ndarray, num_steps: int = 20, integration_method: str = "euler", output_type: str = "end_point", num_samples: int = 1, prng_key: jr.PRNGKey = None) -> jnp.ndarray:
         """
         Make predictions using ODE solver integration.        
         Requires x is not None... use sample method for unconditional generation.
@@ -372,13 +357,20 @@ class VAE_flow(nn.Module):
         batch_shape = x.shape[:-self.x_ndims]
         
         # Generate flattened initial latent state z_0
-        if prng_key is not None:
-            z_0 = jr.normal(prng_key, batch_shape + (self.z_dim,))
+        if num_samples > 1:
+            if prng_key is not None:
+                z_0 = jr.normal(prng_key, (num_samples,) + batch_shape + (self.z_dim,))
+            else:
+                raise ValueError("prng_key is required when num_samples > 1")
+            z_0 = jr.normal(prng_key, (num_samples,) + batch_shape + (self.z_dim,))
         else:
-            z_0 = jnp.zeros(batch_shape + (self.z_dim,))  # ode expects vectorized z
+            if prng_key is not None:
+                z_0 = jr.normal(prng_key, batch_shape + (self.z_dim,))
+            else:
+                z_0 = jnp.zeros(batch_shape + (self.z_dim,))  # ode expects vectorized z
         
         def vector_field(params, z, x, t):
-            z = self._unflatten_z(z)
+            z = self._unflatten_z(z)  # crn expects unflattened z
             dz_dt = self.apply(params, z, x, t, method='dz_dt', training=False)
             return self._flatten_z(dz_dt)  # ODE solver expects flattened z
         

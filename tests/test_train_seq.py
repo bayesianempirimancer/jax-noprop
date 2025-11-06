@@ -217,7 +217,7 @@ def test_model(model_type='flow_matching'):
         # Conditional generation
         num_gen = min(5, y_val.shape[0])
         cond_x = x_val[:num_gen]
-        y_gen = trainer.conditional_generate(cond_x, num_steps=10, prng_key=gen_key)
+        y_gen = trainer.conditional_generate(cond_x, num_steps=10)
         print(f"✓ Conditional generation successful")
         print(f"  Generated shape: {y_gen.shape}")
         print(f"  Expected shape: ({num_gen}, {z_seq_len}, {embed_dim})")

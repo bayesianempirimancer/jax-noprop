@@ -146,7 +146,7 @@ def main():
     num_gen = min(100, y_val.shape[0])
     cond_x = x_val[:num_gen]
     key, gen_key = jr.split(key)
-    y_gen = np.array(trainer.conditional_generate(cond_x, num_steps=20, prng_key=gen_key))
+    y_gen = np.array(trainer.conditional_generate(cond_x, num_steps=20))
     y_real = np.array(y_val[:num_gen])
     
     print(f"Generated sequences: {y_gen.shape}")
