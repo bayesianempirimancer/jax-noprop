@@ -239,9 +239,12 @@ def test_gmm_vbem():
     E_pi_final = np.array(final_expectations['E_pi'])
     alpha_mix_final = np.array(gmm_params['alpha_mix'])
     
-    # Filter clusters: active if alpha_mix > 1 + prior_alpha_mix
-    active_mask = alpha_mix_final > 1 + prior_alpha_mix
-    active_cluster_indices = np.where(active_mask)[0]
+    # Compute actual cluster assignments via argmax on log probabilities
+    log_p_tilde = gmm_vbem.apply(gmm_params_frozen, z_e_data, training=False, method='log_p_tilde')
+    log_p_tilde = np.array(log_p_tilde)  # [n_samples, num_clusters]
+    cluster_assignments = np.argmax(log_p_tilde, axis=-1)  # [n_samples]
+    unique_clusters = np.unique(cluster_assignments)
+    active_cluster_indices = unique_clusters
     
     print("=" * 60)
     print("Final Results:")

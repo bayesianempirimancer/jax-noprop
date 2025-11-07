@@ -109,6 +109,7 @@ def test_single_gaussian_overclustering():
     loss_history = []
     kl_history = []
     neg_log_likelihood_history = []
+    active_clusters_history = []
     epoch_times = []
     
     # Training loop
@@ -202,8 +203,14 @@ def test_single_gaussian_overclustering():
         
         E_pi = np.array(expectations['E_pi'])
         
-        # Count active clusters (alpha_mix > 5.5 means more than 5 data points)
-        active_clusters = np.sum(gmm_params['alpha_mix'] > 5.5)
+        # Count active clusters via actual assignments
+        gmm_params_frozen_epoch = freeze({'params': gmm_params})
+        log_p_tilde = gmm_vbem.apply(gmm_params_frozen_epoch, z_e_data, training=False, method='log_p_tilde')
+        log_p_tilde = np.array(log_p_tilde)  # [n_samples, num_clusters]
+        cluster_assignments = np.argmax(log_p_tilde, axis=-1)  # [n_samples]
+        unique_clusters = np.unique(cluster_assignments)
+        active_clusters = len(unique_clusters)
+        active_clusters_history.append(active_clusters)
         
         epoch_end_time = time.perf_counter()
         epoch_time = epoch_end_time - epoch_start_time
@@ -215,7 +222,7 @@ def test_single_gaussian_overclustering():
         avg_step_time = avg_epoch_time / num_batches if num_batches > 0 else 0.0
         
         print(f"Epoch {epoch}:")
-        print(f"  Active clusters (alpha_mix > 5.5): {active_clusters}")
+        print(f"  Active clusters (via assignments): {active_clusters}")
         print(f"  Max mixing weight: {np.max(E_pi):.6f}")
         print(f"  Min mixing weight: {np.min(E_pi):.6f}")
         print(f"  Mean mixing weight: {np.mean(E_pi):.6f}")
@@ -247,9 +254,12 @@ def test_single_gaussian_overclustering():
     E_pi_final = np.array(final_expectations['E_pi'])
     alpha_mix_final = np.array(gmm_params['alpha_mix'])
     
-    # Count active clusters
-    active_mask = alpha_mix_final > 5.5
-    active_cluster_indices = np.where(active_mask)[0]
+    # Count active clusters via actual assignments
+    log_p_tilde = gmm_vbem.apply(gmm_params_frozen, z_e_data, training=False, method='log_p_tilde')
+    log_p_tilde = np.array(log_p_tilde)  # [n_samples, num_clusters]
+    cluster_assignments = np.argmax(log_p_tilde, axis=-1)  # [n_samples]
+    unique_clusters = np.unique(cluster_assignments)
+    active_cluster_indices = unique_clusters
     num_active = len(active_cluster_indices)
     
     # Print timing summary
@@ -270,7 +280,7 @@ def test_single_gaussian_overclustering():
     print("Final Results:")
     print("=" * 60)
     print(f"Total clusters: {num_clusters}")
-    print(f"Active clusters (alpha_mix > 5.5): {num_active}")
+    print(f"Active clusters (via assignments): {num_active}")
     print(f"True mean: {true_mean}")
     print(f"True variance: {true_variance}")
     print(f"\nLearned statistics (from active clusters):")
@@ -443,11 +453,11 @@ def test_single_gaussian_overclustering():
     
     # Plot 4: Number of active clusters over time
     ax = axes[1, 1]
-    active_counts = [np.sum(alpha_mix > 5.5) for alpha_mix in alpha_mix_history]
-    ax.plot(epochs_plot, active_counts, marker='o', linewidth=2, markersize=6)
+    epochs_plot_active = list(range(len(active_clusters_history)))
+    ax.plot(epochs_plot_active, active_clusters_history, marker='o', linewidth=2, markersize=6)
     ax.set_title('Number of Active Clusters Over Time')
     ax.set_xlabel('Epoch')
-    ax.set_ylabel('Active Clusters (alpha_mix > 5.5)')
+    ax.set_ylabel('Active Clusters (via assignments)')
     ax.grid(True, alpha=0.3)
     ax.axhline(y=1, color='r', linestyle='--', alpha=0.5, label='Expected (1 cluster)')
     ax.legend()

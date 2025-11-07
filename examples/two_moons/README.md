@@ -245,6 +245,103 @@ python -m src.flow_models.train_gen \
     --seed 42
 ```
 
+## Configuration File
+
+The `config.py` file in this directory provides default configuration values for all model parameters. You have two options for customizing these parameters:
+
+### Option 1: Command Line Arguments (Quick Overrides)
+
+Many common parameters can be overridden using command line flags. This is convenient for quick experiments and parameter sweeps. Command line arguments **take precedence** over config file values.
+
+**Available command line overrides:**
+- `--recon_weight`: Override reconstruction loss weight
+- `--reg_weight`: Override regularization weight
+- `--noise_schedule`: Override noise schedule type (`linear`, `exponential`, etc.)
+- `--noise_schedule_learnable`: Toggle learnable noise schedule
+- `--crn_type`: Override CRN type (`vanilla`, `geometric`, `potential`, etc.)
+- `--network_type`: Override network backbone (`mlp`, `bilinear`, `convex`)
+- `--hidden_dims`: Override hidden layer dimensions
+- `--encoder_model_type`: Override encoder type (`identity`, `linear`, `mlp`)
+- `--decoder_model_type`: Override decoder model type
+- `--decoder_type`: Override decoder type (`identity`, `linear`, `none`)
+- And many more (see `--help` for each training script)
+
+**Example:**
+```bash
+# Override just a few parameters via command line
+python -m src.flow_models.train \
+    --model_type flow_matching \
+    --data_path data/two_moons_xy_format.pkl \
+    --recon_weight 4.0 \
+    --noise_schedule linear
+```
+
+### Option 2: Direct Config File Editing (Finer-Grained Control)
+
+For more comprehensive control or to modify parameters not exposed via command line, you can directly edit `examples/two_moons/config.py`. This gives you access to **all** configuration options, including:
+
+- **Main configuration** (`main` dict):
+  - Data shapes (input_shape, output_shape, latent_shape)
+  - Loss types and weights (recon_loss_type, recon_weight, reg_weight)
+  - Flow model settings (use_snr_weight, integration_method, sigma)
+  
+- **Noise schedule** (`noise_schedule` dict):
+  - Schedule type and learnability
+  - Hidden dimensions for learnable schedules
+  - Detailed parameters for different schedule types (alpha_bar_min/max, s, k, beta, etc.)
+
+- **CRN network** (`crn` dict):
+  - Model and network types
+  - Hidden dimensions
+  - Time embedding configuration
+  - Activation functions, batch norm, dropout
+
+- **Encoder/Decoder** (`encoder` and `decoder` dicts):
+  - Model types and architectures
+  - Hidden dimensions for MLP variants
+  - Activation functions and dropout rates
+
+**Example: Editing config.py**
+
+```python
+# In examples/two_moons/config.py, modify the main configuration:
+main: FrozenDict = field(default_factory=lambda: FrozenDict({
+    "input_shape": (2,),
+    "output_shape": (2,),
+    "latent_shape": (2,),
+    "recon_loss_type": "mse",
+    "recon_weight": 4.0,  # Changed from 1.0
+    "reg_weight": 0.1,     # Changed from 0.0
+    # ... other parameters
+}))
+
+# Or modify CRN hidden dimensions:
+crn: FrozenDict = field(default_factory=lambda: FrozenDict({
+    "model_type": "vanilla",
+    "network_type": "mlp",
+    "hidden_dims": (64, 64, 64, 64),  # Changed from (32, 32, 32, 32, 32, 32)
+    # ... other parameters
+}))
+```
+
+**Important Notes:**
+- The config file uses `FrozenDict` from Flax, which means values are immutable at runtime
+- After editing the config file, restart your training script to use the new values
+- Command line arguments will still override config file values if both are specified
+- See the comments in `config.py` for detailed explanations of each parameter
+
+### Which Method Should I Use?
+
+- **Use command line arguments** when:
+  - You want to quickly test different values for common parameters
+  - You're running parameter sweeps or hyperparameter optimization
+  - You want to override just a few parameters without modifying code
+
+- **Edit the config file** when:
+  - You need to modify parameters not exposed via command line
+  - You want to set comprehensive defaults for all your experiments
+  - You need fine-grained control over noise schedule parameters, activation functions, or other advanced options
+
 ## Notes
 
 1. **Data Format**: The dataset uses one-hot encoded labels. Each label is a 2D vector: `[1, 0]` for class 0 and `[0, 1]` for class 1.
