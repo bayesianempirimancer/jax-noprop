@@ -320,7 +320,6 @@ class VAE_flow(nn.Module):
             snr_weight = self.lazy_snr_weight(alpha_t, gamma_prime_t).squeeze(tuple(range(-self.z_ndims, 0)))
         else: 
             snr_weight = 1.0
-        snr_weight_mean = jnp.mean(snr_weight)
 
         squared_error = jnp.mean((z_target_est - z_target) ** 2, axis=tuple(range(-self.z_ndims, 0)))
         snr_loss = jnp.mean(snr_weight * squared_error)
@@ -339,8 +338,12 @@ class VAE_flow(nn.Module):
             recon_loss = jnp.mean((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
         else:
             recon_loss = 0.0
- #       recon_loss = jnp.mean(self.lazy_target_snr(alpha_t_squeezed, gamma_prime_t_squeezed)*recon_loss)  # Average over batch dimension if needed        
+            
+        # recon_loss = jnp.mean(self.lazy_target_snr(alpha_t, gamma_prime_t).squeeze(tuple(range(-self.z_ndims, 0)))*recon_loss)  # Average over batch dimension if needed        
         recon_loss = jnp.mean(snr_weight*recon_loss)  # Average over batch dimension if needed        
+
+        # y_mu = self.apply(params, mu_z_target, method='decode', training=training, rngs={'dropout': key})
+        # direct_recon_Loss = jnp.mean((y - y_mu)**2)
 
         reg_weight = self.config.main.get("reg_weight", 0.0)
         recon_weight = self.config.main.get("recon_weight", 0.0)

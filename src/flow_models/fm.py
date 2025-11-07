@@ -31,7 +31,7 @@ class VAEFlowConfig(BaseConfig):
         "output_shape": "NA",  # Will be set based on z_dim or z_dim**2
         "latent_shape": "NA",  # Will be set based on x_dim
         "recon_loss_type": "mse", # Options: "cross_entropy", "mse", "none".  Should be consistent with decoder type
-        "recon_weight": 0.1,  # Weight for reconstruction loss in total loss
+        "recon_weight": 1.0,  # Weight for reconstruction loss in total loss
         "reg_weight": 0.0,  # Weight for regularization loss in total loss
         "vae_weight": 0.0,  # Weight for VAE loss in total loss
         "integration_method": "euler",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
@@ -330,9 +330,13 @@ class VAE_flow(nn.Module):
             recon_loss = jnp.mean((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
         else:
             recon_loss = 0.0
-#        recon_loss = jnp.mean(self.lazy_target_snr(alpha_t, gamma_prime_t)*recon_loss)  # Average over batch dimension if needed        
+        # recon_loss = jnp.mean(self.lazy_target_snr(alpha_t, gamma_prime_t)*recon_loss)  # Average over batch dimension if needed        
         recon_loss = jnp.mean(snr_weight*recon_loss)  # Average over batch dimension if needed        
    
+        # Decode mu_z_target to compare with y
+        # y_mu = self.apply(params, mu_z_target, method='decode', training=training, rngs={'dropout': key})
+        # direct_recon_Loss = jnp.mean((y - y_mu)**2)
+
         reg_weight = self.config.main.get("reg_weight", 0.0)
         recon_weight = self.config.main.get("recon_weight", 0.0)
         vae_weight = self.config.main.get("vae_weight", 0.0)

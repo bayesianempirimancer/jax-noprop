@@ -45,11 +45,11 @@ def generate_uniform_data(
 def test_single_gaussian_overclustering():
     """Test GMMVBEM with single Gaussian and severe over-clustering."""
     # Parameters
-    num_clusters = 200  # Severe over-clustering
+    num_clusters = 100  # Severe over-clustering
     latent_dim = 2
     n_samples = 2000
     batch_size = 32
-    num_epochs = 20
+    num_epochs = 100
     
     # Generate data
     key = jr.PRNGKey(1234)
@@ -72,10 +72,12 @@ def test_single_gaussian_overclustering():
     gmm_vbem = GMMVBEM(
         num_clusters=num_clusters,
         latent_dim=latent_dim,
-        prior_mu=0.0,
+        prior_mu=0.0,  # Scalar, will be converted to array [latent_dim]
         prior_alpha=0.5,
         prior_beta=0.5 / num_clusters,
-        prior_alpha_mix=0.5
+        prior_alpha_mix=1.0,  # Standard prior
+        beta_mix=0.1,  # Low mixing temperature
+        tie_precisions=True  # Tie all cluster precisions together
     )
     
     # Initialize parameters
@@ -83,20 +85,33 @@ def test_single_gaussian_overclustering():
     dummy_params = gmm_vbem.init(init_key, z_e_sample)
     gmm_params = unfreeze(dummy_params['params'])
     
+    # Initialize cluster means from random data points
+    key, init_subset_key = jr.split(key)
+    # Must have at least num_clusters samples
+    n_init_samples = max(num_clusters, min(num_clusters * 2, n_samples))
+    init_indices = jr.permutation(init_subset_key, n_samples)[:n_init_samples]
+    z_e_init = z_e_data[init_indices]
+    gmm_params = gmm_vbem.initialize_cluster_means(
+        params=gmm_params,
+        z_e=z_e_init,
+        key=init_subset_key
+    )
+    
     print("Initialized GMM parameters")
     print(f"  mu_n shape: {gmm_params['mu_n'].shape}")
     print(f"  alpha_n shape: {gmm_params['alpha_n'].shape}")
     print(f"  beta_n shape: {gmm_params['beta_n'].shape}")
     print(f"  alpha_mix shape: {gmm_params['alpha_mix'].shape}\n")
     
-    # Track parameter evolution
+    # Track parameter evolution and loss
     alpha_mix_history = []
+    loss_history = []
     
     # Training loop
-    N_eff = float(n_samples)
+    N_eff = 10000.0  # Effective number of data points
     
     for epoch in range(num_epochs):
-        # Shuffle data
+        # Shuffle data for each epoch
         key, shuffle_key = jr.split(key)
         perm = jr.permutation(shuffle_key, n_samples)
         z_e_shuffled = z_e_data[perm]
@@ -108,27 +123,32 @@ def test_single_gaussian_overclustering():
         for batch_idx in range(num_batches):
             z_e_batch = z_e_batches[batch_idx]
             
-            # Get cluster probabilities and logZ
+            # Update GMM parameters via VBEM
+            # Call update via apply since it's now @nn.compact
             gmm_params_frozen = freeze({'params': gmm_params})
-            _, cluster_probs, logZ = gmm_vbem.apply(gmm_params_frozen, z_e_batch)
-            
-            # Update GMM parameters via VBEM (with fill_unused)
-            gmm_params = gmm_vbem.update(
-                params=gmm_params,
-                z_e=z_e_batch,
-                cluster_probs=cluster_probs,
-                logZ=logZ,
+            gmm_params = gmm_vbem.apply(
+                gmm_params_frozen,
+                z_e_batch,
                 N_eff=N_eff,
-                use_fill_unused=True  # Use fill_unused
+                lr=0.1,
+                training=True,
+                method='update'
             )
         
         # Store history every epoch
         alpha_mix_history.append(np.array(gmm_params['alpha_mix']))
         
+        # Compute loss for this epoch
+        gmm_params_frozen_loss = freeze({'params': gmm_params})
+        # Use full dataset to compute loss
+        loss_value = gmm_vbem.apply(gmm_params_frozen_loss, z_e_data, training=False, method='loss')
+        loss_history.append(float(loss_value))
+        
         # Compute expected statistics
         gmm_params_frozen = freeze({'params': gmm_params})
         expectations = gmm_vbem.apply(
             gmm_params_frozen,
+            training=False,
             method='nat_to_stats'
         )
         
@@ -145,12 +165,23 @@ def test_single_gaussian_overclustering():
     
     # Final results
     gmm_params_frozen = freeze({'params': gmm_params})
-    final_expectations = gmm_vbem.apply(gmm_params_frozen, method='nat_to_stats')
+    final_expectations = gmm_vbem.apply(gmm_params_frozen, training=False, method='nat_to_stats')
     
     E_mu_final = np.array(final_expectations['E_mu'])
     alpha_n_final = np.array(gmm_params['alpha_n'])
     beta_n_final = np.array(gmm_params['beta_n'])
-    E_var_final = beta_n_final / (alpha_n_final - 1.0)
+    
+    # Compute variance: if tie_precisions is True, use summed alpha and beta
+    if gmm_vbem.tie_precisions:
+        # Sum across clusters, then compute variance (same for all clusters)
+        alpha_sum = np.sum(alpha_n_final, axis=0, keepdims=True)  # [1, latent_dim]
+        beta_sum = np.sum(beta_n_final, axis=0, keepdims=True)  # [1, latent_dim]
+        E_var_tied = beta_sum / (alpha_sum - 1.0)  # [1, latent_dim]
+        # Broadcast to all clusters
+        E_var_final = np.broadcast_to(E_var_tied, (gmm_vbem.num_clusters, gmm_vbem.latent_dim))
+    else:
+        E_var_final = beta_n_final / (alpha_n_final - 1.0)
+    
     E_pi_final = np.array(final_expectations['E_pi'])
     alpha_mix_final = np.array(gmm_params['alpha_mix'])
     
@@ -184,7 +215,7 @@ def test_single_gaussian_overclustering():
         print("  No active clusters found!")
     
     # Plot results
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
     
     # Plot 1: Data distribution
     ax = axes[0, 0]
@@ -205,32 +236,84 @@ def test_single_gaussian_overclustering():
     # Plot 2: Learned clusters - color data points by their most likely assignment
     ax = axes[0, 1]
     if num_active > 0:
-        # Get cluster assignments for all data points
+        # Get cluster assignments for all data points using minibatches (same batch_size as training)
         gmm_params_frozen = freeze({'params': gmm_params})
-        _, cluster_probs_all, _ = gmm_vbem.apply(gmm_params_frozen, z_e_data)
-        cluster_probs_all = np.array(cluster_probs_all)
-        assignments = np.argmax(cluster_probs_all, axis=-1)  # [n_samples]
+        assignments_list = []
+        try:
+            for i in range(0, n_samples, batch_size):
+                batch_end = min(i + batch_size, n_samples)
+                z_e_batch = z_e_data[i:batch_end]
+                _, log_p_tilde_batch = gmm_vbem.apply(gmm_params_frozen, z_e_batch, training=False, method='quantize')
+                # Compute cluster_probs from log_p_tilde using numerically stable softmax
+                from src.utils.math_utils import stable_softmax
+                cluster_probs_batch = stable_softmax(log_p_tilde_batch, axis=-1)  # [batch, num_clusters]
+                assignments_batch = np.argmax(np.array(cluster_probs_batch), axis=-1)  # [batch]
+                assignments_list.append(assignments_batch)
+            # Concatenate all assignments (handles variable batch sizes)
+            assignments = np.concatenate([a.flatten() for a in assignments_list])  # [n_samples]
+        except Exception as e:
+            print(f"Warning: Could not compute assignments for plotting: {e}")
+            # Fallback: just plot the cluster means without coloring points
+            assignments = None
         
         # Create color map for active clusters only
         cmap = plt.cm.tab20  # Use tab20 colormap for better color distinction
         active_cluster_colors = {idx: cmap(i % 20) for i, idx in enumerate(active_cluster_indices)}
         
         # Color points by their assigned cluster (only if assigned to active cluster)
-        point_colors = []
-        for assignment in assignments:
-            if assignment in active_cluster_indices:
-                point_colors.append(active_cluster_colors[assignment])
-            else:
-                point_colors.append('lightgray')  # Gray for inactive clusters
+        if assignments is not None:
+            point_colors = []
+            active_set = set(active_cluster_indices.tolist())  # Convert to set for faster lookup
+            for assignment in assignments:
+                assignment_int = int(assignment)  # Convert numpy scalar to Python int
+                if assignment_int in active_set:
+                    point_colors.append(active_cluster_colors[assignment_int])
+                else:
+                    point_colors.append('lightgray')  # Gray for inactive clusters
+            
+            ax.scatter(z_e_data[:, 0], z_e_data[:, 1], alpha=0.5, s=15, c=point_colors)
+        else:
+            # Fallback: just plot all points in gray
+            ax.scatter(z_e_data[:, 0], z_e_data[:, 1], alpha=0.3, s=15, c='lightgray', label='Data')
         
-        ax.scatter(z_e_data[:, 0], z_e_data[:, 1], alpha=0.5, s=15, c=point_colors)
+        # Plot all cluster means as red dots with ellipses showing 2*std
+        # Debug: print some statistics about cluster means
+        print(f"\nCluster means statistics (for plotting):")
+        print(f"  Total clusters: {num_clusters}")
+        print(f"  Mean of all cluster means: {np.mean(E_mu_final, axis=0)}")
+        print(f"  Std of all cluster means: {np.std(E_mu_final, axis=0)}")
+        print(f"  Range: [{np.min(E_mu_final, axis=0)}, {np.max(E_mu_final, axis=0)}]")
+        print(f"  Number near (±1, ±1): {np.sum((np.abs(np.abs(E_mu_final[:, 0]) - 1.0) < 0.2) & (np.abs(np.abs(E_mu_final[:, 1]) - 1.0) < 0.2))}")
         
-        # Plot cluster means
-        for idx, k in enumerate(active_cluster_indices):
+        # Import Ellipse for plotting
+        from matplotlib.patches import Ellipse
+        
+        # Plot ellipses and means for each cluster
+        # Debug: check if variances differ along axes
+        if num_clusters > 0:
+            sample_var = E_var_final[0]
+            print(f"  Sample cluster variance: {sample_var}")
+            print(f"  Sample std: {np.sqrt(np.maximum(sample_var, 0.01))}")
+            print(f"  Variances differ along axes? {not np.allclose(sample_var[0], sample_var[1])}")
+        
+        for k in range(num_clusters):
             mean = E_mu_final[k]
-            color = active_cluster_colors[k]
-            ax.scatter(mean[0], mean[1], c=[color], marker='x', s=100, linewidths=3, 
-                      edgecolors='black', zorder=10)
+            var = E_var_final[k]
+            
+            # Compute 2*std for ellipse (2*std in each direction = 4*std total width/height)
+            std = np.sqrt(np.maximum(var, 0.01))  # Clip to avoid negative variances
+            width = 4 * std[0]  # 2*std in x direction
+            height = 4 * std[1]  # 2*std in y direction
+            
+            # Plot ellipse (2-sigma ellipse)
+            ellipse = Ellipse(mean, width, height, angle=0, 
+                            facecolor='red', edgecolor='darkred', alpha=0.2, 
+                            linewidth=1.5, zorder=5)
+            ax.add_patch(ellipse)
+            
+            # Plot cluster mean as red dot
+            ax.scatter(mean[0], mean[1], c='red', marker='o', s=50, 
+                      edgecolors='darkred', linewidths=1, zorder=10, alpha=0.7)
         
         ax.set_title(f'Data Colored by Cluster Assignment ({num_active} active clusters)')
     else:
@@ -243,20 +326,46 @@ def test_single_gaussian_overclustering():
     ax.set_xlim(axes[0, 0].get_xlim())
     ax.set_ylim(axes[0, 0].get_ylim())
     
-    # Plot 3: Mixing weights evolution (top 20 clusters by final weight)
+    # Plot 3: Mixing weights evolution (top 50 clusters by final weight)
     ax = axes[1, 0]
     epochs_plot = list(range(len(alpha_mix_history)))
     if num_active > 0:
         # Get top clusters by final mixing weight
-        top_indices = np.argsort(E_pi_final)[-20:][::-1]
+        top_indices = np.argsort(E_pi_final)[-50:][::-1]
         for k in top_indices:
             pi_history = [alpha_mix[k] / (alpha_mix.sum() + 1e-8) for alpha_mix in alpha_mix_history]
             ax.plot(epochs_plot, pi_history, marker='o', label=f'Cluster {k}', markersize=3, linewidth=1)
-    ax.set_title('Top 20 Mixing Weights Evolution')
+    ax.set_title('Top 50 Mixing Weights Evolution')
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Mixing Weight')
     ax.legend(fontsize=6, ncol=2)
     ax.grid(True, alpha=0.3)
+    
+    # Plot 3 (upper right): Cluster centers weighted by frequency of use
+    ax = axes[0, 2]
+    # Get final mixing weights (mean of Dirichlet)
+    E_pi_plot = E_pi_final
+    # Scale circle sizes by mixing weights (normalize to reasonable range)
+    circle_sizes = E_pi_plot * 1000  # Scale factor for visibility
+    circle_sizes = np.maximum(circle_sizes, 10)  # Minimum size for visibility
+    
+    # Plot all cluster means with circles scaled by mixing weights
+    for k in range(num_clusters):
+        if not (np.any(np.isnan(E_mu_final[k])) or np.any(np.isnan(E_pi_plot[k]))):
+            ax.scatter(E_mu_final[k, 0], E_mu_final[k, 1], 
+                      s=circle_sizes[k], alpha=0.6, edgecolors='black', linewidths=1.5,
+                      c='red', label=f'C{k} (π={E_pi_plot[k]:.4f})' if E_pi_plot[k] > 0.01 and k < 10 else None)
+    
+    # Also plot data points for context
+    ax.scatter(z_e_data[:, 0], z_e_data[:, 1], c='gray', alpha=0.1, s=5)
+    ax.set_title('Cluster Centers (Circle Size ∝ Mixing Weight)')
+    ax.set_xlabel('Dimension 0')
+    ax.set_ylabel('Dimension 1')
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect('equal', adjustable='box')
+    ax.set_xlim(axes[0, 0].get_xlim())
+    ax.set_ylim(axes[0, 0].get_ylim())
     
     # Plot 4: Number of active clusters over time
     ax = axes[1, 1]
@@ -269,10 +378,22 @@ def test_single_gaussian_overclustering():
     ax.axhline(y=1, color='r', linestyle='--', alpha=0.5, label='Expected (1 cluster)')
     ax.legend()
     
+    # Plot 5 (bottom right): Loss evolution
+    ax = axes[1, 2]
+    ax.plot(epochs_plot, loss_history, marker='o', linewidth=2, markersize=4, color='purple')
+    ax.set_title('Loss Evolution')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Loss')
+    ax.grid(True, alpha=0.3)
+    ax.set_yscale('log')  # Use log scale for better visualization
+    
     plt.tight_layout()
-    output_path = Path('test_gmm_vbem_sanity.png')
+    # Save to artifacts directory
+    output_dir = Path('artifacts/test_gmm_vbem')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / 'sanity_test_results.png'
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"\nSaved plot to {output_path}")
+    print(f"\n✓ Saved sanity test plot to {output_path}")
     plt.close()
 
 

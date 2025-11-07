@@ -129,8 +129,7 @@ dmypy.json
 .pyre/
 
 # JAX/Flax specific
-*.pkl
-*.pickle
+# *.pkl and *.pickle removed - allowing these files to be tracked
 
 # Data directories
 data/
@@ -144,13 +143,14 @@ artifacts/
 experiment_results.md
 detailed_report_*.md
 
-# Generated experiment results (but keep the scripts)
-experiments/artifacts/
-experiments/experiment_results.md
-experiments/detailed_report_*.md
+# Experiments directory (entire directory ignored)
+experiments/
+
+# Tests directory (entire directory ignored)
+tests/
 
 # Model outputs
-*.png
+# *.png removed - allowing PNG files to be tracked
 *.jpg
 *.jpeg
 *.gif

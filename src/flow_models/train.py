@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from typing import Tuple, Optional
 import argparse
 import pickle
+import yaml
 from datetime import datetime
 from pathlib import Path
 from flax.core import FrozenDict
@@ -527,6 +528,25 @@ def main():
         model_save_dir = f"{args.save_dir}/{mtype}"
         print(f"Saving results to {model_save_dir}...")
         trainer.save_results(history, model_save_dir)
+
+        # Save the actual config used for this run in human-readable format
+        def unfreeze_frozendicts(obj):
+            """Recursively convert FrozenDicts to regular dicts."""
+            if isinstance(obj, FrozenDict):
+                return {k: unfreeze_frozendicts(v) for k, v in obj.items()}
+            elif isinstance(obj, dict):
+                return {k: unfreeze_frozendicts(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [unfreeze_frozendicts(item) for item in obj]  # Convert to list for YAML
+            else:
+                return obj
+        
+        config_dict = config.to_dict()
+        config_dict = unfreeze_frozendicts(config_dict)
+        
+        with open(Path(model_save_dir) / 'config.yaml', 'w') as f:
+            yaml.dump(config_dict, f, default_flow_style=False, sort_keys=True)
+        print(f"Config saved to {Path(model_save_dir) / 'config.yaml'}")
 
         # Print brief summary
         print(f"{mtype} final train loss: {history['train_losses'][-1]:.6f}")

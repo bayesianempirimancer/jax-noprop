@@ -284,8 +284,12 @@ class IdentityEncoder(nn.Module):
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        # Identity function - return input unchanged
-        return x
+        # Identity function - return input unchanged, but ensure it matches latent_shape
+        batch_shape = x.shape[:-len(self.input_shape)]
+        # Flatten input to (batch, input_dim)
+        x_flat = x.reshape(-1, self.input_dim)
+        # Reshape to match latent_shape
+        return x_flat.reshape(batch_shape + self.latent_shape)
 
 
 class LinearEncoder(nn.Module):

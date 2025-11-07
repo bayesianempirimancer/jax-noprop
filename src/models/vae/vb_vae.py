@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from src.configs.base_config import BaseConfig
 from src.models.vae.encoders import create_encoder
 from src.models.vae.decoders import create_decoder
+from src.models.vae.vb_gmm import GMMVBEM
 from src.utils.math_utils import logsumexp
 from jax.scipy.special import digamma
 
@@ -100,9 +101,10 @@ class VBVAE(nn.Module):
             num_clusters=num_clusters,
             latent_dim=latent_dim,
             prior_mu=self.config.main.get("prior_mu", 0.0),
-            prior_alpha=self.config.main.get("prior_alpha", 1.5),
-            prior_beta=self.config.main.get("prior_beta", 0.5),
+            prior_alpha=self.config.main.get("prior_alpha", 1.0),
+            prior_beta=self.config.main.get("prior_beta", 1.0),
             prior_alpha_mix=self.config.main.get("prior_alpha_mix", 1.0),
+            beta_mix=self.config.main.get("beta_mix", 0.0),
         )
         
         # Create decoder - takes quantized vectors
@@ -141,6 +143,11 @@ class VBVAE(nn.Module):
         """
         return self.decoder(z_q, training=training)
     
+    @nn.compact
+    def _gmm_log_p_tilde(self, z_e: jnp.ndarray) -> jnp.ndarray:
+        """Helper method to compute log_p_tilde from GMM-VBEM."""
+        return self.gmm_vbem.log_p_tilde(z_e)
+    
     @partial(jax.jit, static_argnums=(0, 4))
     def loss(self, params: dict, x: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> Tuple[jnp.ndarray, dict]:
         """
@@ -165,14 +172,27 @@ class VBVAE(nn.Module):
         z_e = self.apply(params, x, method='encode', training=training, rngs={'dropout': key})
                     
         # Get quantized representation using GMM-VBEM
-        # Access GMM-VBEM parameters from the params structure
-        gmm_params = params['params']['gmm_vbem']
+        # NOTE: Can't use self.gmm_vbem.apply() directly in JIT-compiled functions because
+        # self.gmm_vbem is not accessible in the traced context. Must use self.apply() with method path.
+        # Pass rngs for sampling during training (quantize uses self.make_rng('quantize'))
+        quantize_rngs = {'quantize': key} if training else {}
+        z_q, log_p_tilde = self.apply(
+            params, 
+            z_e, 
+            training=training, 
+            rngs=quantize_rngs,
+            method=lambda mdl, x: mdl.gmm_vbem.quantize(x, training=training)
+        )  # [batch, ..., num_clusters]
+        logZ = logsumexp(log_p_tilde, axis=-1)  # [batch, ...]
+        gmm_loss = -jnp.mean(logZ)
         
-        # Compute log_p_tilde for VB loss
-        # When using apply, Flax automatically binds the parameters, so nat_to_stats uses bound params
-        z_q, logZ = self.gmm_vbem.apply({'params': gmm_params}, z_e, method='log_p_tilde')
-                
-        # Straight-through estimator: use z_q for forward pass, but allow gradients through z_e
+        # Add KL divergence between GMM posterior and prior
+        # TODO: Currently disabled due to numerical stability issues - needs debugging
+        # Use apply to call the @nn.compact wrapper method
+        # gmm_params = params['params']['gmm_vbem']
+        # kl_prior = self.apply(params, gmm_params, method=lambda mdl, p: mdl.gmm_vbem._kl_prior_compact(p))
+        # gmm_loss = gmm_loss + kl_prior
+        
         z_q_st = z_e + jax.lax.stop_gradient(z_q - z_e)
         
         # Decode using straight-through quantized vectors
@@ -189,11 +209,16 @@ class VBVAE(nn.Module):
         else:
             raise ValueError(f"Unknown recon_loss_type: {recon_loss_type}")
                         
-        # Compute total loss
-        total_loss = recon_loss
+        # Compute GMM loss (negative log-likelihood)
+        # logZ is [batch, ...], so we need to average it
+        
+        # Compute total loss (weighted combination)
+        recon_weight = self.config.main.get("recon_weight", 1.0)
+        gmm_weight = self.config.main.get("gmm_weight", 1.0)
+        total_loss = recon_weight * recon_loss + gmm_weight * gmm_loss
         
         metrics = {
-            'gmm_loss': -logZ,
+            'gmm_loss': gmm_loss,
             'recon_loss': recon_loss,
             'total_loss': total_loss,
         }
@@ -214,13 +239,13 @@ class VBVAE(nn.Module):
         """
         # This is for initialization - call encode and decode separately
         z_e = self.encode(x, training=training)
-        z_q, _, _ = self.gmm_vbem(z_e)
+        z_q = self.gmm_vbem.quantize(z_e)[0]
         # Straight-through estimator for gradients
         z_q_st = z_e + jax.lax.stop_gradient(z_q - z_e)
         x_recon = self.decode(z_q_st, training=training)
         return x_recon
     
-    @partial(jax.jit, static_argnums=(0, 5))
+    @partial(jax.jit, static_argnums=(0, 6, 7))
     def train_step(
         self,
         encoder_decoder_params: dict,
@@ -270,6 +295,12 @@ class VBVAE(nn.Module):
         # Update encoder/decoder parameters via optimizer
         if optimizer is None:
             raise ValueError("Optimizer must be provided for train_step")
+        
+        # Ensure grads are FrozenDict if params are FrozenDict (for consistency)
+        if isinstance(encoder_decoder_params, FrozenDict) and not isinstance(grads, FrozenDict):
+            grads = freeze(unfreeze(grads))
+        elif not isinstance(encoder_decoder_params, FrozenDict) and isinstance(grads, FrozenDict):
+            grads = unfreeze(grads)
         
         updates, opt_state = optimizer.update(grads, opt_state, encoder_decoder_params)
         encoder_decoder_params = optax.apply_updates(encoder_decoder_params, updates)

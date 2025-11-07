@@ -305,12 +305,20 @@ class GenerationTrainer:
         
         if y_labels is not None and not self.unconditional:
             # Conditional generation: color by class labels
+            # Convert one-hot to class indices for coloring
+            if len(y_labels.shape) == 2 and y_labels.shape[1] > 1:
+                # One-hot encoded: use argmax to get class indices
+                class_indices = np.argmax(y_labels, axis=1)
+            else:
+                # Integer labels: use directly
+                class_indices = y_labels.flatten().astype(int)
+            
             # Real
-            ax[0].scatter(x_real[:, 0], x_real[:, 1], c=(y_labels[:, 0] > 0).astype(int), s=6, cmap='coolwarm', alpha=0.8)
+            ax[0].scatter(x_real[:, 0], x_real[:, 1], c=class_indices, s=6, cmap='coolwarm', alpha=0.8)
             ax[0].set_title('Real samples (x)')
             ax[0].set_aspect('equal', 'box')
             # Generated
-            ax[1].scatter(x_gen[:, 0], x_gen[:, 1], c=(y_labels[:, 0] > 0).astype(int), s=6, cmap='coolwarm', alpha=0.8)
+            ax[1].scatter(x_gen[:, 0], x_gen[:, 1], c=class_indices, s=6, cmap='coolwarm', alpha=0.8)
             ax[1].set_title('Generated samples (x | y)')
         else:
             # Unconditional generation: single color

@@ -10,6 +10,7 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 import pickle
+import yaml
 
 import jax
 import jax.numpy as jnp
@@ -107,10 +108,12 @@ def build_config(model: str,
     decoder_model_type = decoder_model_type if decoder_model_type is not None else ('identity' if latent_dim > 2 else 'identity')
     decoder_output_type = decoder_type if decoder_type is not None else ('linear' if latent_dim > 2 else 'none')
     
+    # Encoder always encodes y (targets/coordinates), so input_shape should be output_shape
+    # (not input_shape which is for CRN conditional input)
     enc = FrozenDict({
         'model_type': encoder_model_type,
         'encoder_type': 'deterministic',
-        'input_shape': input_shape,
+        'input_shape': output_shape,  # Encoder encodes y (coordinates), not x (conditions)
         'latent_shape': latent_shape,
         'hidden_dims': (16,16),
         'activation': 'swish',
@@ -261,6 +264,25 @@ def main():
     with open(Path(args.save_dir) / 'training_results.pkl', 'wb') as f:
         pickle.dump(history, f)
     trainer.save_params(str(Path(args.save_dir) / 'model_params.pkl'))
+
+    # Save the actual config used for this run in human-readable format
+    def unfreeze_frozendicts(obj):
+        """Recursively convert FrozenDicts to regular dicts."""
+        if isinstance(obj, FrozenDict):
+            return {k: unfreeze_frozendicts(v) for k, v in obj.items()}
+        elif isinstance(obj, dict):
+            return {k: unfreeze_frozendicts(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [unfreeze_frozendicts(item) for item in obj]  # Convert to list for YAML
+        else:
+            return obj
+    
+    config_dict = config.to_dict()
+    config_dict = unfreeze_frozendicts(config_dict)
+    
+    with open(Path(args.save_dir) / 'config.yaml', 'w') as f:
+        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=True)
+    print(f"Config saved to {Path(args.save_dir) / 'config.yaml'}")
 
     # Generation
     num_gen = min(2000, val_y.shape[0])

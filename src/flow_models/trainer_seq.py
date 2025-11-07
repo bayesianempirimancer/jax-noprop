@@ -22,7 +22,7 @@ from src.flow_models.df import VAE_flow as DiffusionModel, VAEFlowConfig as Diff
 from src.flow_models.ct import VAE_flow as CTModel, VAEFlowConfig as CTConfig
 
 from src.utils.plotting.plot_loss_trends import plot_loss_trends
-from examples.stock_prediction.plotting import (
+from experiments.stock_prediction.plotting import (
     plot_direct_comparison,
     plot_trajectory_comparison,
     plot_sequence_comparison,

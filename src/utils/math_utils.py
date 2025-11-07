@@ -56,3 +56,53 @@ def logsumexp_safe(
     Alias for logsumexp for backward compatibility.
     """
     return logsumexp(x, axis=axis, keepdims=keepdims, b=b)
+
+
+def stable_softmax(
+    logits: jnp.ndarray,
+    axis: int = -1
+) -> jnp.ndarray:
+    """
+    Numerically stable softmax function.
+    
+    Computes softmax(x) = exp(x) / sum(exp(x))
+    in a numerically stable way by subtracting the maximum value before exponentiating.
+    
+    Args:
+        logits: Input logits array
+        axis: Axis along which to compute softmax (default: -1)
+        
+    Returns:
+        Softmax probabilities (same shape as input, sums to 1 along axis)
+    """
+    # Find maximum along axis for numerical stability
+    x_max = jnp.max(logits, axis=axis, keepdims=True)
+    
+    # Subtract max before exponentiating to prevent overflow
+    x_shifted = logits - x_max
+    
+    # Exponentiate
+    exp_x = jnp.exp(x_shifted)
+    
+    # Normalize
+    return exp_x / (jnp.sum(exp_x, axis=axis, keepdims=True) + 1e-10)
+
+
+def softmax(
+    logits: jnp.ndarray,
+    axis: int = -1
+) -> jnp.ndarray:
+    """
+    Numerically stable softmax function (wrapper for stable_softmax).
+    
+    Computes softmax(x) = exp(x) / sum(exp(x))
+    in a numerically stable way by subtracting the maximum value before exponentiating.
+    
+    Args:
+        logits: Input logits array
+        axis: Axis along which to compute softmax (default: -1)
+        
+    Returns:
+        Softmax probabilities (same shape as input, sums to 1 along axis)
+    """
+    return stable_softmax(logits, axis=axis)
