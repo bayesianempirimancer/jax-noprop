@@ -93,13 +93,14 @@ def test_gmm_vbem():
     
     # Initialize GMMVBEM
     key, init_key = jr.split(key)
+    prior_alpha_mix = 1.0  # Standard prior
     gmm_vbem = GMMVBEM(
         num_clusters=num_clusters,
         latent_dim=latent_dim,
         prior_mu=0.0,  # Scalar, will be converted to array [latent_dim]
         prior_alpha=2.0,
         prior_beta=2.0 / num_clusters,
-        prior_alpha_mix=1.0,  # Standard prior
+        prior_alpha_mix=prior_alpha_mix,
         beta_mix=1.0  # Full Dirichlet posterior (beta_mix=1.0 uses full posterior)
     )
     
@@ -138,24 +139,6 @@ def test_gmm_vbem():
     N_eff = 2000.0
     
     for epoch in range(num_epochs):
-        # Fill unused clusters only at epoch 30
-        if epoch == 30:
-            gmm_params_frozen = freeze({'params': gmm_params})
-            # Use a sample of data for fill_unused
-            z_e_sample = z_e_data[:min(100, n_samples)]  # Use first 100 samples or all if less
-            updated_params_from_fill = gmm_vbem.apply(
-                gmm_params_frozen,
-                z_e_sample,
-                training=True,
-                method='fill_unused'
-            )
-            gmm_params = {
-                'mu_n': updated_params_from_fill['mu_n'],
-                'alpha_n': updated_params_from_fill['alpha_n'],
-                'beta_n': updated_params_from_fill['beta_n'],
-                'alpha_mix': updated_params_from_fill['alpha_mix']
-            }
-        
         # Shuffle data
         key, shuffle_key = jr.split(key)
         perm = jr.permutation(shuffle_key, n_samples)
@@ -202,11 +185,11 @@ def test_gmm_vbem():
                 gmm_params_frozen,
                 z_e_batch,
                 N_eff=N_eff,
-                lr=0.25,
+                lr=0.2,
                 training=True,
                 method='update'
             )
-            
+        
             # Check for NaN after update
             has_nan_after = np.any(np.isnan(gmm_params['mu_n'])) or np.any(np.isnan(gmm_params['alpha_n'])) or np.any(np.isnan(gmm_params['beta_n']))
             if has_nan_after and not has_nan_before:
@@ -256,8 +239,8 @@ def test_gmm_vbem():
     E_pi_final = np.array(final_expectations['E_pi'])
     alpha_mix_final = np.array(gmm_params['alpha_mix'])
     
-    # Filter clusters with more than 5 assigned data points (alpha_mix > 5.5) for upper right plot
-    active_mask = alpha_mix_final > 5.5
+    # Filter clusters: active if alpha_mix > 1 + prior_alpha_mix
+    active_mask = alpha_mix_final > 1 + prior_alpha_mix
     active_cluster_indices = np.where(active_mask)[0]
     
     print("=" * 60)
@@ -286,10 +269,10 @@ def test_gmm_vbem():
         from scipy.optimize import linear_sum_assignment
         
         distances = np.zeros((num_clusters, true_num_clusters))
-        for i in range(num_clusters):
-            for j in range(true_num_clusters):
-                distances[i, j] = np.linalg.norm(E_mu_final[i] - true_means[j])
-        
+    for i in range(num_clusters):
+        for j in range(true_num_clusters):
+            distances[i, j] = np.linalg.norm(E_mu_final[i] - true_means[j])
+    
         row_ind, col_ind = linear_sum_assignment(distances)
         E_mu_matched = E_mu_final[row_ind[:true_num_clusters]]
         E_var_matched = E_var_final[row_ind[:true_num_clusters]]
@@ -301,19 +284,19 @@ def test_gmm_vbem():
         var_error = np.mean(np.abs(E_var_matched - true_vars))
         var_rel_error = np.mean(np.abs(E_var_matched - true_vars) / (true_vars + 1e-8)) * 100
         pi_error = np.mean(np.abs(E_pi_matched - true_mix_weights))
-        
+    
         print(f"True means:\n{true_means}")
         print(f"Learned means:\n{E_mu_matched}")
         print(f"Mean error: {mean_error:.4f} ({mean_rel_error:.1f}%)\n")
-        
+    
         print(f"True variances:\n{true_vars}")
         print(f"Learned variances:\n{E_var_matched}")
         print(f"Variance error: {var_error:.4f} ({var_rel_error:.1f}%)\n")
-        
+    
         print(f"True mixing weights: {true_mix_weights}")
         print(f"Learned mixing weights: {E_pi_matched}")
         print(f"Mixing weight error: {pi_error:.4f}\n")
-        
+    
         # Assessment
         print("Accuracy Assessment:")
         print(f"  Means: {'✓' if mean_rel_error < 25 else '~' if mean_rel_error < 50 else '✗'}")
@@ -453,7 +436,8 @@ def test_gmm_vbem():
     
     # Plot 5: Loss evolution
     ax = axes[1, 2]
-    ax.plot(epochs_plot, loss_history, marker='o', linewidth=2, markersize=4, color='purple')
+    epochs_plot_loss = list(range(len(loss_history)))
+    ax.plot(epochs_plot_loss, loss_history, marker='o', linewidth=2, markersize=4, color='purple')
     ax.set_title('Loss Evolution')
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Loss')

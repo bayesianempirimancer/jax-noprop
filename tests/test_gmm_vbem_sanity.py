@@ -16,6 +16,7 @@ from flax.core import freeze, unfreeze
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
+import time
 
 from src.models.vae.vb_gmm import GMMVBEM
 
@@ -48,7 +49,7 @@ def test_single_gaussian_overclustering():
     num_clusters = 100  # Severe over-clustering
     latent_dim = 2
     n_samples = 2000
-    batch_size = 32
+    batch_size = 256
     num_epochs = 100
     
     # Generate data
@@ -77,7 +78,7 @@ def test_single_gaussian_overclustering():
         prior_beta=0.5 / num_clusters,
         prior_alpha_mix=1.0,  # Standard prior
         beta_mix=0.1,  # Low mixing temperature
-        tie_precisions=True  # Tie all cluster precisions together
+        tie_precisions=False  # Allow clusters to have different precisions
     )
     
     # Initialize parameters
@@ -106,11 +107,15 @@ def test_single_gaussian_overclustering():
     # Track parameter evolution and loss
     alpha_mix_history = []
     loss_history = []
+    kl_history = []
+    neg_log_likelihood_history = []
+    epoch_times = []
     
     # Training loop
     N_eff = 10000.0  # Effective number of data points
     
     for epoch in range(num_epochs):
+        epoch_start_time = time.perf_counter()
         # Shuffle data for each epoch
         key, shuffle_key = jr.split(key)
         perm = jr.permutation(shuffle_key, n_samples)
@@ -130,7 +135,7 @@ def test_single_gaussian_overclustering():
                 gmm_params_frozen,
                 z_e_batch,
                 N_eff=N_eff,
-                lr=0.1,
+                lr=0.2,
                 training=True,
                 method='update'
             )
@@ -138,11 +143,54 @@ def test_single_gaussian_overclustering():
         # Store history every epoch
         alpha_mix_history.append(np.array(gmm_params['alpha_mix']))
         
-        # Compute loss for this epoch
+        # Compute loss for this epoch and track components
         gmm_params_frozen_loss = freeze({'params': gmm_params})
         # Use full dataset to compute loss
         loss_value = gmm_vbem.apply(gmm_params_frozen_loss, z_e_data, training=False, method='loss')
         loss_history.append(float(loss_value))
+        
+        # Compute KL divergence separately and break it down
+        kl_value = gmm_vbem.apply(gmm_params_frozen_loss, training=False, method='kl_prior')
+        kl_history.append(float(kl_value))
+        
+        # Debug: compute KL components separately for first few epochs
+        if epoch < 3:
+            # Get parameters
+            mu_n = np.array(gmm_params['mu_n'])  # [100, 2]
+            alpha_n = np.array(gmm_params['alpha_n'])  # [100, 1]
+            beta_n = np.array(gmm_params['beta_n'])  # [100, 2]
+            alpha_mix = np.array(gmm_params['alpha_mix'])  # [100]
+            
+            # Compute Normal-Gamma KL manually to see breakdown
+            from src.utils.kl_divergence import normal_gamma_kl, dirichlet_kl
+            kappa_n = 2.0 * alpha_n  # [100, 1]
+            kappa_prior = 2.0 * 0.5  # scalar = 1.0
+            prior_beta_scaled = 0.5 / num_clusters**(2/latent_dim)
+            
+            kl_ng = normal_gamma_kl(
+                kappa_p=kappa_n,
+                mu_p=mu_n,
+                alpha_p=alpha_n,
+                beta_p=beta_n,
+                kappa_q=kappa_prior,
+                mu_q=0.0,
+                alpha_q=0.5,
+                beta_q=prior_beta_scaled
+            )  # [100, 2]
+            kl_ng_total = float(np.sum(kl_ng))
+            
+            kl_dir = dirichlet_kl(alpha_mix, 1.0)  # [1]
+            kl_dir_total = float(np.sum(kl_dir))
+            
+            print(f"    KL breakdown: Normal-Gamma={kl_ng_total:.2f}, Dirichlet={kl_dir_total:.2f}, Total={kl_value:.2f}")
+            print(f"    Per cluster-dim KL (mean): {np.mean(kl_ng):.2f}, (max): {np.max(kl_ng):.2f}, (min): {np.min(kl_ng):.2f}")
+        
+        # Compute negative log-likelihood separately
+        log_p_tilde = gmm_vbem.apply(gmm_params_frozen_loss, z_e_data, training=False, method='log_p_tilde')
+        from src.utils.math_utils import logsumexp
+        logZ = logsumexp(log_p_tilde, axis=-1)
+        neg_log_likelihood = -float(jnp.mean(logZ))
+        neg_log_likelihood_history.append(neg_log_likelihood)
         
         # Compute expected statistics
         gmm_params_frozen = freeze({'params': gmm_params})
@@ -157,11 +205,25 @@ def test_single_gaussian_overclustering():
         # Count active clusters (alpha_mix > 5.5 means more than 5 data points)
         active_clusters = np.sum(gmm_params['alpha_mix'] > 5.5)
         
+        epoch_end_time = time.perf_counter()
+        epoch_time = epoch_end_time - epoch_start_time
+        epoch_times.append(epoch_time)
+        
+        # Calculate average times
+        avg_epoch_time = np.mean(epoch_times) if epoch_times else epoch_time
+        num_batches = n_samples // batch_size
+        avg_step_time = avg_epoch_time / num_batches if num_batches > 0 else 0.0
+        
         print(f"Epoch {epoch}:")
         print(f"  Active clusters (alpha_mix > 5.5): {active_clusters}")
         print(f"  Max mixing weight: {np.max(E_pi):.6f}")
         print(f"  Min mixing weight: {np.min(E_pi):.6f}")
-        print(f"  Mean mixing weight: {np.mean(E_pi):.6f}\n")
+        print(f"  Mean mixing weight: {np.mean(E_pi):.6f}")
+        print(f"  Epoch time: {epoch_time:.3f}s (avg={avg_epoch_time:.3f}s), step_time={avg_step_time*1000:.2f}ms")
+        if epoch < 10 or epoch % 10 == 0:  # Print loss components for first 10 epochs and every 10th
+            print(f"  Loss: {loss_history[-1]:.4f}, NLL: {neg_log_likelihood_history[-1]:.4f}, KL: {kl_history[-1]:.4f}\n")
+        else:
+            print()
     
     # Final results
     gmm_params_frozen = freeze({'params': gmm_params})
@@ -189,6 +251,20 @@ def test_single_gaussian_overclustering():
     active_mask = alpha_mix_final > 5.5
     active_cluster_indices = np.where(active_mask)[0]
     num_active = len(active_cluster_indices)
+    
+    # Print timing summary
+    if epoch_times:
+        total_time = np.sum(epoch_times)
+        avg_epoch_time = np.mean(epoch_times)
+        num_batches = n_samples // batch_size
+        avg_step_time = avg_epoch_time / num_batches if num_batches > 0 else 0.0
+        print("=" * 60)
+        print("Training Timing Summary:")
+        print("=" * 60)
+        print(f"Total training time: {total_time:.2f}s ({total_time/60:.2f} minutes)")
+        print(f"Average time per epoch: {avg_epoch_time:.3f}s")
+        print(f"Average time per step (batch): {avg_step_time*1000:.2f}ms")
+        print()
     
     print("=" * 60)
     print("Final Results:")
@@ -326,19 +402,17 @@ def test_single_gaussian_overclustering():
     ax.set_xlim(axes[0, 0].get_xlim())
     ax.set_ylim(axes[0, 0].get_ylim())
     
-    # Plot 3: Mixing weights evolution (top 50 clusters by final weight)
+    # Plot 3: Mixing weights evolution (all clusters)
     ax = axes[1, 0]
     epochs_plot = list(range(len(alpha_mix_history)))
     if num_active > 0:
-        # Get top clusters by final mixing weight
-        top_indices = np.argsort(E_pi_final)[-50:][::-1]
-        for k in top_indices:
+        # Plot all clusters
+        for k in range(num_clusters):
             pi_history = [alpha_mix[k] / (alpha_mix.sum() + 1e-8) for alpha_mix in alpha_mix_history]
-            ax.plot(epochs_plot, pi_history, marker='o', label=f'Cluster {k}', markersize=3, linewidth=1)
-    ax.set_title('Top 50 Mixing Weights Evolution')
+            ax.plot(epochs_plot, pi_history, marker='o', markersize=2, linewidth=0.5, alpha=0.6)
+    ax.set_title('All Mixing Weights Evolution')
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Mixing Weight')
-    ax.legend(fontsize=6, ncol=2)
     ax.grid(True, alpha=0.3)
     
     # Plot 3 (upper right): Cluster centers weighted by frequency of use
@@ -385,7 +459,6 @@ def test_single_gaussian_overclustering():
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Loss')
     ax.grid(True, alpha=0.3)
-    ax.set_yscale('log')  # Use log scale for better visualization
     
     plt.tight_layout()
     # Save to artifacts directory

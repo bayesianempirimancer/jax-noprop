@@ -88,16 +88,19 @@ class GMMVBEM(nn.Module):
         N = z_e_flat.shape[0]
         
         # Randomly sample num_clusters data points (without replacement)
-        # If we have fewer data points than clusters, sample with replacement
+        # If we have fewer data points than clusters, add noise
+
+        
         if N >= self.num_clusters:
             idx = jr.choice(key, jnp.arange(N), (self.num_clusters,), replace=False)
+            mu_n = z_e_flat[idx]  # [num_clusters, latent_dim]
         else:
-            # Sample with replacement if we have fewer data points than clusters
-            idx = jr.choice(key, jnp.arange(N), (self.num_clusters,), replace=True)
-        
+            mu_n = z_e_flat
+            M = self.num_clusters - N
+            mu_n = jnp.concatenate([mu_n, z_e_flat.mean(0, keepdims=True) + jr.normal(key, (M, self.latent_dim))], axis=0)
+      
         # Set cluster means to selected data points
         # z_e_flat[idx] has shape [num_clusters, latent_dim]
-        mu_n = z_e_flat[idx]  # [num_clusters, latent_dim]
         
         # Update params
         params['mu_n'] = mu_n
@@ -166,6 +169,7 @@ class GMMVBEM(nn.Module):
         alpha_n = self.alpha_n.at[unused_indices, :].set(self.alpha_n.mean())
         beta_n = self.beta_n.at[unused_indices, :].set(self.beta_n.mean())
         alpha_mix = self.alpha_mix.at[unused_indices].set(0.1*self.alpha_mix.mean())
+        beta_n = 2*beta_n
         updated_params = {
             'mu_n': mu_n,
             'alpha_n': alpha_n,
@@ -428,7 +432,7 @@ class GMMVBEM(nn.Module):
         )  # Returns [num_clusters, latent_dim]
         
         # Sum over clusters and dimensions
-        kl_normal_gamma_total = jnp.sum(kl_normal_gamma)
+        kl_normal_gamma = jnp.sum(kl_normal_gamma)
         
         # KL divergence for Dirichlet (mixing weights)
         # Use the new dirichlet_kl function
@@ -438,10 +442,9 @@ class GMMVBEM(nn.Module):
         )  # Returns [1] (keepdims=True)
         
         # Sum to get scalar
-        kl_dirichlet_total = jnp.sum(kl_dirichlet)
+        kl_dirichlet = jnp.sum(kl_dirichlet)
         
-        total_kl = kl_normal_gamma_total + kl_dirichlet_total
-        return total_kl
+        return kl_normal_gamma + kl_dirichlet
     
     @nn.compact
     def loss(self, z_e: jnp.ndarray, training: bool = True) -> jnp.ndarray:
@@ -461,20 +464,19 @@ class GMMVBEM(nn.Module):
         """
         log_p_tilde = self.log_p_tilde(z_e, training=training)
         logZ = logsumexp(log_p_tilde, axis=-1)
-        neg_log_likelihood = -jnp.mean(logZ)
+        logZ = jnp.sum(logZ)
         
         # Add KL divergence between posterior and prior
         kl = self.kl_prior(training=training)
         
-        return neg_log_likelihood + kl
+        return -logZ + kl
 
-    # JIT disabled to allow fill_unused to work with simple Python control flow
-    # @partial(jax.jit, static_argnums=(0, 5, 6, 7))
+    @partial(nn.jit, static_argnames=('N_eff', 'lr', 'training'))
     @nn.compact
     def update(
         self,
         z_e: jnp.ndarray,
-        N_eff: float = 800.0,
+        N_eff: float = 2000.0,
         lr: float = 0.2,
         training: bool = True
     ) -> dict:
@@ -523,11 +525,12 @@ class GMMVBEM(nn.Module):
 
         # For alpha_n: when N_k is small, decay towards prior_alpha
         # Use a weighted combination: data term (when N_k > 0) and prior term (always present)
-        alpha_n_data_term = N_scale * 0.5 * N_k[:, None]  # [num_clusters, 1]
-        alpha_n_prior_term = self.prior_alpha  # scalar, broadcasts
-        alpha_n = (1 - lr) * alpha_n + lr * (alpha_n_data_term + alpha_n_prior_term)
-        
-        alpha_mix = (1 - lr) * alpha_mix + lr * (N_scale * N_k + self.prior_alpha_mix)    
+
+        alpha_n_like = N_scale * 0.5 * N_k[:, None]
+        alpha_mix_like = N_scale * N_k
+
+        alpha_n = (1 - lr) * alpha_n + lr * (alpha_n_like + self.prior_alpha)        
+        alpha_mix = (1 - lr) * alpha_mix + lr * (alpha_mix_like + self.prior_alpha_mix)    
         
         # Update kappa_mu_n: 
         # - When weighted_sum has data (N_k > 0), use weighted_sum
@@ -541,8 +544,8 @@ class GMMVBEM(nn.Module):
         
         diff = z_e_flat[:, None, :] - mu_n[None, :, :]  # [N, num_clusters, latent_dim]
         weighted_diff_sq = jnp.sum(r_nk[:, :, None] * (diff ** 2), axis=0)  # [num_clusters, latent_dim]
-        prior_diff_sq = 2.0 * self.prior_alpha * ((mu_n - self.prior_mu) ** 2)  # [num_clusters, latent_dim] - JAX broadcasts
-        beta_n = (1 - lr) * beta_n + lr * (N_scale * 0.5 * weighted_diff_sq + 0.5 * prior_diff_sq + self.prior_beta/self.num_clusters**(2/self.latent_dim))
+        prior_diff_sq =  self.prior_alpha/(alpha_n_like + self.prior_alpha)  * ((mu_n - self.prior_mu) ** 2)   # [num_clusters, latent_dim] - JAX broadcasts
+        beta_n = (1 - lr) * beta_n + lr * (N_scale * 0.5 * (weighted_diff_sq + prior_diff_sq) + self.prior_beta/self.num_clusters**(2/self.latent_dim))
                         
         # Create updated dict
         updated_params = {

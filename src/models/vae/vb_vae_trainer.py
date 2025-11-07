@@ -12,6 +12,7 @@ import pickle
 from pathlib import Path
 import matplotlib.pyplot as plt
 from flax.core import freeze, unfreeze
+import time
 
 from src.models.vae.vb_vae import VBVAE, VBVAEConfig
 from src.models.vae.vb_gmm import GMMVBEM
@@ -260,6 +261,7 @@ class VBVAETrainer:
             'recon_loss': 0.0,
             'gmm_loss': 0.0,
             'step': num_batches,
+            'num_batches': num_batches,  # Store for batch time calculation
         }
         
         # Separate encoder/decoder and GMM params
@@ -299,15 +301,10 @@ class VBVAETrainer:
                 z_e_flat = z_e.reshape(-1, z_e.shape[-1])  # [N_batch, latent_dim]
                 
                 # Update GMM parameters on this minibatch
-                # Call update via apply since it's now @nn.compact
-                gmm_params_frozen = freeze({'params': gmm_params})
-                gmm_params = gmm_vbem.apply(
-                    gmm_params_frozen,
+                gmm_params = self._update_gmm_vbem(
                     z_e_flat,
-                    N_eff=N_eff,
-                    lr=self.gmm_learning_rate,
-                    training=True,
-                    method='update'
+                    gmm_params,
+                    N_eff
                 )
             
             # Training step (updates encoder/decoder, uses updated GMM params)
@@ -389,6 +386,7 @@ class VBVAETrainer:
             'val_losses': [],
             'val_recon_losses': [],
             'val_gmm_losses': [],
+            'epoch_times': [],  # Time per epoch
         }
         
         if verbose:
@@ -399,6 +397,7 @@ class VBVAETrainer:
             print(f"GMM updates every {update_gmm_every_n_batches} batches")
         
         for epoch in tqdm(range(num_epochs), desc="Training", disable=not verbose):
+            epoch_start_time = time.perf_counter()
             use_dropout = epoch < dropout_epochs
             train_metrics = self.train_epoch(
                 x_data,
@@ -406,6 +405,8 @@ class VBVAETrainer:
                 use_dropout=use_dropout,
                 update_gmm_every_n_batches=update_gmm_every_n_batches
             )
+            epoch_end_time = time.perf_counter()
+            epoch_time = epoch_end_time - epoch_start_time
             
             # Store metrics
             history['train_losses'].append(train_metrics['total_loss'])
@@ -413,6 +414,9 @@ class VBVAETrainer:
             history['train_gmm_losses'].append(train_metrics['gmm_loss'])
             active_clusters = train_metrics.get('active_clusters', 0)
             history['active_clusters'].append(active_clusters)
+            
+            # Store timing metrics
+            history['epoch_times'].append(epoch_time)
             
             # Store normalized mixing weights and cluster means
             if 'normalized_pi' in train_metrics:
@@ -428,9 +432,14 @@ class VBVAETrainer:
                 history['val_gmm_losses'].append(val_metrics['gmm_loss'])
                 
                 if verbose:
+                    avg_epoch_time = np.mean(history['epoch_times']) if history['epoch_times'] else epoch_time
+                    num_batches = train_metrics.get('num_batches', 1)
+                    avg_step_time = avg_epoch_time / num_batches if num_batches > 0 else 0.0
                     print(f"Epoch {epoch}: train_loss={train_metrics['total_loss']:.4f}, "
                           f"val_loss={val_metrics['total_loss']:.4f}, "
-                          f"active_clusters={active_clusters}")
+                          f"active_clusters={active_clusters}, "
+                          f"epoch_time={epoch_time:.3f}s (avg={avg_epoch_time:.3f}s), "
+                          f"step_time={avg_step_time*1000:.2f}ms")
             elif validation_data is not None:
                 # Append previous validation loss to keep list lengths consistent
                 if len(history['val_losses']) > 0:
@@ -439,7 +448,20 @@ class VBVAETrainer:
                     history['val_gmm_losses'].append(history['val_gmm_losses'][-1])
         
         if verbose:
-            print("Training completed!")
+            if history['epoch_times']:
+                total_time = np.sum(history['epoch_times'])
+                avg_epoch_time = np.mean(history['epoch_times'])
+                # Get num_batches from the last train_metrics (all epochs should have same num_batches)
+                # We need to get it from the last epoch - store it in history or get from last train_metrics
+                # For now, calculate from data shape
+                num_samples = x_data.shape[0]
+                batch_size = batch_size  # Use the batch_size parameter
+                num_batches = num_samples // batch_size
+                avg_step_time = avg_epoch_time / num_batches if num_batches > 0 else 0.0
+                print(f"\nTraining completed!")
+                print(f"Total training time: {total_time:.2f}s ({total_time/60:.2f} minutes)")
+                print(f"Average time per epoch: {avg_epoch_time:.3f}s")
+                print(f"Average time per step (batch): {avg_step_time*1000:.2f}ms")
         
         return history
     
