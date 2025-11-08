@@ -17,9 +17,10 @@ import jax.random as jr
 import numpy as np
 import optax
 
-from src.flow_models.fm import VAE_flow as FlowMatchingModel, VAEFlowConfig as FlowMatchingConfig
-from src.flow_models.df import VAE_flow as DiffusionModel, VAEFlowConfig as DiffusionConfig
-from src.flow_models.ct import VAE_flow as CTModel, VAEFlowConfig as CTConfig
+from src.flow_models.fm import VAE_flow as FlowMatchingModel
+from src.flow_models.df import VAE_flow as DiffusionModel
+from src.flow_models.ct import VAE_flow as CTModel
+from src.flow_models.config import Config as FlowMatchingConfig, Config as DiffusionConfig, Config as CTConfig
 
 from src.utils.plotting.plot_loss_trends import plot_loss_trends
 from experiments.stock_prediction.plotting import (

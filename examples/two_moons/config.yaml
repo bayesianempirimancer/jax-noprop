@@ -1,0 +1,57 @@
+crn:
+  activation_fn: swish
+  dropout_rate: 0.0
+  hidden_dims:
+  - 32
+  - 32
+  - 32
+  - 32
+  - 32
+  - 32
+  model_type: vanilla
+  network_type: mlp
+  time_embed_dim: 32
+  time_embed_method: sinusoidal
+  use_batch_norm: false
+decoder:
+  activation: swish
+  decoder_type: none
+  dropout_rate: 0.0
+  hidden_dims:
+  - 32
+  - 16
+  latent_shape:
+  - 2
+  model_type: identity
+  output_shape:
+  - 2
+encoder:
+  activation: swish
+  dropout_rate: 0.0
+  encoder_type: deterministic
+  hidden_dims:
+  - 16
+  - 16
+  input_shape:
+  - 2
+  latent_shape:
+  - 2
+  model_type: identity
+main:
+  input_shape:
+  - 2
+  integration_method: euler
+  latent_shape:
+  - 2
+  noise_schedule: exponential
+  output_shape:
+  - 2
+  recon_loss_type: mse
+  recon_weight: 1.0
+  reg_weight: 0.0
+  sigma: 0.02
+  use_snr_weight: true
+model_name: vae_flow_network
+noise_schedule:
+  learnable: true
+  schedule_type: exponential

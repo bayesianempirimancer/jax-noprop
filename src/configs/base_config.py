@@ -159,6 +159,18 @@ class BaseConfig:
         # Always return FrozenDict
         return FrozenDict(result)
     
+    @staticmethod
+    def filter_none(d: Dict[str, Any]) -> Dict[str, Any]:
+        """Filter out None values from a dictionary.
+        
+        Args:
+            d: Dictionary to filter
+            
+        Returns:
+            Dictionary with None values removed
+        """
+        return {k: v for k, v in d.items() if v is not None}
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary using introspection."""
         result = {}
@@ -234,13 +246,17 @@ class BaseConfig:
     
     @staticmethod
     def _dict_to_frozen_dict(obj: Any) -> Any:
-        """Recursively convert dict objects to FrozenDict where appropriate."""
+        """Recursively convert dict objects to FrozenDict where appropriate.
+        
+        Also converts lists to tuples to ensure hashability.
+        """
         if isinstance(obj, dict):
             # Check if this looks like it should be a FrozenDict (has nested structure)
             # For now, convert all dicts to FrozenDict to match the config structure
             return FrozenDict({k: BaseConfig._dict_to_frozen_dict(v) for k, v in obj.items()})
         elif isinstance(obj, list):
-            return [BaseConfig._dict_to_frozen_dict(item) for item in obj]
+            # Convert lists to tuples for hashability (needed for Flax modules)
+            return tuple(BaseConfig._dict_to_frozen_dict(item) for item in obj)
         elif isinstance(obj, tuple):
             return tuple(BaseConfig._dict_to_frozen_dict(item) for item in obj)
         else:

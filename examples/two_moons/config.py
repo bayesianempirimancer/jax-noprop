@@ -19,11 +19,11 @@ Note: Command line arguments take precedence over config file values.
 
 from dataclasses import dataclass, field
 from flax.core import FrozenDict
-from src.configs.base_config import BaseConfig
+from src.flow_models.config import Config 
 
 
 @dataclass(frozen=True)
-class TwoMoonsFlowConfig(BaseConfig):
+class Config(Config):
     """
     Configuration for VAE with flow model on two moons dataset.
     
@@ -109,9 +109,9 @@ class TwoMoonsFlowConfig(BaseConfig):
         # Decoder configuration (maps latent z to output y)
         "model_type": "mlp",  # Decoder model type: "identity", "linear", or "mlp"
                               # (can override with --decoder_model_type)
-        "decoder_type": "identity",  # Decoder type: "identity", "linear", or "none"
-                                    # Identity for one-hot output, none for latent_dim=2
-                                    # (can override with --decoder_type)
+        "decoder_type": "identity",  # Decoder type: "linear", "softmax", "none", or "identity"
+                                     # "identity" for latent_dim=2 (no output transformation, passes through as-is)
+                                     # (can override with --decoder_type)
         "latent_shape": (2,),  # Latent space shape: 2D for two moons
         "output_shape": (2,),  # Output shape: one-hot encoded labels [n_samples, 2]
         "hidden_dims": (16, 32, 16),  # Hidden dimensions for MLP decoder (not used for identity/linear)
@@ -122,5 +122,5 @@ class TwoMoonsFlowConfig(BaseConfig):
 
 def get_two_moons_config():
     """Get default TwoMoonsFlowConfig instance."""
-    return TwoMoonsFlowConfig()
+    return Config()
 

@@ -5,101 +5,21 @@ import flax.linen as nn
 from flax.core import FrozenDict
 import optax
 from typing import Tuple, Dict, Optional
-from dataclasses import dataclass, field
 
 from functools import partial, cached_property
 
 # Import directly without going through src package to avoid einops dependency
-from src.configs.base_config import BaseConfig
-from src.utils.ode_integration import integrate_ode
+from src.flow_models.config import Config
 from src.vae.encoders import create_encoder
 from src.vae.decoders import create_decoder
 from src.flow_models.crn import create_conditional_resnet
-from src.embeddings.noise_schedules import (
-    create_noise_schedule,
-)
-
-
-@dataclass(frozen=True)
-class VAEFlowConfig(BaseConfig):
-    """Configuration for VAE with flow model using separate dictionaries."""
-    # BaseConfig fields
-    model_name: str = "vae_flow_network"
-
-    main: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "input_shape": "NA",  # Will be set based on z_dim
-        "output_shape": "NA",  # Will be set based on z_dim or z_dim**2
-        "latent_shape": "NA",  # Will be set based on x_dim
-        "recon_loss_type": "mse", # Options: "cross_entropy", "mse", "none".  Should be consistent with decoder type
-        "recon_weight": 1.0,  # Weight for reconstruction loss in total loss
-        "reg_weight": 0.0,  # Weight for regularization loss in total loss
-        "vae_weight": 0.0,  # Weight for VAE loss in total loss
-        "integration_method": "euler",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
-                                           # Only use midpoint for diffusion model.  singularities at t=0 break forward integration.
-        "encode_x": False,  # Whether to encode x before passing to CRN (True for sequences, False for backward compatibility)
-    }))
-    
-    noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "schedule_type": "linear",  # Type of schedule (linear, exponential, cosine, sigmoid, cauchy, laplace, logistic, quadratic, polynomial, monotonic_nn, learnable, network)
-        "learnable": True,  # Whether schedule parameters are learnable (False uses stop_gradient)
-        "hidden_dims": (64, 64),  # Hidden dimensions for NoiseScheduleNetwork schedule
-        # Comprehensive default parameters for all schedules (common naming convention)
-        "default_params": FrozenDict({
-            # Linear, Exponential, Cauchy, Laplace schedules
-            "alpha_bar_min": 0.01,
-            "alpha_bar_max": 0.99,
-            # Cosine schedule
-            "s": 0.008,
-            # Sigmoid, Logistic schedules
-            "k": 10.0,
-            "t_mid": 0.5,
-            # Exponential schedule
-            "beta": 2.0,
-            # Cauchy, Laplace schedules
-            "loc": 0.5,
-            "scale": 0.1,
-            # Polynomial schedule
-            "power": 2.0,
-            # NoiseScheduleNetwork schedule
-            "gamma_range": (-4.0, 4.0),
-        }),
-    }))
-
-    crn: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "model_type": "vanilla", # Options: "vanilla", "geometric", "potential", "natural"
-        "network_type": "mlp", # Options: "mlp", "bilinear", "convex"
-        "hidden_dims": (32, 32, 32, 32, 32),
-        "time_embed_dim": 64,
-        "time_embed_method": "sinusoidal",
-        "activation_fn": "swish",
-        "use_batch_norm": False,
-        "dropout_rate": 0.1,
-    }))
-    
-    encoder: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "model_type": "identity", # Options: "mlp", "mlp_normal", "resnet", "resnet_normal", "identity", "linear"
-        "encoder_type": "deterministic",  # Options: "deterministic", "normal", 
-        "input_shape": "NA",  # Will be set from main config if not specified
-        "latent_shape": "NA",
-        "hidden_dims": (16,16),
-        "activation": "swish",
-        "dropout_rate": 0.1,
-    }))
-    
-    decoder: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "model_type": "identity", # Options: "mlp", "resnet", "identity", 'linear'
-        "decoder_type": "none", # Options: "linear", "softmax", "none"
-        "latent_shape": "NA",  # Will be set from main config if not specified
-        "output_shape": "NA",
-        "hidden_dims": (32, 16),
-        "activation": "swish",
-        "dropout_rate": 0.1,
-    }))
+from src.embeddings.noise_schedules import create_noise_schedule
+from src.utils.ode_integration import integrate_ode
 
 
 class VAE_flow(nn.Module):
     """Variational Autoencoder with flow model using @nn.compact methods."""
-    config: VAEFlowConfig
+    config: Config
     
     def setup(self):
         """Initialize the CRN model and noise schedule as fields."""

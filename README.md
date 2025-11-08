@@ -49,58 +49,86 @@ Make sure you have JAX installed (with CUDA support for GPU acceleration).
 
 ## Quick Start
 
-### Basic Usage: Train All Three Models
+### Training Scripts
 
-```bash
-# Train Flow Matching (most robust)
-python -m src.flow_models.train_gen --model_type flow_matching --num_epochs 100
+This repository provides three main training scripts for different tasks:
 
-# Train Diffusion  
-python -m src.flow_models.train_gen --model_type diffusion --num_epochs 100
-
-# Train Continuous-Time
-python -m src.flow_models.train_gen --model_type ct --num_epochs 100
-```
+1. **`train.py`** - Regression/Classification (x → y)
+2. **`train_gen.py`** - Conditional/Unconditional Generation (y → x or x generation)
+3. **`train_seq.py`** - Sequence Generation (for sequence data)
 
 ### Two Moons Dataset Example
 
+See the [Two Moons Example README](examples/two_moons/README.md) for a complete walkthrough. Quick start:
+
 ```bash
-# Train Flow Matching on Two Moons (conditional generation)
+# Generate the dataset
+python examples/two_moons/generate_two_moons.py
+
+# Regression: Predict labels from coordinates
+python -m src.flow_models.train \
+    --config_file examples/two_moons/config.yaml \
+    --data_path data/two_moons.pkl \
+    --model_type flow_matching
+
+# Conditional Generation: Generate coordinates from labels
 python -m src.flow_models.train_gen \
+    --config_file examples/two_moons/config.yaml \
+    --data_path data/two_moons.pkl \
+    --model_type flow_matching
+
+# Unconditional Generation: Generate coordinates without labels
+python -m src.flow_models.train_gen \
+    --config_file examples/two_moons/config.yaml \
+    --data_path data/two_moons.pkl \
     --model_type flow_matching \
-    --data_path data/two_moons_formatted.pkl \
-    --num_epochs 100 \
-    --batch_size 256
-
-# Train Diffusion on Two Moons
-python -m src.flow_models.train_gen \
-    --model_type diffusion \
-    --data_path data/two_moons_formatted.pkl \
-    --num_epochs 100 \
-    --batch_size 256
-
-# Train CT on Two Moons
-python -m src.flow_models.train_gen \
-    --model_type ct \
-    --data_path data/two_moons_formatted.pkl \
-    --num_epochs 100 \
-    --batch_size 256
+    --unconditional
 ```
 
-### Compare Results
+### Output Structure
 
-After training, check the `artifacts/` directory for:
-- `conditional_generation.png` - Generated samples vs real data
-- `loss_trends.png` - Training and validation losses
-- `latent_trajectories.png` - ODE integration trajectories
+After training, results are saved to `artifacts/{model_type}_{task}/{YYYYMMDD_HHMM}/`:
+
+- **Regression**: `artifacts/{model_type}_reg/{timestamp}/`
+- **Conditional Generation**: `artifacts/{model_type}_gen/{timestamp}/`
+- **Unconditional Generation**: `artifacts/{model_type}_uncond_gen/{timestamp}/`
+
+Each directory contains:
+- `training_results.pkl` - Training history
+- `model_params.pkl` - Trained model parameters
+- `config.yaml` - Configuration used for training
+- Various plots (generation visualizations, loss trends, trajectories, etc.)
 
 ## Usage Examples
+
+### Configuration Files
+
+All training scripts support YAML configuration files:
+
+```bash
+# Use a YAML config file (recommended)
+python -m src.flow_models.train_gen \
+    --config_file examples/two_moons/config.yaml \
+    --data_path data/two_moons.pkl \
+    --model_type flow_matching
+
+# Use a custom config class
+python -m src.flow_models.train_gen \
+    --config_file examples/two_moons/config.yaml \
+    --config_class examples.two_moons.config.Config \
+    --data_path data/two_moons.pkl \
+    --model_type flow_matching
+```
+
+Command-line arguments override values in config files.
 
 ### Unconditional Generation
 
 ```bash
 # Generate samples without conditioning
 python -m src.flow_models.train_gen \
+    --config_file examples/two_moons/config.yaml \
+    --data_path data/two_moons.pkl \
     --model_type flow_matching \
     --unconditional \
     --num_epochs 100
@@ -109,8 +137,10 @@ python -m src.flow_models.train_gen \
 ### Custom Architecture
 
 ```bash
-# Use custom latent dimension and encoder/decoder
+# Override config file values via command line
 python -m src.flow_models.train_gen \
+    --config_file examples/two_moons/config.yaml \
+    --data_path data/two_moons.pkl \
     --model_type flow_matching \
     --latent_dim 8 \
     --encoder_model_type linear \
@@ -121,15 +151,14 @@ python -m src.flow_models.train_gen \
 ### Noise Schedule Selection
 
 ```bash
-# Use exponential noise schedule (default)
+# Override noise schedule (for diffusion/CT models)
 python -m src.flow_models.train_gen \
-    --model_type diffusion \
-    --noise_schedule exponential
-
-# Try different schedules: linear, cosine, sigmoid, exponential, cauchy, laplace, etc.
-python -m src.flow_models.train_gen \
+    --config_file examples/two_moons/config.yaml \
+    --data_path data/two_moons.pkl \
     --model_type diffusion \
     --noise_schedule cosine
+
+# Available schedules: linear, cosine, sigmoid, exponential, cauchy, laplace, logistic, quadratic, polynomial
 ```
 
 ### Training with Dropout Schedule
@@ -137,6 +166,8 @@ python -m src.flow_models.train_gen \
 ```bash
 # Use dropout for first 80 epochs, then disable it
 python -m src.flow_models.train_gen \
+    --config_file examples/two_moons/config.yaml \
+    --data_path data/two_moons.pkl \
     --model_type flow_matching \
     --num_epochs 100 \
     --dropout_epochs 80
@@ -174,30 +205,26 @@ python -m src.flow_models.train_gen \
 
 ```python
 from src.flow_models.trainer_gen import GenerationTrainer
-from src.flow_models.train_gen import build_config
+from src.flow_models.config import Config
 
-# Build configuration
-config = build_config(
-    model='flow_matching',  # or 'diffusion' or 'ct'
-    input_shape=(2,),  # conditional input dimension
-    output_shape=(2,),  # output dimension
-    latent_shape=(2,),  # latent dimension
-    noise_schedule='exponential',
-    # ... other config options
-)
+# Load configuration from YAML or create default
+config = Config.load_yaml('examples/two_moons/config.yaml')
+# Or create a default config
+# config = Config()
 
 # Create trainer
 trainer = GenerationTrainer(
     config=config,
     learning_rate=1e-3,
     optimizer_name='adam',
-    seed=42
+    seed=42,
+    unconditional=False  # Set to True for unconditional generation
 )
 
 # Initialize and train
 trainer.initialize(x_sample, y_sample, z_sample, t_sample)
 history = trainer.train(
-    x_data=x_train,
+    x_data=x_train,  # None for unconditional generation
     y_data=y_train,
     num_epochs=100,
     batch_size=256,
@@ -227,35 +254,50 @@ x_gen = trainer.unconditional_generate(
 
 ### Core Arguments
 
+- `--config_file`: Path to YAML config file (recommended)
+- `--config_class`: Optional custom config class (e.g., `examples.two_moons.config.Config`)
 - `--model_type`: `flow_matching`, `diffusion`, or `ct`
+- `--data_path`: Path to data file (required for most tasks)
 - `--num_epochs`: Number of training epochs (default: 50)
 - `--batch_size`: Batch size (default: 256)
 - `--learning_rate`: Learning rate (default: 1e-3)
-- `--latent_dim`: Latent space dimension (default: 2)
+- `--optimizer`: `adam`, `sgd`, or `adagrad` (default: `adam`)
+
+### Shape Arguments
+
+- `--input_shape` or `--input_dim`: Input shape/dimension
+- `--output_shape` or `--output_dim`: Output shape/dimension
+- `--latent_shape` or `--latent_dim`: Latent shape/dimension
+
+**Note:** If no config file is provided, you must specify these shapes.
 
 ### Architecture Arguments
 
-- `--encoder_model_type`: `linear`, `mlp`, `identity`, etc.
+- `--encoder_model_type`: `identity`, `linear`, `mlp`, `mlp_normal`, `resnet`, `resnet_normal`
 - `--decoder_model_type`: `identity`, `mlp`, `resnet`
 - `--decoder_type`: `linear`, `softmax`, `none`
+- `--crn_type`: CRN type (e.g., `vanilla`, `geometric`, `potential`)
+- `--network_type`: Network backbone (e.g., `mlp`, `bilinear`, `convex`)
+- `--hidden_dims`: Hidden layer dimensions (space-separated integers)
 
 ### Noise Schedule Arguments
 
-- `--noise_schedule`: `linear`, `cosine`, `sigmoid`, `exponential`, `cauchy`, `laplace`, `logistic`, `quadratic`, `polynomial` (default: `exponential`)
-- `--noise_schedule_learnable`: Make noise schedule learnable (default: False)
+- `--noise_schedule`: `linear`, `cosine`, `sigmoid`, `exponential`, `cauchy`, `laplace`, `logistic`, `quadratic`, `polynomial`, `monotonic_nn`, `learnable`, `network`
+- `--noise_schedule_learnable`: Make noise schedule learnable
 
 ### Training Arguments
 
 - `--dropout_epochs`: Number of epochs to use dropout (default: all epochs)
-- `--recon_weight`: Reconstruction loss weight (default: 1.0)
-- `--reg_weight`: Regularization loss weight (default: 0.0)
+- `--recon_weight`: Reconstruction loss weight
+- `--reg_weight`: Regularization loss weight
+- `--vae_weight`: VAE loss weight (for some models)
+- `--use_snr_weight`: Apply SNR weighting
 
-### Data Arguments
+### Generation Arguments
 
-- `--data_path`: Path to data file (default: `data/two_moons_formatted.pkl`)
-- `--unconditional`: Train for unconditional generation
+- `--unconditional`: Train for unconditional generation (only for `train_gen.py`)
 
-See `python -m src.flow_models.train_gen --help` for full list of options.
+See `python -m src.flow_models.train --help`, `python -m src.flow_models.train_gen --help`, or `python -m src.flow_models.train_seq --help` for full lists of options.
 
 ## Project Structure
 
@@ -266,14 +308,29 @@ jax-noprop/
 │   │   ├── fm.py              # Flow Matching implementation
 │   │   ├── df.py              # Diffusion implementation
 │   │   ├── ct.py              # Continuous-Time implementation
-│   │   ├── train_gen.py       # Generative training CLI
-│   │   └── trainer_gen.py     # Generative trainer
+│   │   ├── config.py          # Unified Config class
+│   │   ├── train.py           # Regression/classification training CLI
+│   │   ├── train_gen.py       # Generation training CLI
+│   │   ├── train_seq.py       # Sequence training CLI
+│   │   ├── trainer.py         # Regression trainer
+│   │   ├── trainer_gen.py     # Generation trainer
+│   │   ├── trainer_seq.py      # Sequence trainer
+│   │   └── training_utils.py  # Shared training utilities
+│   ├── configs/
+│   │   └── base_config.py     # BaseConfig class with YAML support
 │   ├── embeddings/
 │   │   └── noise_schedules.py # Noise schedule implementations
-│   └── models/
-│       └── vae/               # Encoder/decoder architectures
+│   └── vae/                   # Encoder/decoder architectures
+├── examples/
+│   └── two_moons/             # Two moons dataset example
+│       ├── config.py          # Example config class
+│       ├── config.yaml        # Example YAML config
+│       ├── generate_two_moons.py
+│       └── README.md
 ├── data/                      # Dataset files
-├── artifacts/                 # Training outputs (plots, models)
+├── artifacts/                 # Training outputs
+│   └── {model_type}_{task}/   # Organized by model and task
+│       └── {YYYYMMDD_HHMM}/   # Timestamped runs
 └── README.md
 ```
 
@@ -308,6 +365,16 @@ SNR-weighted noise prediction.
 Loss = E[SNR'(t) * ||target_prediction - target||²] / E[SNR'(t)]
 ```
 SNR-weighted target prediction.
+
+### Configuration System
+
+The repository uses a unified configuration system:
+
+- **YAML Config Files**: Human-readable configuration files (recommended)
+- **Python Config Classes**: Custom config classes that extend `BaseConfig`
+- **Command-Line Overrides**: All config values can be overridden via command-line arguments
+
+The unified `Config` class in `src/flow_models/config.py` works for all three model types (Flow Matching, Diffusion, CT) and all tasks (regression, generation, sequences).
 
 ## Contributing
 

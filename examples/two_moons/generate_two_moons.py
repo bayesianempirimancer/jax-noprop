@@ -203,7 +203,7 @@ def main():
                        help='Random seed for reproducibility')
     parser.add_argument('--output_dir', type=str, default='./data', 
                        help='Directory to save the dataset')
-    parser.add_argument('--filename', type=str, default='two_moons_xy_format.pkl', 
+    parser.add_argument('--filename', type=str, default='two_moons.pkl', 
                        help='Filename for the dataset')
     parser.add_argument('--train_ratio', type=float, default=0.80,
                        help='Fraction of data for training (default: 0.80)')

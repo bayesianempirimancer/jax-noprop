@@ -20,7 +20,7 @@ class Config:
     model_name: str = "decoder"
     config: dict = field(default_factory=lambda: {
         "model_type": "mlp", # Options: "mlp", "resnet", "identity", "linear"
-        "decoder_type": "linear",  # Options: "linear", "softmax", "none"
+        "decoder_type": "linear",  # Options: "linear", "softmax", "none", "identity"
         "input_shape": "NA",  # Will be set from main config if not specified
         "output_shape": "NA",
         "hidden_dims": (64, 32, 16),
@@ -38,10 +38,10 @@ def apply_output_transformation(output: jnp.ndarray, decoder_type: str) -> jnp.n
     elif decoder_type == "softmax":
         # Apply softmax along the last axis for classification outputs
         return jax.nn.softmax(output, axis=-1)
-    elif decoder_type == "none":
-        return output  # No transformation
+    elif decoder_type == "none" or decoder_type == "identity":
+        return output  # No transformation (identity mapping)
     else:
-        raise ValueError(f"Unknown decoder_type: {decoder_type}")
+        raise ValueError(f"Unknown decoder_type: {decoder_type}. Valid options: 'linear', 'softmax', 'none', 'identity'")
 
 def get_decoder_class(decoder_type: str):
     """Get decoder class by type string."""
@@ -201,9 +201,9 @@ class IdentityDecoder(nn.Module):
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        # For identity behavior: if decoder_type is 'none', return x as-is (reshape if needed)
+        # For identity behavior: if decoder_type is 'none' or 'identity', return x as-is (reshape if needed)
         decoder_type = self.config.get("decoder_type", "linear")
-        if decoder_type == "none":
+        if decoder_type == "none" or decoder_type == "identity":
             # Determine desired batch shape and reshape if total elements match
             batch_ndims = x.ndim - len(self.latent_shape) if self.latent_shape is not None else x.ndim - len(self.output_shape)
             batch_ndims = max(batch_ndims, 1)
