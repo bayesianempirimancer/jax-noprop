@@ -446,6 +446,16 @@ class VAEFlowTrainer:
             pickle.dump(results, f)
         print(f"Results saved to {results_file}")
         
+        # Save config as YAML using BaseConfig method
+        config_yaml_path = os.path.join(output_dir, "config.yaml")
+        config_json_path = os.path.join(output_dir, "config.json")
+        if hasattr(self.config, 'save_yaml'):
+            self.config.save_yaml(config_yaml_path)
+            print(f"Config saved to {config_yaml_path}")
+        elif hasattr(self.config, 'save_json'):
+            self.config.save_json(config_json_path)
+            print(f"Config saved to {config_json_path}")
+        
         # Save parameters
         params_file = os.path.join(output_dir, "model_params.pkl")
         self.save_params(params_file)

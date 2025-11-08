@@ -62,7 +62,7 @@ def get_decoder_class(decoder_type: str):
 
 def create_decoder(config_dict: Dict[str, Any], **kwargs) -> nn.Module:
     """Create a decoder model using the homogenized approach."""
-    from src.models.vae.decoders import get_decoder_class
+    from src.vae.decoders import get_decoder_class
     
     latent_shape = kwargs.get('latent_shape')
     output_shape = kwargs.get('output_shape')

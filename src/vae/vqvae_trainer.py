@@ -13,7 +13,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import traceback
 
-from src.models.vae.vqvae import VQVAE, VQVAEConfig
+from src.vae.vqvae import VQVAE, VQVAEConfig
 from flax import traverse_util
 
 # Disable JAX optimizations that can cause slowdowns
@@ -708,6 +708,14 @@ class VQVAETrainer:
         # Save parameters
         params_path = save_dir_path / 'model_params.pkl'
         self.save_params(params_path)
+        
+        # Save config as YAML using BaseConfig method
+        if hasattr(self.config, 'save_yaml'):
+            self.config.save_yaml(save_dir_path / "config.yaml")
+            print(f"Config saved to {save_dir_path / 'config.yaml'}")
+        elif hasattr(self.config, 'save_json'):
+            self.config.save_json(save_dir_path / "config.json")
+            print(f"Config saved to {save_dir_path / 'config.json'}")
         
         # Create and save training progress plot
         self._plot_training_progress(history, save_dir_path / 'training_progress.png')

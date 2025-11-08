@@ -14,8 +14,8 @@ import matplotlib.pyplot as plt
 from flax.core import freeze, unfreeze
 import time
 
-from src.models.vae.vb_vae import VBVAE, VBVAEConfig
-from src.models.vae.vb_gmm import GMMVBEM
+from src.vae.vb_vae import VBVAE, VBVAEConfig
+from src.vae.vb_gmm import GMMVBEM
 from src.utils.math_utils import logsumexp
 from flax import traverse_util
 
@@ -625,6 +625,14 @@ class VBVAETrainer:
         # Save parameters
         params_path = save_dir_path / 'model_params.pkl'
         self.save_params(params_path)
+        
+        # Save config as YAML using BaseConfig method
+        if hasattr(self.config, 'save_yaml'):
+            self.config.save_yaml(save_dir_path / "config.yaml")
+            print(f"Config saved to {save_dir_path / 'config.yaml'}")
+        elif hasattr(self.config, 'save_json'):
+            self.config.save_json(save_dir_path / "config.json")
+            print(f"Config saved to {save_dir_path / 'config.json'}")
         
         # Create and save training progress plot
         self._plot_training_progress(history, save_dir_path / 'training_progress.png')

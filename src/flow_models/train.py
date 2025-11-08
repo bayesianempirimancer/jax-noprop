@@ -13,7 +13,6 @@ import matplotlib.pyplot as plt
 from typing import Tuple, Optional
 import argparse
 import pickle
-import yaml
 from datetime import datetime
 from pathlib import Path
 from flax.core import FrozenDict
@@ -27,7 +26,7 @@ from .ct import VAEFlowConfig as CTConfig
 from .trainer import VAEFlowTrainer
 
 
-def load_two_moons_data(data_path: str = "data/two_moons_formatted.pkl") -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+def load_two_moons_data(data_path: str = "data/two_moons.pkl") -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Load the two moons dataset.
     
@@ -296,7 +295,7 @@ def main():
     parser.add_argument('--model_type', type=str, default='all', 
                        choices=['all', 'flow_matching', 'diffusion', 'ct'],
                        help='Model type to train. "all" trains flow_matching, diffusion, and ct sequentially')
-    parser.add_argument('--data_path', type=str, default='data/two_moons_formatted.pkl', 
+    parser.add_argument('--data_path', type=str, default='data/two_moons.pkl', 
                        help='Path to two moons dataset')
     parser.add_argument('--use_synthetic', action='store_true', 
                        help='Use synthetic data instead of two moons dataset')
@@ -530,22 +529,7 @@ def main():
         trainer.save_results(history, model_save_dir)
 
         # Save the actual config used for this run in human-readable format
-        def unfreeze_frozendicts(obj):
-            """Recursively convert FrozenDicts to regular dicts."""
-            if isinstance(obj, FrozenDict):
-                return {k: unfreeze_frozendicts(v) for k, v in obj.items()}
-            elif isinstance(obj, dict):
-                return {k: unfreeze_frozendicts(v) for k, v in obj.items()}
-            elif isinstance(obj, (list, tuple)):
-                return [unfreeze_frozendicts(item) for item in obj]  # Convert to list for YAML
-            else:
-                return obj
-        
-        config_dict = config.to_dict()
-        config_dict = unfreeze_frozendicts(config_dict)
-        
-        with open(Path(model_save_dir) / 'config.yaml', 'w') as f:
-            yaml.dump(config_dict, f, default_flow_style=False, sort_keys=True)
+        config.save_yaml(Path(model_save_dir) / 'config.yaml')
         print(f"Config saved to {Path(model_save_dir) / 'config.yaml'}")
 
         # Print brief summary

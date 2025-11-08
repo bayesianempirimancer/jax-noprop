@@ -24,7 +24,7 @@ from .ct import VAEFlowConfig as CTConfig
 from .trainer import VAEFlowTrainer
 
 
-def load_two_moons_data(data_path: str = "data/two_moons_formatted.pkl") -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+def load_two_moons_data(data_path: str = "data/two_moons.pkl") -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Load the two moons dataset.
     
@@ -292,7 +292,7 @@ def main():
     parser.add_argument('--model_type', type=str, default='all', 
                        choices=['all', 'flow_matching', 'diffusion', 'ct'],
                        help='Model type to train. "all" trains flow_matching, diffusion, and ct sequentially')
-    parser.add_argument('--data_path', type=str, default='data/two_moons_formatted.pkl', 
+    parser.add_argument('--data_path', type=str, default='data/two_moons.pkl', 
                        help='Path to two moons dataset')
     parser.add_argument('--use_synthetic', action='store_true', 
                        help='Use synthetic data instead of two moons dataset')

@@ -18,7 +18,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import traceback
 
-from src.models.vae.vae import VAE, VAEConfig
+from src.vae.vae import VAE, VAEConfig
 from flax import traverse_util
 
 # Disable JAX optimizations that can cause slowdowns
@@ -433,6 +433,14 @@ class VAETrainer:
         # Save parameters
         params_file = Path(output_dir) / "model_params.pkl"
         self.save_params(str(params_file))
+        
+        # Save config as YAML using BaseConfig method
+        if hasattr(self.config, 'save_yaml'):
+            self.config.save_yaml(Path(output_dir) / "config.yaml")
+            print(f"Config saved to {Path(output_dir) / 'config.yaml'}")
+        elif hasattr(self.config, 'save_json'):
+            self.config.save_json(Path(output_dir) / "config.json")
+            print(f"Config saved to {Path(output_dir) / 'config.json'}")
         
         # Create plots
         self._create_plots(results, output_dir)

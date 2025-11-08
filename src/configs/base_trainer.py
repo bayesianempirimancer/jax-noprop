@@ -937,20 +937,38 @@ class BaseETTrainer:
         with open(output_path / "training_results.pkl", "wb") as f:
             pickle.dump(results, f)
         
-        # Save model config
-        if hasattr(self.config, 'save_pretrained'):
+        # Save model config using BaseConfig methods (prefer YAML, fallback to JSON)
+        config_saved_as_yaml = False
+        if hasattr(self.config, 'save_yaml'):
+            self.config.save_yaml(output_path / "config.yaml")
+            config_saved_as_yaml = True
+        elif hasattr(self.config, 'save_json'):
+            self.config.save_json(output_path / "config.json")
+        elif hasattr(self.config, 'save_pretrained'):
             self.config.save_pretrained(str(output_path))
         else:
-            # Fallback: save as JSON
-            import json
-            with open(output_path / "config.json", "w") as f:
-                json.dump(results['config'], f, indent=2)
+            # Fallback: try to use config from results if it has save methods
+            config_obj = results.get('config', self.config)
+            if hasattr(config_obj, 'save_yaml'):
+                config_obj.save_yaml(output_path / "config.yaml")
+                config_saved_as_yaml = True
+            elif hasattr(config_obj, 'save_json'):
+                config_obj.save_json(output_path / "config.json")
+            else:
+                # Last resort: manual JSON save
+                import json
+                config_dict = config_obj.to_dict() if hasattr(config_obj, 'to_dict') else config_obj.__dict__
+                with open(output_path / "config.json", "w") as f:
+                    json.dump(config_dict, f, indent=2)
         
         # Save model parameters
         with open(output_path / "model_params.pkl", "wb") as f:
             pickle.dump(results['params'], f)
         
         print(f"Training results saved to: {output_path / 'training_results.pkl'}")
-        print(f"Model config saved to: {output_path / 'config.json'}")
+        if config_saved_as_yaml:
+            print(f"Model config saved to: {output_path / 'config.yaml'}")
+        else:
+            print(f"Model config saved to: {output_path / 'config.json'}")
         print(f"Model parameters saved to: {output_path / 'model_params.pkl'}")
         print("✅ Training complete!")

@@ -491,14 +491,32 @@ class GMMVBEM(nn.Module):
         
         cluster_probs = stable_softmax(log_p_tilde, axis=-1)  # [batch, ..., num_clusters]
         z_e_flat = z_e.reshape(-1, self.latent_dim)  # [N, latent_dim]
-        # Ensure cluster_probs is flattened correctly - handle any number of leading dimensions
-        # Flatten all leading dimensions, keeping only the last dimension (num_clusters)
-        # Compute responsibilities (soft assignments)
-        # cluster_probs should already be normalized (softmax applied in calling code)
+
         r_nk = cluster_probs.reshape(-1, self.num_clusters)  # [M, num_clusters]
                 
         N_k = jnp.sum(r_nk, axis=0)  # [num_clusters] - effective number of points in each cluster
-        weighted_sum = jnp.sum(r_nk[:, :, None] * z_e_flat[:, None, :], axis=0)  # [num_clusters, latent_dim]
+        N_scale = N_eff / z_e_flat.shape[0]  # weights the contribution from the minibatch to N_eff
+
+        alpha_mix = (1 - lr) * alpha_mix + lr * (N_scale * N_k + self.prior_alpha_mix)    
+
+        # Compute current kappa_mu_n before updates
+        kappa_mu_n = 2.0 * alpha_n * mu_n  # [num_clusters, latent_dim] - broadcasting: (3,1) * (3,2) -> (3,2)
+        kappa_mu_prior = 2.0 * self.prior_alpha * self.prior_mu  # [num_clusters, latent_dim] - JAX broadcasts
+        kappa_mu_like = jnp.sum(r_nk[:, :, None] * z_e_flat[:, None, :], axis=0)  # [num_clusters, latent_dim]
+
+        # Compute likelihood terms flr alpha and alpha_mix
+        alpha_n_like = N_scale * 0.5 * N_k[:, None]
+        alpha_n = (1 - lr) * alpha_n + lr * (alpha_n_like + self.prior_alpha)        
+        
+        kappa_mu_n = (1 - lr) * kappa_mu_n + lr * (N_scale * kappa_mu_like + kappa_mu_prior)
+        mu_n = kappa_mu_n / (2.0 * alpha_n)  # because alpha_n was already updated, add epsilon for stability
+        
+        diff = z_e_flat[:, None, :] - mu_n[None, :, :]  # [N, num_clusters, latent_dim]
+        weighted_diff_sq = jnp.sum(r_nk[:, :, None] * (diff ** 2), axis=0)  # [num_clusters, latent_dim]
+
+        prior_diff_sq =  self.prior_alpha/(alpha_n_like + self.prior_alpha)  * ((mu_n - self.prior_mu) ** 2)   # [num_clusters, latent_dim] - JAX broadcasts
+        beta_n = (1 - lr) * beta_n + lr * (N_scale * 0.5 * (weighted_diff_sq + prior_diff_sq) + self.prior_beta/self.num_clusters**(2/self.latent_dim))
+                        
 
         # # CORRECTION FACTOR UPDATES (original approach - commented out)
         # kappa_mu_n = 2.0 * alpha_n * mu_n  # [num_clusters, latent_dim] - broadcasting: (3,1) * (3,2) -> (3,2)
@@ -513,40 +531,6 @@ class GMMVBEM(nn.Module):
         # prior_diff_sq = 2.0 * self.prior_alpha * ((mu_n - self.prior_mu) ** 2)  # [num_clusters, latent_dim]
         # beta_n = beta_n + 0.5 * weighted_diff_sq + 0.5 * prior_diff_sq - correction_factor * (beta_n - self.prior_beta/self.num_clusters)
 
-        # LEARNING RATE UPDATES
-        N_scale = N_eff / z_e_flat.shape[0]  # Add epsilon to prevent division by zero
-        
-        # Compute current kappa_mu_n before updates
-        kappa_mu_n = 2.0 * alpha_n * mu_n  # [num_clusters, latent_dim] - broadcasting: (3,1) * (3,2) -> (3,2)
-        
-        # Prior term for kappa_mu_n (pulls unused clusters towards prior mean)
-        # When N_k is zero, we want to pull towards prior: kappa_mu_prior = 2 * prior_alpha * prior_mu
-        kappa_mu_prior = 2.0 * self.prior_alpha * self.prior_mu  # [num_clusters, latent_dim] - JAX broadcasts
-
-        # For alpha_n: when N_k is small, decay towards prior_alpha
-        # Use a weighted combination: data term (when N_k > 0) and prior term (always present)
-
-        alpha_n_like = N_scale * 0.5 * N_k[:, None]
-        alpha_mix_like = N_scale * N_k
-
-        alpha_n = (1 - lr) * alpha_n + lr * (alpha_n_like + self.prior_alpha)        
-        alpha_mix = (1 - lr) * alpha_mix + lr * (alpha_mix_like + self.prior_alpha_mix)    
-        
-        # Update kappa_mu_n: 
-        # - When weighted_sum has data (N_k > 0), use weighted_sum
-        # - When weighted_sum is zero (N_k = 0), pull towards prior
-        # Use a weighted combination based on whether cluster has data
-        kappa_mu_n_data_term = N_scale * weighted_sum  # [num_clusters, latent_dim]
-        # For unused clusters (N_k ≈ 0), add prior term to pull towards prior_mu
-        # Scale the prior term by (1.0 / N_scale) to keep it reasonable when N_scale is large
-        kappa_mu_n = (1 - lr) * kappa_mu_n + lr * (kappa_mu_n_data_term + kappa_mu_prior)
-        mu_n = kappa_mu_n / (2.0 * alpha_n)  # because alpha_n was already updated, add epsilon for stability
-        
-        diff = z_e_flat[:, None, :] - mu_n[None, :, :]  # [N, num_clusters, latent_dim]
-        weighted_diff_sq = jnp.sum(r_nk[:, :, None] * (diff ** 2), axis=0)  # [num_clusters, latent_dim]
-        prior_diff_sq =  self.prior_alpha/(alpha_n_like + self.prior_alpha)  * ((mu_n - self.prior_mu) ** 2)   # [num_clusters, latent_dim] - JAX broadcasts
-        beta_n = (1 - lr) * beta_n + lr * (N_scale * 0.5 * (weighted_diff_sq + prior_diff_sq) + self.prior_beta/self.num_clusters**(2/self.latent_dim))
-                        
         # Create updated dict
         updated_params = {
             'mu_n': mu_n,

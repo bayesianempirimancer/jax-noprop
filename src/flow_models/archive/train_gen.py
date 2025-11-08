@@ -23,7 +23,7 @@ from src.flow_models.df import VAEFlowConfig as DFConfig
 from src.flow_models.ct import VAEFlowConfig as CTConfig
 
 
-def load_two_moons_data(data_path: str = "data/two_moons_formatted.pkl"):
+def load_two_moons_data(data_path: str = "data/two_moons.pkl"):
     with open(data_path, 'rb') as f:
         data = pickle.load(f)
     x_train = jnp.array(data['train']['x'])
@@ -97,7 +97,7 @@ def build_config(model: str,
 def main():
     parser = argparse.ArgumentParser(description='Conditional generation training on Two Moons (x | y)')
     parser.add_argument('--model_type', type=str, default='flow_matching', choices=['flow_matching', 'diffusion', 'ct'])
-    parser.add_argument('--data_path', type=str, default='data/two_moons_formatted.pkl')
+    parser.add_argument('--data_path', type=str, default='data/two_moons.pkl')
     parser.add_argument('--input_dim', type=int, default=2)
     parser.add_argument('--output_dim', type=int, default=2)
     parser.add_argument('--latent_dim', type=int, default=2)

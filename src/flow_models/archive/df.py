@@ -12,8 +12,8 @@ from functools import partial, cached_property
 # Import directly without going through src package to avoid einops dependency
 from src.configs.base_config import BaseConfig
 from src.utils.ode_integration import integrate_ode
-from src.models.vae.encoders import create_encoder
-from src.models.vae.decoders import create_decoder
+from src.vae.encoders import create_encoder
+from src.vae.decoders import create_decoder
 from src.flow_models.crn import create_conditional_resnet
 
 

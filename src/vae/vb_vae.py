@@ -15,9 +15,9 @@ from typing import Tuple, Optional, Any
 from dataclasses import dataclass, field
 
 from src.configs.base_config import BaseConfig
-from src.models.vae.encoders import create_encoder
-from src.models.vae.decoders import create_decoder
-from src.models.vae.vb_gmm import GMMVBEM
+from src.vae.encoders import create_encoder
+from src.vae.decoders import create_decoder
+from src.vae.vb_gmm import GMMVBEM
 from src.utils.math_utils import logsumexp
 from jax.scipy.special import digamma
 

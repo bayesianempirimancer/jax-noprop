@@ -49,7 +49,7 @@ def get_encoder_class(encoder_type: str):
 
 def create_encoder(config_dict: Dict[str, Any], **kwargs) -> nn.Module:
     """Create an encoder model using the homogenized approach."""
-    from src.models.vae.encoders import get_encoder_class
+    from src.vae.encoders import get_encoder_class
     
     input_shape = kwargs.get('input_shape')
     latent_shape = kwargs.get('latent_shape')

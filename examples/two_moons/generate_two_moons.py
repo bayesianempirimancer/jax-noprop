@@ -23,6 +23,7 @@ import os
 def generate_two_moons_dataset(
     n_samples: int = 10000,
     noise: float = 0.1,
+    scale_factor: float = 8.0,
     seed: int = 42
 ) -> tuple:
     """
@@ -31,25 +32,34 @@ def generate_two_moons_dataset(
     Args:
         n_samples: Total number of samples
         noise: Standard deviation of Gaussian noise added to the data
+        scale_factor: Scale factor to multiply x coordinates by (default: 8.0)
         seed: Random seed for reproducibility
         
     Returns:
         Tuple of (x_data, y_data) where:
         - x_data: 2D coordinates [n_samples, 2]
-        - y_data: Class labels [n_samples] (0 or 1)
+        - y_data: One-hot encoded class labels [n_samples, 2] where each row is [1, 0] or [0, 1]
     """
     # Generate the two moons dataset
-    x_data, y_data = make_moons(
+    x_data, y_data_int = make_moons(
         n_samples=n_samples,
         noise=noise,
         random_state=seed
     )
     
+    # Apply scale factor to x coordinates
+    x_data = x_data * scale_factor
+    
+    # Convert integer labels to one-hot encoding
+    num_classes = len(np.unique(y_data_int))
+    y_data = np.eye(num_classes)[y_data_int.astype(int)]  # [n_samples, num_classes]
+    
     # Ensure both classes are represented
-    unique_classes, counts = np.unique(y_data, return_counts=True)
+    unique_classes, counts = np.unique(y_data_int, return_counts=True)
     print(f"Class distribution:")
     for cls, count in zip(unique_classes, counts):
         print(f"  Class {cls}: {count} samples ({count/n_samples*100:.1f}%)")
+    print(f"Labels converted to one-hot encoding: shape {y_data.shape}")
     
     return x_data, y_data
 
@@ -102,23 +112,32 @@ def save_dataset(x_data: np.ndarray, y_data: np.ndarray, filepath: str,
     Save the dataset in the formatted format with train/val splits.
     
     NOTE: Data is ALWAYS shuffled before splitting. This cannot be disabled.
-    y_data is converted to one-hot encoding before saving.
+    y_data should already be one-hot encoded (from generate_two_moons_dataset).
     
     Args:
         x_data: 2D coordinates [n_samples, 2]
-        y_data: Class labels [n_samples] (integer labels 0 or 1)
+        y_data: Class labels [n_samples, num_classes] (one-hot encoded) or [n_samples] (integer)
         filepath: Path to save the pickle file
         train_ratio: Fraction of data for training (default: 0.80)
         seed: Random seed for splitting (also used for shuffling)
     """
-    # Convert y_data to one-hot encoding
-    num_classes = len(np.unique(y_data))
-    y_onehot = np.eye(num_classes)[y_data.astype(int)]  # [n_samples, num_classes]
-    
-    print(f"Converting labels to one-hot encoding:")
-    print(f"  Original y shape: {y_data.shape}")
-    print(f"  One-hot y shape: {y_onehot.shape}")
-    print(f"  Number of classes: {num_classes}")
+    # Check if y_data is already one-hot encoded
+    if len(y_data.shape) == 2 and y_data.shape[1] > 1:
+        # Already one-hot encoded
+        y_onehot = y_data
+        y_int = np.argmax(y_data, axis=1)  # For stratification
+        num_classes = y_onehot.shape[1]
+        print(f"Using one-hot encoded labels (already converted):")
+        print(f"  y shape: {y_onehot.shape}")
+    else:
+        # Convert integer labels to one-hot encoding
+        num_classes = len(np.unique(y_data))
+        y_onehot = np.eye(num_classes)[y_data.astype(int)]  # [n_samples, num_classes]
+        y_int = y_data  # For stratification
+        print(f"Converting labels to one-hot encoding:")
+        print(f"  Original y shape: {y_data.shape}")
+        print(f"  One-hot y shape: {y_onehot.shape}")
+        print(f"  Number of classes: {num_classes}")
     
     # Split into train and validation sets
     # IMPORTANT: shuffle=True is MANDATORY - data must always be shuffled before splitting
@@ -128,7 +147,7 @@ def save_dataset(x_data: np.ndarray, y_data: np.ndarray, filepath: str,
         train_size=train_ratio, 
         random_state=seed,
         shuffle=True,  # MANDATORY: Data is always shuffled before splitting
-        stratify=y_data  # Use original integer labels for stratification
+        stratify=y_int  # Use integer labels for stratification
     )
     
     dataset = {
@@ -178,6 +197,8 @@ def main():
                        help='Number of samples to generate')
     parser.add_argument('--noise', type=float, default=0.1, 
                        help='Noise level for the dataset')
+    parser.add_argument('--scale_factor', type=float, default=8.0,
+                       help='Scale factor to multiply x coordinates by (default: 8.0)')
     parser.add_argument('--seed', type=int, default=42, 
                        help='Random seed for reproducibility')
     parser.add_argument('--output_dir', type=str, default='./data', 
@@ -199,6 +220,7 @@ def main():
     print(f"Configuration:")
     print(f"  Number of samples: {args.n_samples}")
     print(f"  Noise level: {args.noise}")
+    print(f"  Scale factor: {args.scale_factor}")
     print(f"  Seed: {args.seed}")
     print(f"  Output directory: {args.output_dir}")
     print(f"  Filename: {args.filename}")
@@ -212,6 +234,7 @@ def main():
     x_data, y_data = generate_two_moons_dataset(
         n_samples=args.n_samples,
         noise=args.noise,
+        scale_factor=args.scale_factor,
         seed=args.seed
     )
     

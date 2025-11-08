@@ -115,19 +115,19 @@ class BaseModel(nn.Module, Generic[ConfigType]):
         with open(model_path, "wb") as f:
             pickle.dump(model_data, f)
         
-        # Save human-readable config as YAML
-        try:
-            import yaml
-            config_dict = self.config.to_dict()
-            config_path = os.path.join(save_directory, "config.yaml")
-            with open(config_path, "w") as f:
-                yaml.dump(config_dict, f, default_flow_style=False, indent=2, sort_keys=True)
-        except ImportError:
-            # Fallback to JSON if YAML not available
+        # Save human-readable config using BaseConfig methods
+        config_path_yaml = os.path.join(save_directory, "config.yaml")
+        config_path_json = os.path.join(save_directory, "config.json")
+        
+        if hasattr(self.config, 'save_yaml'):
+            self.config.save_yaml(config_path_yaml)
+        elif hasattr(self.config, 'save_json'):
+            self.config.save_json(config_path_json)
+        else:
+            # Fallback: try to_dict() and save manually if methods not available
             import json
-            config_dict = self.config.to_dict()
-            config_path = os.path.join(save_directory, "config.json")
-            with open(config_path, "w") as f:
+            config_dict = self.config.to_dict() if hasattr(self.config, 'to_dict') else self.config.__dict__
+            with open(config_path_json, "w") as f:
                 json.dump(config_dict, f, indent=2, sort_keys=True)
     
     @classmethod

@@ -10,8 +10,8 @@ from typing import Tuple, Optional
 from dataclasses import dataclass, field
 
 from src.configs.base_config import BaseConfig
-from src.models.vae.encoders import create_encoder
-from src.models.vae.decoders import create_decoder
+from src.vae.encoders import create_encoder
+from src.vae.decoders import create_decoder
 
 
 @dataclass(frozen=True)

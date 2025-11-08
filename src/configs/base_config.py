@@ -39,6 +39,10 @@ Usage Examples:
 from dataclasses import dataclass, fields
 from typing import Dict, Any, TypeVar, Union
 import copy
+import json
+import yaml
+from omegaconf import OmegaConf, DictConfig 
+from pathlib import Path
 from flax.core import FrozenDict
 
 
@@ -161,6 +165,195 @@ class BaseConfig:
         for field_info in fields(self):
             result[field_info.name] = getattr(self, field_info.name)
         return result
+    
+    def save_yaml(self, filepath: Union[str, Path]):
+        """
+        Save configuration to a YAML file.
+        
+        Args:
+            filepath: Path to save the YAML file to
+            
+        Example:
+            config.save_yaml('config.yaml')
+        """
+        if yaml is None:
+            raise ImportError("PyYAML is required for save_yaml(). Install it with: pip install pyyaml")
+        
+        config_dict = self.to_dict()
+        # Convert FrozenDict to dict for YAML serialization
+        config_dict = self._frozen_dict_to_dict(config_dict)
+        
+        filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(filepath, 'w') as f:
+            yaml.dump(config_dict, f, default_flow_style=False, indent=2, sort_keys=True)
+    
+    def _frozen_dict_to_dict(self, obj: Any) -> Any:
+        """Recursively convert FrozenDict objects to regular dicts for YAML serialization."""
+        if isinstance(obj, FrozenDict):
+            return {k: self._frozen_dict_to_dict(v) for k, v in obj.items()}
+        elif isinstance(obj, dict):
+            return {k: self._frozen_dict_to_dict(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._frozen_dict_to_dict(item) for item in obj]
+        else:
+            return obj
+    
+    @classmethod
+    def load_yaml(cls: type[T], filepath: Union[str, Path]) -> T:
+        """
+        Load configuration from a YAML file.
+        
+        Args:
+            filepath: Path to the YAML file to load
+            
+        Returns:
+            Config instance reconstructed from the YAML file
+            
+        Example:
+            config = MyConfig.load_yaml('config.yaml')
+        """
+        if yaml is None:
+            raise ImportError("PyYAML is required for load_yaml(). Install it with: pip install pyyaml")
+        
+        filepath = Path(filepath)
+        if not filepath.exists():
+            raise FileNotFoundError(f"Config file not found: {filepath}")
+        
+        with open(filepath, 'r') as f:
+            config_dict = yaml.safe_load(f)
+        
+        if config_dict is None:
+            raise ValueError(f"YAML file is empty or invalid: {filepath}")
+        
+        # Convert dict to FrozenDict where appropriate
+        config_dict = cls._dict_to_frozen_dict(config_dict)
+        
+        return cls(**config_dict)
+    
+    @staticmethod
+    def _dict_to_frozen_dict(obj: Any) -> Any:
+        """Recursively convert dict objects to FrozenDict where appropriate."""
+        if isinstance(obj, dict):
+            # Check if this looks like it should be a FrozenDict (has nested structure)
+            # For now, convert all dicts to FrozenDict to match the config structure
+            return FrozenDict({k: BaseConfig._dict_to_frozen_dict(v) for k, v in obj.items()})
+        elif isinstance(obj, list):
+            return [BaseConfig._dict_to_frozen_dict(item) for item in obj]
+        elif isinstance(obj, tuple):
+            return tuple(BaseConfig._dict_to_frozen_dict(item) for item in obj)
+        else:
+            return obj
+    
+    def save_json(self, filepath: Union[str, Path]):
+        """
+        Save configuration to a JSON file.
+        
+        Args:
+            filepath: Path to save the JSON file to
+            
+        Example:
+            config.save_json('config.json')
+        """
+        config_dict = self.to_dict()
+        # Convert FrozenDict to dict for JSON serialization
+        config_dict = self._frozen_dict_to_dict(config_dict)
+        
+        filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(filepath, 'w') as f:
+            json.dump(config_dict, f, indent=2, sort_keys=True)
+    
+    @classmethod
+    def load_json(cls: type[T], filepath: Union[str, Path]) -> T:
+        """
+        Load configuration from a JSON file.
+        
+        Args:
+            filepath: Path to the JSON file to load
+            
+        Returns:
+            Config instance reconstructed from the JSON file
+            
+        Example:
+            config = MyConfig.load_json('config.json')
+        """
+        filepath = Path(filepath)
+        if not filepath.exists():
+            raise FileNotFoundError(f"Config file not found: {filepath}")
+        
+        with open(filepath, 'r') as f:
+            config_dict = json.load(f)
+        
+        if config_dict is None:
+            raise ValueError(f"JSON file is empty or invalid: {filepath}")
+        
+        # Convert dict to FrozenDict where appropriate
+        config_dict = cls._dict_to_frozen_dict(config_dict)
+        
+        return cls(**config_dict)
+    
+    def save_omegaconf(self, filepath: Union[str, Path]):
+        """
+        Save configuration to a file using OmegaConf (Hydra's config format).
+        
+        Args:
+            filepath: Path to save the config file to (typically .yaml)
+            
+        Example:
+            config.save_omegaconf('config.yaml')
+        """
+        if OmegaConf is None:
+            raise ImportError("OmegaConf is required for save_omegaconf(). Install it with: pip install omegaconf")
+        
+        config_dict = self.to_dict()
+        # Convert FrozenDict to dict for OmegaConf serialization
+        config_dict = self._frozen_dict_to_dict(config_dict)
+        
+        # Create OmegaConf DictConfig
+        conf = OmegaConf.create(config_dict)
+        
+        filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        
+        OmegaConf.save(conf, filepath)
+    
+    @classmethod
+    def load_omegaconf(cls: type[T], filepath: Union[str, Path]) -> T:
+        """
+        Load configuration from a file using OmegaConf (Hydra's config format).
+        
+        Args:
+            filepath: Path to the config file to load (typically .yaml)
+            
+        Returns:
+            Config instance reconstructed from the OmegaConf file
+            
+        Example:
+            config = MyConfig.load_omegaconf('config.yaml')
+        """
+        if OmegaConf is None:
+            raise ImportError("OmegaConf is required for load_omegaconf(). Install it with: pip install omegaconf")
+        
+        filepath = Path(filepath)
+        if not filepath.exists():
+            raise FileNotFoundError(f"Config file not found: {filepath}")
+        
+        # Load using OmegaConf
+        conf = OmegaConf.load(filepath)
+        
+        # Convert OmegaConf DictConfig to regular dict
+        config_dict = OmegaConf.to_container(conf, resolve=True)
+        
+        if config_dict is None:
+            raise ValueError(f"Config file is empty or invalid: {filepath}")
+        
+        # Convert dict to FrozenDict where appropriate
+        config_dict = cls._dict_to_frozen_dict(config_dict)
+        
+        return cls(**config_dict)
     
     def __str__(self) -> str:
         """String representation of configuration."""

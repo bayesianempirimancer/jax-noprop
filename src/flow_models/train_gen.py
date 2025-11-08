@@ -10,7 +10,6 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 import pickle
-import yaml
 
 import jax
 import jax.numpy as jnp
@@ -40,7 +39,7 @@ def center_and_scale(data: jnp.ndarray, scale_factor: float = 2.0) -> tuple[jnp.
     return transformed, mean
 
 
-def load_two_moons_data(data_path: str = "data/two_moons_formatted.pkl", center_and_scale_x: bool = True, scale_factor: float = 2.0):
+def load_two_moons_data(data_path: str = "data/two_moons.pkl", center_and_scale_x: bool = True, scale_factor: float = 2.0):
     with open(data_path, 'rb') as f:
         data = pickle.load(f)
     x_train = jnp.array(data['train']['x'])
@@ -146,7 +145,7 @@ def build_config(model: str,
 def main():
     parser = argparse.ArgumentParser(description='Conditional generation training on Two Moons (x | y)')
     parser.add_argument('--model_type', type=str, default='flow_matching', choices=['flow_matching', 'diffusion', 'ct'])
-    parser.add_argument('--data_path', type=str, default='data/two_moons_formatted.pkl')
+    parser.add_argument('--data_path', type=str, default='data/two_moons.pkl')
     parser.add_argument('--input_dim', type=int, default=2)
     parser.add_argument('--output_dim', type=int, default=2)
     parser.add_argument('--latent_dim', type=int, default=2)
@@ -266,22 +265,7 @@ def main():
     trainer.save_params(str(Path(args.save_dir) / 'model_params.pkl'))
 
     # Save the actual config used for this run in human-readable format
-    def unfreeze_frozendicts(obj):
-        """Recursively convert FrozenDicts to regular dicts."""
-        if isinstance(obj, FrozenDict):
-            return {k: unfreeze_frozendicts(v) for k, v in obj.items()}
-        elif isinstance(obj, dict):
-            return {k: unfreeze_frozendicts(v) for k, v in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return [unfreeze_frozendicts(item) for item in obj]  # Convert to list for YAML
-        else:
-            return obj
-    
-    config_dict = config.to_dict()
-    config_dict = unfreeze_frozendicts(config_dict)
-    
-    with open(Path(args.save_dir) / 'config.yaml', 'w') as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=True)
+    config.save_yaml(Path(args.save_dir) / 'config.yaml')
     print(f"Config saved to {Path(args.save_dir) / 'config.yaml'}")
 
     # Generation
