@@ -37,7 +37,7 @@ Usage Examples:
 """
 
 from dataclasses import dataclass, fields
-from typing import Dict, Any, TypeVar, Union
+from typing import Dict, Any, TypeVar, Union, Optional
 import copy
 import json
 import yaml
@@ -84,39 +84,8 @@ class BaseConfig:
         
         base = getattr(self, field_name)
         
-        # Convert to dict for merging
-        if isinstance(base, FrozenDict):
-            result = dict(base)
-        else:
-            result = copy.deepcopy(base)
-        
-        # Convert updates to dict if needed
-        if isinstance(updates, FrozenDict):
-            updates_dict = dict(updates)
-        else:
-            updates_dict = updates
-        
-        # Merge updates into result
-        for key, value in updates_dict.items():
-            if key in result and isinstance(result[key], (FrozenDict, dict)) and isinstance(value, (FrozenDict, dict)):
-                # Recursively merge nested FrozenDicts/dicts
-                # Temporarily set the field to access it in recursion
-                temp_field = result[key]
-                if isinstance(temp_field, FrozenDict):
-                    result[key] = self.merge_frozen_dict_impl(temp_field, value)
-                else:
-                    result[key] = self.merge_frozen_dict_impl(temp_field, value)
-            else:
-                # Replace or add the value
-                if isinstance(value, FrozenDict):
-                    result[key] = dict(value)  # Convert FrozenDict to dict for merging
-                elif isinstance(value, dict):
-                    result[key] = copy.deepcopy(value)
-                else:
-                    result[key] = value
-        
-        # Always return FrozenDict
-        return FrozenDict(result)
+        # Use merge_frozen_dict_impl for the actual merging
+        return self.merge_frozen_dict_impl(base, updates)
     
     def merge_frozen_dict_impl(self, base: Union[FrozenDict, dict], updates: Union[FrozenDict, dict]) -> FrozenDict:
         """
@@ -178,6 +147,69 @@ class BaseConfig:
             result[field_info.name] = getattr(self, field_info.name)
         return result
     
+    def _prepare_for_serialization(self) -> Dict[str, Any]:
+        """Prepare config for serialization by converting to dict and handling FrozenDicts.
+        
+        Returns:
+            Dictionary ready for serialization (YAML, JSON, etc.)
+        """
+        config_dict = self.to_dict()
+        return self._frozen_dict_to_dict(config_dict)
+    
+    @staticmethod
+    def _prepare_save_path(filepath: Union[str, Path]) -> Path:
+        """Prepare file path for saving: convert to Path and create parent directories.
+        
+        Args:
+            filepath: Path to file (str or Path)
+            
+        Returns:
+            Path object with parent directories created
+        """
+        filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        return filepath
+    
+    @staticmethod
+    def _prepare_load_path(filepath: Union[str, Path]) -> Path:
+        """Prepare file path for loading: convert to Path and check existence.
+        
+        Args:
+            filepath: Path to file (str or Path)
+            
+        Returns:
+            Path object
+            
+        Raises:
+            FileNotFoundError: If file doesn't exist
+        """
+        filepath = Path(filepath)
+        if not filepath.exists():
+            raise FileNotFoundError(f"Config file not found: {filepath}")
+        return filepath
+    
+    @classmethod
+    def _load_from_dict(cls: type[T], config_dict: Optional[Dict[str, Any]], filepath: Path) -> T:
+        """Generic helper to load config from a dictionary.
+        
+        Args:
+            config_dict: Dictionary loaded from file (may be None)
+            filepath: Path to file (for error messages)
+            
+        Returns:
+            Config instance
+            
+        Raises:
+            ValueError: If config_dict is None or empty
+        """
+        if config_dict is None:
+            raise ValueError(f"Config file is empty or invalid: {filepath}")
+        
+        # Convert dict to FrozenDict where appropriate
+        config_dict = cls._dict_to_frozen_dict(config_dict)
+        
+        return cls(**config_dict)
+    
     def save_yaml(self, filepath: Union[str, Path]):
         """
         Save configuration to a YAML file.
@@ -191,15 +223,25 @@ class BaseConfig:
         if yaml is None:
             raise ImportError("PyYAML is required for save_yaml(). Install it with: pip install pyyaml")
         
-        config_dict = self.to_dict()
-        # Convert FrozenDict to dict for YAML serialization
-        config_dict = self._frozen_dict_to_dict(config_dict)
+        config_dict = self._prepare_for_serialization()
         
-        filepath = Path(filepath)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
+        # Reorder keys to desired order: model_name, main, noise_schedule, encoder, decoder, crn
+        # Any additional keys will be appended at the end
+        desired_order = ['model_name', 'main', 'noise_schedule', 'encoder', 'decoder', 'crn']
+        ordered_dict = {}
+        # Add keys in desired order
+        for key in desired_order:
+            if key in config_dict:
+                ordered_dict[key] = config_dict[key]
+        # Add any remaining keys that weren't in the desired order
+        for key, value in config_dict.items():
+            if key not in ordered_dict:
+                ordered_dict[key] = value
+        
+        filepath = self._prepare_save_path(filepath)
         
         with open(filepath, 'w') as f:
-            yaml.dump(config_dict, f, default_flow_style=False, indent=2, sort_keys=True)
+            yaml.dump(ordered_dict, f, default_flow_style=False, indent=2, sort_keys=False)
     
     def _frozen_dict_to_dict(self, obj: Any) -> Any:
         """Recursively convert FrozenDict objects to regular dicts for YAML serialization."""
@@ -229,20 +271,12 @@ class BaseConfig:
         if yaml is None:
             raise ImportError("PyYAML is required for load_yaml(). Install it with: pip install pyyaml")
         
-        filepath = Path(filepath)
-        if not filepath.exists():
-            raise FileNotFoundError(f"Config file not found: {filepath}")
+        filepath = cls._prepare_load_path(filepath)
         
         with open(filepath, 'r') as f:
             config_dict = yaml.safe_load(f)
         
-        if config_dict is None:
-            raise ValueError(f"YAML file is empty or invalid: {filepath}")
-        
-        # Convert dict to FrozenDict where appropriate
-        config_dict = cls._dict_to_frozen_dict(config_dict)
-        
-        return cls(**config_dict)
+        return cls._load_from_dict(config_dict, filepath)
     
     @staticmethod
     def _dict_to_frozen_dict(obj: Any) -> Any:
@@ -272,12 +306,8 @@ class BaseConfig:
         Example:
             config.save_json('config.json')
         """
-        config_dict = self.to_dict()
-        # Convert FrozenDict to dict for JSON serialization
-        config_dict = self._frozen_dict_to_dict(config_dict)
-        
-        filepath = Path(filepath)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
+        config_dict = self._prepare_for_serialization()
+        filepath = self._prepare_save_path(filepath)
         
         with open(filepath, 'w') as f:
             json.dump(config_dict, f, indent=2, sort_keys=True)
@@ -296,20 +326,12 @@ class BaseConfig:
         Example:
             config = MyConfig.load_json('config.json')
         """
-        filepath = Path(filepath)
-        if not filepath.exists():
-            raise FileNotFoundError(f"Config file not found: {filepath}")
+        filepath = cls._prepare_load_path(filepath)
         
         with open(filepath, 'r') as f:
             config_dict = json.load(f)
         
-        if config_dict is None:
-            raise ValueError(f"JSON file is empty or invalid: {filepath}")
-        
-        # Convert dict to FrozenDict where appropriate
-        config_dict = cls._dict_to_frozen_dict(config_dict)
-        
-        return cls(**config_dict)
+        return cls._load_from_dict(config_dict, filepath)
     
     def save_omegaconf(self, filepath: Union[str, Path]):
         """
@@ -324,15 +346,12 @@ class BaseConfig:
         if OmegaConf is None:
             raise ImportError("OmegaConf is required for save_omegaconf(). Install it with: pip install omegaconf")
         
-        config_dict = self.to_dict()
-        # Convert FrozenDict to dict for OmegaConf serialization
-        config_dict = self._frozen_dict_to_dict(config_dict)
+        config_dict = self._prepare_for_serialization()
         
         # Create OmegaConf DictConfig
         conf = OmegaConf.create(config_dict)
         
-        filepath = Path(filepath)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
+        filepath = self._prepare_save_path(filepath)
         
         OmegaConf.save(conf, filepath)
     
@@ -353,9 +372,7 @@ class BaseConfig:
         if OmegaConf is None:
             raise ImportError("OmegaConf is required for load_omegaconf(). Install it with: pip install omegaconf")
         
-        filepath = Path(filepath)
-        if not filepath.exists():
-            raise FileNotFoundError(f"Config file not found: {filepath}")
+        filepath = cls._prepare_load_path(filepath)
         
         # Load using OmegaConf
         conf = OmegaConf.load(filepath)
@@ -363,13 +380,56 @@ class BaseConfig:
         # Convert OmegaConf DictConfig to regular dict
         config_dict = OmegaConf.to_container(conf, resolve=True)
         
-        if config_dict is None:
-            raise ValueError(f"Config file is empty or invalid: {filepath}")
+        return cls._load_from_dict(config_dict, filepath)
+    
+    @classmethod
+    def merge_with_defaults(cls: type[T], loaded_config: T, default_config: Optional[T] = None) -> T:
+        """
+        Merge a loaded config (e.g., from YAML) with default values from a default config.
+        This ensures all default values are preserved even if not specified in the loaded config.
         
-        # Convert dict to FrozenDict where appropriate
-        config_dict = cls._dict_to_frozen_dict(config_dict)
+        Args:
+            loaded_config: Config loaded from YAML or custom class
+            default_config: Default config instance to merge with. If None, creates a new default instance.
+            
+        Returns:
+            Merged config with all default values filled in
+            
+        Example:
+            loaded = MyConfig.load_yaml('config.yaml')
+            merged = MyConfig.merge_with_defaults(loaded)
+        """
+        if default_config is None:
+            default_config = cls()
         
-        return cls(**config_dict)
+        # Get both configs as dicts
+        loaded_dict = loaded_config.to_dict()
+        default_dict = default_config.to_dict()
+        
+        # Merge recursively, preserving loaded values but filling in defaults
+        merged_dict = {}
+        for key in default_dict:
+            if key in loaded_dict:
+                # Key exists in loaded config - merge recursively if it's a FrozenDict
+                if isinstance(default_dict[key], FrozenDict) and isinstance(loaded_dict[key], FrozenDict):
+                    # Use merge_frozen_dict_impl for recursive merging
+                    # Start with defaults (base) and apply loaded (updates) to override defaults
+                    # This preserves loaded values while filling in missing keys from defaults
+                    merged_dict[key] = default_config.merge_frozen_dict_impl(default_dict[key], loaded_dict[key])
+                else:
+                    # Use loaded value (overrides default)
+                    merged_dict[key] = loaded_dict[key]
+            else:
+                # Key only in defaults - use default value
+                merged_dict[key] = default_dict[key]
+        
+        # Add any keys that are only in loaded (shouldn't happen with proper configs, but be safe)
+        for key in loaded_dict:
+            if key not in merged_dict:
+                merged_dict[key] = loaded_dict[key]
+        
+        # Create new config instance with merged values
+        return loaded_config.__class__(**merged_dict)
     
     def __str__(self) -> str:
         """String representation of configuration."""

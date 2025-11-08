@@ -41,15 +41,18 @@ class SequenceTrainer:
     unconditional: bool = False  # If True, use unconditional generation (x=None)
 
     def __post_init__(self):
-        if isinstance(self.config, DiffusionConfig):
-            self.model = DiffusionModel(config=self.config)
+
+        if(self.config.model_type == "diffusion"):
+            self.model = DiffusionModel(config=config)
             self.model_type = "diffusion"
-        elif isinstance(self.config, CTConfig):
-            self.model = CTModel(config=self.config)
+        elif(self.config.model_type == "flow_matching"):
+            self.model = FlowMatchingModel(config=config)
+            self.model_type = "flow_matching"
+        elif(self.config.model_type == "ct"):
+            self.model = CTModel(config=config)
             self.model_type = "ct"
         else:
-            self.model = FlowMatchingModel(config=self.config)
-            self.model_type = "flow_matching"
+            raise ValueError(f"Unsupported model type: {config.model_type}")
 
         if self.optimizer_name.lower() == "adam":
             self.optimizer = optax.adam(self.learning_rate)
@@ -316,70 +319,8 @@ class SequenceTrainer:
         Returns:
             Dictionary of metrics including MSE, MAE, cosine similarity, and R² (percent variance explained)
         """
-        # Check for NaN or Inf in generated sequences - indicates generation failure
-        gen_has_invalid = jnp.any(~jnp.isfinite(generated_sequences))
-        real_has_invalid = jnp.any(~jnp.isfinite(real_sequences))
-        
-        if gen_has_invalid or real_has_invalid:
-            # Return inf to indicate failure
-            return {
-                'mse': float('inf'), 
-                'mae': float('inf'), 
-                'cosine_sim': -1.0,
-                'r2': float('-inf'),
-                'percent_variance_explained': float('-inf')
-            }
-        
-        # Flatten sequences for comparison
-        gen_flat = generated_sequences.reshape(generated_sequences.shape[0], -1)
-        real_flat = real_sequences.reshape(real_sequences.shape[0], -1)
-        
-        # Compute MSE (Mean Squared Error)
-        mse = jnp.mean((gen_flat - real_flat) ** 2)
-        
-        # Compute MAE (Mean Absolute Error)
-        mae = jnp.mean(jnp.abs(gen_flat - real_flat))
-        
-        # Compute cosine similarity (average across samples)
-        # Normalize vectors
-        gen_norm = gen_flat / (jnp.linalg.norm(gen_flat, axis=1, keepdims=True) + 1e-8)
-        real_norm = real_flat / (jnp.linalg.norm(real_flat, axis=1, keepdims=True) + 1e-8)
-        cosine_sim = jnp.mean(jnp.sum(gen_norm * real_norm, axis=1))
-        
-        # Compute R² (coefficient of determination) and percent variance explained
-        # Only compute on price (first dimension) - extract price from sequences
-        # Sequences are [batch, seq_len, feature_dim], so price is [:, :, 0]
-        real_price = real_sequences[:, :, 0]  # [batch, seq_len]
-        gen_price = generated_sequences[:, :, 0]  # [batch, seq_len]
-        
-        # Flatten price sequences
-        real_price_flat = real_price.reshape(-1)  # [batch * seq_len]
-        gen_price_flat = gen_price.reshape(-1)  # [batch * seq_len]
-        
-        # Compute R² on price only
-        # R² = 1 - (SS_res / SS_tot)
-        # where SS_res = sum of squared residuals, SS_tot = total sum of squares
-        residuals_price = real_price_flat - gen_price_flat
-        ss_res = jnp.sum(residuals_price ** 2)
-        real_price_mean = jnp.mean(real_price_flat)
-        ss_tot = jnp.sum((real_price_flat - real_price_mean) ** 2)
-        
-        # Avoid division by zero
-        if ss_tot > 1e-10:
-            r2 = 1.0 - (ss_res / ss_tot)
-            percent_variance_explained = r2 * 100.0
-        else:
-            # If variance is zero, R² is undefined (all values are the same)
-            r2 = float('nan')
-            percent_variance_explained = float('nan')
-        
-        return {
-            'mse': float(mse),
-            'mae': float(mae),
-            'cosine_sim': float(cosine_sim),
-            'r2': float(r2),
-            'percent_variance_explained': float(percent_variance_explained)
-        }
+        from src.utils.metrics import sequence_metrics
+        return sequence_metrics(generated_sequences, real_sequences, price_dim=0)
 
     def conditional_generate(
         self,

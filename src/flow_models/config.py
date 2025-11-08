@@ -109,23 +109,47 @@ class Config(BaseConfig):
         """
         main_dict = dict(self.main)
         
-        # Determine shapes for generation (y -> x):
-        # - If args provided, use them directly (already in generation format)
-        # - Otherwise, reverse config file values (assumes config is for forward direction x->y)
-        # Note: args.input_shape, args.output_shape, args.latent_shape are tuples (or None)
-        #       They may have been converted from dims in train_gen_v2.py
-        #       Config file values may be lists, so convert to tuples
-        if args.input_shape is not None or args.output_shape is not None:
-            # Args provided: input_shape is x shape, output_shape is y shape
-            # For generation: input is y, output is x
-            input_shape = () if unconditional else tuple(args.output_shape) if args.output_shape is not None else tuple(main_dict.get('output_shape', (2,)))
-            output_shape = tuple(args.input_shape) if args.input_shape is not None else tuple(main_dict.get('input_shape', (2,)))
-        else:
-            # No args: reverse config file values (config assumed to be x->y, we need y->x)
-            # Convert to tuples in case they're lists from YAML
-            input_shape = () if unconditional else tuple(main_dict.get('output_shape', (2,)))
-            output_shape = tuple(main_dict.get('input_shape', (2,)))
+        # Determine shapes for generation:
+        # - output_shape: shape of data being generated (from config or args)
+        # - latent_shape: latent space shape (from config or args, unchanged)
+        # - input_shape: conditional input shape (empty () for unconditional, from config/args otherwise)
+        # Note: For generation, config file typically has x->y format, but we're doing y->x generation
+        #       So we reverse: config's input_shape becomes our output_shape, config's output_shape becomes our input_shape
+        #       BUT for unconditional: input_shape is always (), output_shape comes from config's input_shape
         
+        if unconditional:
+            # Unconditional generation: input_shape is empty, output_shape and latent_shape from config/args
+            if args.output_shape is not None:
+                output_shape = tuple(args.output_shape)
+            elif args.input_shape is not None:
+                # If input_shape provided, it's actually the output shape (data being generated)
+                output_shape = tuple(args.input_shape)
+            else:
+                # For unconditional: config's input_shape might be empty, so use output_shape from config
+                # If config's input_shape is empty, use output_shape; otherwise use input_shape (reversed for generation)
+                config_input = main_dict.get('input_shape', (2,))
+                config_output = main_dict.get('output_shape', (2,))
+                # If config input_shape is empty, it's already set up for unconditional, so use output_shape
+                if isinstance(config_input, (list, tuple)) and len(config_input) == 0:
+                    output_shape = tuple(config_output) if isinstance(config_output, (list, tuple)) else (config_output,)
+                else:
+                    # Config is x->y format, we generate x, so use input_shape
+                    output_shape = tuple(config_input) if isinstance(config_input, (list, tuple)) else (config_input,)
+            
+            input_shape = ()  # Always empty for unconditional
+        else:
+            # Conditional generation: reverse config values (y->x generation)
+            if args.input_shape is not None or args.output_shape is not None:
+                # Args provided: input_shape is x shape, output_shape is y shape
+                # For generation: input is y, output is x
+                input_shape = tuple(args.output_shape) if args.output_shape is not None else tuple(main_dict.get('output_shape', (2,)))
+                output_shape = tuple(args.input_shape) if args.input_shape is not None else tuple(main_dict.get('input_shape', (2,)))
+            else:
+                # No args: reverse config file values (config assumed to be x->y, we need y->x)
+                input_shape = tuple(main_dict.get('output_shape', (2,)))
+                output_shape = tuple(main_dict.get('input_shape', (2,)))
+        
+        # Latent shape is always from config or args, unchanged
         latent_shape = tuple(args.latent_shape) if args.latent_shape is not None else tuple(main_dict.get('latent_shape', (2,)))
         
         # Build updates for main config (filter None values)
@@ -137,8 +161,8 @@ class Config(BaseConfig):
             'recon_weight': args.recon_weight,
             'reg_weight': args.reg_weight,
             'recon_loss_type': args.recon_loss_type,
-            'use_snr_weight': args.use_snr_weight if args.use_snr_weight is not None else (model_type != 'flow_matching'),
-            'integration_method': 'midpoint' if model_type in ('ct', 'diffusion') else 'euler',
+            'use_snr_weight': args.use_snr_weight if args.use_snr_weight is not None else main_dict.get('use_snr_weight', None),
+            'integration_method': getattr(args, 'integration_method', None) if getattr(args, 'integration_method', None) is not None else main_dict.get('integration_method', None),
         }
         # Add vae_weight if it exists in args (for sequences)
         if hasattr(args, 'vae_weight') and args.vae_weight is not None:
@@ -231,8 +255,8 @@ class Config(BaseConfig):
             'recon_weight': args.recon_weight,
             'reg_weight': args.reg_weight,
             'recon_loss_type': args.recon_loss_type,
-            'use_snr_weight': args.use_snr_weight if args.use_snr_weight is not None else (model_type != 'flow_matching'),
-            'integration_method': 'midpoint' if model_type in ('ct', 'diffusion') else 'euler',
+            'use_snr_weight': args.use_snr_weight if args.use_snr_weight is not None else main_dict.get('use_snr_weight', (model_type != 'flow_matching')),
+            'integration_method': getattr(args, 'integration_method', None) if getattr(args, 'integration_method', None) is not None else main_dict.get('integration_method', ('midpoint' if model_type in ('ct', 'diffusion') else 'euler')),
         }
         # Add vae_weight if it exists in args (for sequences)
         if hasattr(args, 'vae_weight') and args.vae_weight is not None:

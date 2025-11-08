@@ -74,6 +74,7 @@ def create_generation_plot(
 def create_loss_trends_plot(history: Dict[str, Any], model_type: str, output_dir: str):
     """
     Plot loss terms over training epochs to diagnose training issues.
+    Always uses 2x3 layout with 6 panels.
     
     Args:
         history: Training history dictionary containing loss values
@@ -82,12 +83,8 @@ def create_loss_trends_plot(history: Dict[str, Any], model_type: str, output_dir
     """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
-    # Check if we have Chamfer Distance to determine subplot layout
-    has_chamfer = history.get('val_chamfer_distances') and len(history['val_chamfer_distances']) > 0
-    if has_chamfer:
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    else:
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    # Always use 2x3 layout
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     fig.suptitle(f'Loss Trends - {model_type.title()} Model', fontsize=16, fontweight='bold')
     
     epochs = range(len(history['train_losses']))
@@ -115,7 +112,7 @@ def create_loss_trends_plot(history: Dict[str, Any], model_type: str, output_dir
     ax.grid(True, alpha=0.3)
     
     # Reconstruction Loss
-    ax = axes[1, 0]
+    ax = axes[0, 2]
     ax.plot(epochs, history['train_recon_losses'], label='Train Recon', color='purple', linewidth=2)
     if history.get('val_recon_losses') and len(history['val_recon_losses']) > 0:
         ax.plot(epochs, history['val_recon_losses'], label='Val Recon', color='brown', linewidth=2, linestyle='--')
@@ -126,7 +123,7 @@ def create_loss_trends_plot(history: Dict[str, Any], model_type: str, output_dir
     ax.grid(True, alpha=0.3)
     
     # Regularization Loss
-    ax = axes[1, 1]
+    ax = axes[1, 0]
     ax.plot(epochs, history['train_reg_losses'], label='Train Reg', color='cyan', linewidth=2)
     if history.get('val_reg_losses') and len(history['val_reg_losses']) > 0:
         ax.plot(epochs, history['val_reg_losses'], label='Val Reg', color='magenta', linewidth=2, linestyle='--')
@@ -136,9 +133,9 @@ def create_loss_trends_plot(history: Dict[str, Any], model_type: str, output_dir
     ax.legend()
     ax.grid(True, alpha=0.3)
     
-    # Chamfer Distance (if available)
-    if has_chamfer:
-        ax = axes[1, 2]
+    # Chamfer Distance (if available, otherwise leave empty)
+    ax = axes[1, 1]
+    if history.get('val_chamfer_distances') and len(history['val_chamfer_distances']) > 0:
         chamfer_epochs = range(len(history['val_chamfer_distances']))
         ax.plot(chamfer_epochs, history['val_chamfer_distances'], label='Val Chamfer', color='darkorange', linewidth=2, linestyle='--')
         ax.set_title('Chamfer Distance', fontsize=12, fontweight='bold')
@@ -146,6 +143,13 @@ def create_loss_trends_plot(history: Dict[str, Any], model_type: str, output_dir
         ax.set_ylabel('Distance')
         ax.legend()
         ax.grid(True, alpha=0.3)
+    else:
+        ax.axis('off')
+        ax.text(0.5, 0.5, 'Chamfer Distance\n(Not Available)', ha='center', va='center', fontsize=12, alpha=0.5)
+    
+    # Leave last panel empty or add additional metric if needed
+    ax = axes[1, 2]
+    ax.axis('off')
     
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, 'loss_trends.png'), dpi=200, bbox_inches='tight')

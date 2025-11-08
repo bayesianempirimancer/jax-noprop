@@ -226,7 +226,6 @@ class VAE_flow(nn.Module):
             snr_weight = self.lazy_flow_snr(alpha_t, gamma_prime_t)
         else: 
             snr_weight = 1.0
-        snr_weight_mean = jnp.mean(snr_weight)
         
         dz_dt = self.apply(params, z_t, x, squeezed_t, method='dz_dt', training=training, rngs={'dropout': key})    
         z_target_est = dz_dt * (1.0-t) + z_t

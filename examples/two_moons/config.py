@@ -50,15 +50,14 @@ class Config(Config):
                                   # False for flow_matching, True for diffusion/ct
         "integration_method": "midpoint",  # ODE integration method: "euler" or "midpoint"
                                            # "euler" for flow_matching, "midpoint" for diffusion/ct
-        "sigma": 0.02,  # Noise scale parameter for the flow
         "encode_x": False,  # Whether to use sequence encoding (False for two moons dataset)
     }))
     
     noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
         # Noise schedule configuration (for diffusion and CT models)
-        "schedule_type": "exponential",  # Schedule type: "linear", "exponential", "cosine", etc.
+        "schedule_type": "sigmoid",  # Schedule type: "linear", "exponential", "cosine", etc.
                                          # (can override with --noise_schedule)
-        "learnable": True,  # Whether noise schedule parameters are learnable
+        "learnable": False,  # Whether noise schedule parameters are learnable
                            # (can override with --noise_schedule_learnable)
         "hidden_dims": (64, 64),  # Hidden dimensions for learnable noise schedule network
         
@@ -107,10 +106,10 @@ class Config(Config):
     
     decoder: FrozenDict = field(default_factory=lambda: FrozenDict({
         # Decoder configuration (maps latent z to output y)
-        "model_type": "mlp",  # Decoder model type: "identity", "linear", or "mlp"
+        "model_type": "identity",  # Decoder model type: "identity", "linear", or "mlp"
                               # (can override with --decoder_model_type)
-        "decoder_type": "identity",  # Decoder type: "linear", "softmax", "none", or "identity"
-                                     # "identity" for latent_dim=2 (no output transformation, passes through as-is)
+        "decoder_type": "none",  # Decoder type: "linear", "softmax", "none", or "identity"
+                                     # "identity" is same as 'none')
                                      # (can override with --decoder_type)
         "latent_shape": (2,),  # Latent space shape: 2D for two moons
         "output_shape": (2,),  # Output shape: one-hot encoded labels [n_samples, 2]

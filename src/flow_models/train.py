@@ -19,7 +19,7 @@ import jax.random as jr
 import numpy as np
 from flax.core import FrozenDict
 
-from src.flow_models.trainer import VAEFlowTrainer
+from src.flow_models.trainer import Trainer
 from src.flow_models.config import Config
 from src.configs.base_config import BaseConfig
 from src.flow_models.training_utils import get_save_directory, save_training_artifacts
@@ -175,7 +175,9 @@ def main():
         if args.config_file:
             # Load from YAML using custom class
             print(f"Loading config from {args.config_file} using custom class {config_class.__name__}...")
-            base_config = config_class.load_yaml(args.config_file)
+            loaded_config = config_class.load_yaml(args.config_file)
+            # Merge with defaults to ensure all default values are preserved
+            base_config = config_class.merge_with_defaults(loaded_config)
             print(f"Loaded config with custom class: {base_config.__class__.__name__}")
         else:
             # Instantiate custom class with default values
@@ -193,7 +195,9 @@ def main():
         if config_path.suffix not in ['.yaml', '.yml']:
             raise ValueError(f"Unsupported config file format: {config_path.suffix}. Use .yaml or .yml")
         
-        base_config = Config.load_yaml(args.config_file)
+        loaded_config = Config.load_yaml(args.config_file)
+        # Merge with defaults to ensure all default values are preserved
+        base_config = Config.merge_with_defaults(loaded_config)
         print(f"Loaded config with default Config class: {base_config.__class__.__name__}")
     else:
         # Use default unified Config from flow_models with default values
@@ -223,22 +227,19 @@ def main():
     print(f"  Val: x={x_val.shape}, y={y_val.shape}")
     
     # Create trainer
-    trainer = VAEFlowTrainer(
+    trainer = Trainer(
         config=config,
         learning_rate=args.learning_rate,
         optimizer_name=args.optimizer,
         seed=args.seed,
+        warmup_steps=getattr(args, 'warmup_steps', 0),
+        model_type=args.model_type
     )
     
     # Initialize
-    bs = min(args.batch_size, y_train.shape[0])
-    x_sample = x_train[:bs]
-    y_sample = y_train[:bs]
-    z_sample = jr.normal(jr.PRNGKey(args.seed), (bs, config.main['latent_shape'][0]))
-    t_sample = jr.uniform(jr.PRNGKey(args.seed+1), (bs,), minval=0.0, maxval=1.0)
-    
     print("Initializing model...")
-    trainer.initialize(x_sample, y_sample, z_sample, t_sample)
+    # Use a single sample for initialization (model will add batch dimension internally)
+    trainer.initialize(x_train[0], y_train[0])
     
     # Train
     dropout_epochs = args.dropout_epochs if args.dropout_epochs is not None else args.num_epochs
@@ -250,8 +251,7 @@ def main():
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
         validation_data=(x_val, y_val),
-        dropout_epochs=dropout_epochs,
-        verbose=args.verbose,
+        dropout_epochs=dropout_epochs
     )
     
     # Save results

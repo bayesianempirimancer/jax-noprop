@@ -23,7 +23,8 @@ import os
 def generate_two_moons_dataset(
     n_samples: int = 10000,
     noise: float = 0.1,
-    scale_factor: float = 8.0,
+    scale_factor: float = 10.0,
+    center: bool = True,
     seed: int = 42
 ) -> tuple:
     """
@@ -32,7 +33,8 @@ def generate_two_moons_dataset(
     Args:
         n_samples: Total number of samples
         noise: Standard deviation of Gaussian noise added to the data
-        scale_factor: Scale factor to multiply x coordinates by (default: 8.0)
+        scale_factor: Scale factor to multiply x coordinates by (default: 1.0)
+        center: Whether to center the data after scaling (default: True)
         seed: Random seed for reproducibility
         
     Returns:
@@ -49,6 +51,10 @@ def generate_two_moons_dataset(
     
     # Apply scale factor to x coordinates
     x_data = x_data * scale_factor
+    
+    # Optionally center the data
+    if center:
+        x_data = x_data - x_data.mean(axis=0, keepdims=True)
     
     # Convert integer labels to one-hot encoding
     num_classes = len(np.unique(y_data_int))
@@ -199,6 +205,8 @@ def main():
                        help='Noise level for the dataset')
     parser.add_argument('--scale_factor', type=float, default=8.0,
                        help='Scale factor to multiply x coordinates by (default: 8.0)')
+    parser.add_argument('--no_center', action='store_true',
+                       help='Do not center the data after scaling (default: center=True)')
     parser.add_argument('--seed', type=int, default=42, 
                        help='Random seed for reproducibility')
     parser.add_argument('--output_dir', type=str, default='./data', 
@@ -221,6 +229,7 @@ def main():
     print(f"  Number of samples: {args.n_samples}")
     print(f"  Noise level: {args.noise}")
     print(f"  Scale factor: {args.scale_factor}")
+    print(f"  Center data: {not args.no_center}")
     print(f"  Seed: {args.seed}")
     print(f"  Output directory: {args.output_dir}")
     print(f"  Filename: {args.filename}")
@@ -235,6 +244,7 @@ def main():
         n_samples=args.n_samples,
         noise=args.noise,
         scale_factor=args.scale_factor,
+        center=not args.no_center,  # Default is True, use --no_center to disable
         seed=args.seed
     )
     

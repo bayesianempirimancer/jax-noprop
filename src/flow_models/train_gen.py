@@ -23,6 +23,7 @@ from src.flow_models.trainer_gen import GenerationTrainer
 from src.flow_models.config import Config
 from src.configs.base_config import BaseConfig
 from src.flow_models.training_utils import get_save_directory, save_training_artifacts
+from dataclasses import replace
 
 
 def load_data(data_path: str):
@@ -101,6 +102,10 @@ def main():
                        help='Learning rate')
     parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd'],
                        help='Optimizer')
+    parser.add_argument('--warmup_steps', type=int, default=0,
+                       help='Number of training steps for learning rate warmup (0 = no warmup)')
+    parser.add_argument('--warmup_epochs', type=float, default=None,
+                       help='Number of epochs for warmup (overrides warmup_steps if provided)')
     
     # Loss arguments (can override config)
     parser.add_argument('--recon_weight', type=float, default=None,
@@ -146,8 +151,12 @@ def main():
         raise ValueError("Cannot specify both --latent_dim and --latent_shape. Use one or the other.")
     
     # Convert dims to shapes if specified
+    # Special case: input_dim=0 for unconditional generation should become empty tuple ()
     if args.input_dim is not None:
-        args.input_shape = (args.input_dim,)
+        if args.input_dim == 0 and args.unconditional:
+            args.input_shape = ()  # Empty tuple for unconditional generation
+        else:
+            args.input_shape = (args.input_dim,)
     if args.output_dim is not None:
         args.output_shape = (args.output_dim,)
     if args.latent_dim is not None:
@@ -176,7 +185,9 @@ def main():
         if args.config_file:
             # Load from YAML using custom class
             print(f"Loading config from {args.config_file} using custom class {config_class.__name__}...")
-            base_config = config_class.load_yaml(args.config_file)
+            loaded_config = config_class.load_yaml(args.config_file)
+            # Merge with defaults to ensure all default values are preserved
+            base_config = config_class.merge_with_defaults(loaded_config)
             print(f"Loaded config with custom class: {base_config.__class__.__name__}")
         else:
             # Instantiate custom class with default values
@@ -194,7 +205,9 @@ def main():
         if config_path.suffix not in ['.yaml', '.yml']:
             raise ValueError(f"Unsupported config file format: {config_path.suffix}. Use .yaml or .yml")
         
-        base_config = Config.load_yaml(args.config_file)
+        loaded_config = Config.load_yaml(args.config_file)
+        # Merge with defaults to ensure all default values are preserved
+        base_config = Config.merge_with_defaults(loaded_config)
         print(f"Loaded config with default Config class: {base_config.__class__.__name__}")
     else:
         # Use default unified Config from flow_models with default values
@@ -222,27 +235,34 @@ def main():
     train_x, train_y = y_train, x_train
     val_x, val_y = y_val, x_val
     
+    # Calculate warmup_steps
+    if args.warmup_epochs is not None:
+        # Calculate number of batches per epoch
+        num_samples = train_y.shape[0]
+        batches_per_epoch = (num_samples + args.batch_size - 1) // args.batch_size
+        warmup_steps = int(args.warmup_epochs * batches_per_epoch)
+    else:
+        warmup_steps = args.warmup_steps
+    
     # Create trainer
     trainer = GenerationTrainer(
         config=config,
         learning_rate=args.learning_rate,
         optimizer_name=args.optimizer,
         seed=args.seed,
-        unconditional=args.unconditional
+        unconditional=args.unconditional,
+        warmup_steps=warmup_steps
     )
     
     # Initialize
-    bs = min(args.batch_size, train_y.shape[0])
+    print("Initializing model...")
+    # Use a single sample for initialization (model will add batch dimension internally)
     if args.unconditional:
         x_sample = None
     else:
-        x_sample = train_x[:bs]
-    y_sample = train_y[:bs]
-    z_sample = jr.normal(jr.PRNGKey(args.seed), (bs, config.main['latent_shape'][0]))
-    t_sample = jr.uniform(jr.PRNGKey(args.seed+1), (bs,), minval=0.0, maxval=1.0)
-    
-    print("Initializing model...")
-    trainer.initialize(x_sample, y_sample, z_sample, t_sample)
+        x_sample = train_x[0] if train_x is not None else None
+    y_sample = train_y[0]
+    trainer.initialize(x_sample, y_sample)
     
     # Train
     train_x_input = None if args.unconditional else train_x
@@ -256,8 +276,7 @@ def main():
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
         validation_data=(val_x_input, val_y),
-        dropout_epochs=dropout_epochs,
-        verbose=args.verbose,
+        dropout_epochs=dropout_epochs
     )
     
     # Save results
@@ -283,21 +302,11 @@ def main():
         y_labels = np.array(cond_y)
     
     # Compute Chamfer Distance
-    chamfer_dist = trainer.compute_chamfer_distance(jnp.array(x_gen), jnp.array(x_real))
+    from src.utils.metrics import chamfer_distance
+    chamfer_dist = chamfer_distance(jnp.array(x_gen), jnp.array(x_real))
     
-    # Plot
-    trainer.save_generation_plot(x_real=x_real, y_labels=y_labels, x_gen=x_gen, output_dir=args.save_dir)
-    trainer.save_loss_trends_plot(history, output_dir=args.save_dir)
-    
-    # Generate trajectory plot
-    trajectory_prng = jr.PRNGKey(args.seed + 456)
-    trainer.save_trajectory_plot(
-        cond_y=cond_y,
-        num_trajectories=40,
-        num_steps=20,
-        prng_key=trajectory_prng,
-        output_dir=args.save_dir
-    )
+    # Save results (includes all plots: generation, loss trends, trajectories)
+    trainer.save_results(history, args.save_dir, x_real=x_real, x_gen=x_gen, y_labels=y_labels)
     
     if args.verbose:
         print(f"Final Chamfer Distance: {chamfer_dist:.6f}")

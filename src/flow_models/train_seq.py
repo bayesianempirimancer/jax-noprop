@@ -184,7 +184,9 @@ def main():
         if args.config_file:
             # Load from YAML using custom class
             print(f"Loading config from {args.config_file} using custom class {config_class.__name__}...")
-            base_config = config_class.load_yaml(args.config_file)
+            loaded_config = config_class.load_yaml(args.config_file)
+            # Merge with defaults to ensure all default values are preserved
+            base_config = config_class.merge_with_defaults(loaded_config)
             print(f"Loaded config with custom class: {base_config.__class__.__name__}")
         else:
             # Instantiate custom class with default values
@@ -202,7 +204,9 @@ def main():
         if config_path.suffix not in ['.yaml', '.yml']:
             raise ValueError(f"Unsupported config file format: {config_path.suffix}. Use .yaml or .yml")
         
-        base_config = Config.load_yaml(args.config_file)
+        loaded_config = Config.load_yaml(args.config_file)
+        # Merge with defaults to ensure all default values are preserved
+        base_config = Config.merge_with_defaults(loaded_config)
         print(f"Loaded config with default Config class: {base_config.__class__.__name__}")
     else:
         # Use default unified Config from flow_models with default values

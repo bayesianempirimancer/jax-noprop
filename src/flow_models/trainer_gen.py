@@ -1,107 +1,172 @@
 """
-Trainer for conditional generation (x | y) on Two Moons.
+Minimal, professional JAX trainer for generation tasks.
 
-This trainer focuses on training the selected model with reversed mapping
-(inputs=y, targets=x) and evaluating conditional generation by sampling
-stochastic trajectories using a provided PRNGKey.
+This trainer provides a clean, JAX-compliant interface for training
+flow models on conditional and unconditional generation tasks.
 """
-
-from typing import Dict, Any, Tuple, Optional
-from dataclasses import dataclass
-import os
-import pickle
-from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import numpy as np
 import optax
+from typing import Dict, Any, Tuple, Optional
 
 from src.flow_models.fm import VAE_flow as FlowMatchingModel
 from src.flow_models.df import VAE_flow as DiffusionModel
 from src.flow_models.ct import VAE_flow as CTModel
-from src.flow_models.config import Config as FlowMatchingConfig, Config as DiffusionConfig, Config as CTConfig
+from src.flow_models.config import Config
 
 
-@dataclass
 class GenerationTrainer:
-    config: Any
-    learning_rate: float = 1e-3
-    optimizer_name: str = "adam"
-    seed: int = 42
-    unconditional: bool = False  # If True, use unconditional generation (x=None)
-
-    def __post_init__(self):
-        if isinstance(self.config, DiffusionConfig):
-            self.model = DiffusionModel(config=self.config)
+    """Minimal trainer for conditional/unconditional generation tasks."""
+    
+    def __init__(
+        self,
+        config,
+        learning_rate: float = 1e-3,
+        optimizer_name: str = "adam",
+        seed: int = 42,
+        unconditional: bool = False,
+        warmup_steps: int = 0
+    ):
+        self.config = config
+        self.learning_rate = learning_rate
+        self.unconditional = unconditional
+        self.seed = seed
+        
+        # Initialize model
+        if(config.model_type == "diffusion"):
+            self.model = DiffusionModel(config=config)
             self.model_type = "diffusion"
-        elif isinstance(self.config, CTConfig):
-            self.model = CTModel(config=self.config)
+        elif(config.model_type == "flow_matching"):
+            self.model = FlowMatchingModel(config=config)
+            self.model_type = "flow_matching"
+        elif(config.model_type == "ct"):
+            self.model = CTModel(config=config)
             self.model_type = "ct"
         else:
-            self.model = FlowMatchingModel(config=self.config)
-            self.model_type = "flow_matching"
-
-        if self.optimizer_name.lower() == "adam":
-            self.optimizer = optax.adam(self.learning_rate)
-        elif self.optimizer_name.lower() == "sgd":
-            self.optimizer = optax.sgd(self.learning_rate)
-        else:
-            raise ValueError(f"Unsupported optimizer: {self.optimizer_name}")
-
-        self.params = None
-        self.opt_state = None
-        self.rng = jr.PRNGKey(self.seed)
-
-    def initialize(self, x_sample: Optional[jnp.ndarray], y_sample: jnp.ndarray, z_sample: jnp.ndarray, t_sample: jnp.ndarray):
-        self.rng, init_rng = jr.split(self.rng)
-        # x_sample can be None for unconditional generation
-        self.params = self.model.init(init_rng, x_sample, y_sample, init_rng)
-        self.opt_state = self.optimizer.init(self.params)
-
-    def train_step(self, x_batch: Optional[jnp.ndarray], y_batch: jnp.ndarray, use_dropout: bool = True) -> Dict[str, float]:
-        if self.params is None or self.opt_state is None:
-            raise ValueError("Model not initialized. Call initialize() first.")
-        self.rng, train_rng = jr.split(self.rng)
-        # For unconditional generation, pass None for x_batch
-        x_input = None if (self.unconditional or x_batch is None) else x_batch
+            raise ValueError(f"Unsupported model type: {config.model_type}")
         
-        # Use dropout-free train step when dropout is disabled for efficiency
-        if use_dropout:
-            self.params, self.opt_state, loss, metrics = self.model.train_step(
-                self.params, x_input, y_batch, self.opt_state, self.optimizer, train_rng, training=True
+        # Create optimizer with warmup
+        if warmup_steps > 0:
+            lr_schedule = optax.join_schedules(
+                [
+                    optax.linear_schedule(0.0, learning_rate, warmup_steps),
+                    optax.constant_schedule(learning_rate)
+                ],
+                [warmup_steps]
             )
         else:
-            # Use the optimized dropout-free method
-            if hasattr(self.model, 'train_step_without_dropout'):
-                self.params, self.opt_state, loss, metrics = self.model.train_step_without_dropout(
-                    self.params, x_input, y_batch, self.opt_state, self.optimizer, train_rng
-                )
-            else:
-                # Fallback to regular train_step with training=False
-                self.params, self.opt_state, loss, metrics = self.model.train_step(
-                    self.params, x_input, y_batch, self.opt_state, self.optimizer, train_rng, training=False
-                )
-        return metrics
-
+            lr_schedule = optax.constant_schedule(learning_rate)
+        
+        self.optimizer = optax.adam(lr_schedule) if optimizer_name.lower() == "adam" else optax.sgd(lr_schedule)
+        
+        # State
+        self.params = None
+        self.opt_state = None
+        self.rng = jr.PRNGKey(seed)
+    
+    def initialize(self, x_sample: Optional[jnp.ndarray], y_sample: jnp.ndarray):
+        """Initialize model parameters.
+        
+        Args:
+            x_sample: Sample input [input_dim] or [batch_size, input_dim] or None
+            y_sample: Sample target [output_dim] or [batch_size, output_dim]
+        """
+        # Ensure we have batches with batch_size=1
+        if x_sample is not None:
+            if x_sample.ndim == 1:
+                x_sample = x_sample[None, :]
+            elif x_sample.shape[0] > 1:
+                x_sample = x_sample[0:1]  # Use only first sample
+        
+        if y_sample.ndim == 1:
+            y_sample = y_sample[None, :]
+        elif y_sample.shape[0] > 1:
+            y_sample = y_sample[0:1]  # Use only first sample
+        
+        self.rng, init_rng = jr.split(self.rng)
+        self.params = self.model.init(init_rng, x_sample, y_sample, init_rng)
+        self.opt_state = self.optimizer.init(self.params)
+    
+    def train_epoch(
+        self,
+        x_data: Optional[jnp.ndarray],
+        y_data: jnp.ndarray,
+        batch_size: int = 256,
+        use_dropout: bool = True
+    ) -> Dict[str, float]:
+        """Train for one epoch using regular for loop."""
+        if self.params is None or self.opt_state is None:
+            raise ValueError("Model not initialized. Call initialize() first.")
+        
+        y_data = jnp.asarray(y_data)
+        x_data = jnp.asarray(x_data) if x_data is not None else None
+        
+        # Shuffle and batch
+        num_samples = y_data.shape[0]
+        self.rng, shuffle_rng = jr.split(self.rng)
+        perm = jr.permutation(shuffle_rng, num_samples)
+        y_shuffled = y_data[perm]
+        x_shuffled = x_data[perm] if x_data is not None else None
+        
+        # Regular for loop over batches
+        num_batches = (num_samples + batch_size - 1) // batch_size
+        
+        total_losses = []
+        flow_losses = []
+        recon_losses = []
+        reg_losses = []
+        
+        for i in range(num_batches):
+            start_idx = i * batch_size
+            end_idx = min(start_idx + batch_size, num_samples)
+            y_batch = y_shuffled[start_idx:end_idx]
+            x_batch = x_shuffled[start_idx:end_idx] if x_shuffled is not None else None
+            
+            # Pad if needed
+            if end_idx - start_idx < batch_size:
+                pad_size = batch_size - (end_idx - start_idx)
+                y_batch = jnp.concatenate([y_batch, jnp.zeros((pad_size, *y_batch.shape[1:]))])
+                if x_batch is not None:
+                    x_batch = jnp.concatenate([x_batch, jnp.zeros((pad_size, *x_batch.shape[1:]))])
+            
+            self.rng, step_rng = jr.split(self.rng)
+            x_input = None if (self.unconditional or x_batch is None) else x_batch
+            self.params, self.opt_state, loss, metrics = self.model.train_step(
+                self.params, x_input, y_batch, self.opt_state, self.optimizer, step_rng, training=use_dropout
+            )
+            
+            # Scale loss by actual batch size
+            actual_batch_size = end_idx - start_idx
+            scale = batch_size / actual_batch_size if actual_batch_size < batch_size else 1.0
+            
+            total_losses.append(float(loss) * scale)
+            flow_losses.append(float(metrics.get('flow_loss', 0.0)) * scale)
+            recon_losses.append(float(metrics.get('recon_loss', 0.0)) * scale)
+            reg_losses.append(float(metrics.get('reg_loss', 0.0)) * scale)
+        
+        return {
+            'total_loss': sum(total_losses) / len(total_losses),
+            'flow_loss': sum(flow_losses) / len(flow_losses),
+            'recon_loss': sum(recon_losses) / len(recon_losses),
+            'reg_loss': sum(reg_losses) / len(reg_losses)
+        }
+    
     def train(
         self,
         x_data: Optional[jnp.ndarray],
         y_data: jnp.ndarray,
-        num_epochs: int = 50,
+        num_epochs: int,
         batch_size: int = 256,
         validation_data: Optional[Tuple[Optional[jnp.ndarray], jnp.ndarray]] = None,
-        dropout_epochs: Optional[int] = None,
-        verbose: bool = True,
+        dropout_epochs: Optional[int] = None
     ) -> Dict[str, Any]:
-        if self.params is None:
-            raise ValueError("Model not initialized. Call initialize() first.")
-
+        """Train the model."""
         if dropout_epochs is None:
             dropout_epochs = num_epochs
-
-        history: Dict[str, Any] = {
+        
+        history = {
             'train_losses': [],
             'train_flow_losses': [],
             'train_recon_losses': [],
@@ -110,227 +175,196 @@ class GenerationTrainer:
             'val_flow_losses': [],
             'val_recon_losses': [],
             'val_reg_losses': [],
-            'val_chamfer_distances': [],
+            'val_chamfer_distances': []
         }
-
-        num_samples = y_data.shape[0]
+        
         for epoch in range(num_epochs):
             use_dropout = epoch < dropout_epochs
-            # shuffle
-            self.rng, shuf = jr.split(self.rng)
-            perm = jr.permutation(shuf, num_samples)
-            x_shuf = x_data[perm] if x_data is not None else None
-            y_shuf = y_data[perm]
-
-            # minibatches
-            for start in range(0, num_samples, batch_size):
-                end = min(start + batch_size, num_samples)
-                x_batch = x_shuf[start:end] if x_shuf is not None else None
-                metrics = self.train_step(x_batch, y_shuf[start:end], use_dropout=use_dropout)
+            metrics = self.train_epoch(x_data, y_data, batch_size, use_dropout)
             
-            # Store detailed loss metrics from last batch of epoch
-            history['train_losses'].append(float(metrics.get('total_loss', 0.0)))
-            history['train_flow_losses'].append(float(metrics.get('flow_loss', 0.0)))
-            history['train_recon_losses'].append(float(metrics.get('recon_loss', 0.0)))
-            history['train_reg_losses'].append(float(metrics.get('reg_loss', 0.0)))
-
+            history['train_losses'].append(metrics['total_loss'])
+            history['train_flow_losses'].append(metrics['flow_loss'])
+            history['train_recon_losses'].append(metrics['recon_loss'])
+            history['train_reg_losses'].append(metrics['reg_loss'])
+            
             if validation_data is not None:
                 vx, vy = validation_data
-                val_metrics = self.evaluate_detailed(vx, vy, batch_size)
+                val_metrics = self.evaluate(vx, vy, batch_size)
                 history['val_losses'].append(val_metrics['total_loss'])
                 history['val_flow_losses'].append(val_metrics['flow_loss'])
                 history['val_recon_losses'].append(val_metrics['recon_loss'])
                 history['val_reg_losses'].append(val_metrics['reg_loss'])
                 
-                # Compute Chamfer Distance: generate samples and compare with real validation data
-                num_eval_samples = min(1000, vy.shape[0])  # Limit to 1000 samples for efficiency
-                self.rng, gen_rng = jr.split(self.rng)
-                if self.unconditional:
-                    # Unconditional generation
-                    x_gen_eval = self.unconditional_generate(
-                        batch_shape=(num_eval_samples,),
-                        num_steps=20,
-                        prng_key=gen_rng
-                    )
-                else:
-                    # Conditional generation: use validation conditions
-                    cond_eval = vx[:num_eval_samples] if vx is not None else None
-                    if cond_eval is None:
-                        x_gen_eval = self.unconditional_generate(
-                            batch_shape=(num_eval_samples,),
-                            num_steps=20,
-                            prng_key=gen_rng
-                        )
+                # Compute Chamfer distance
+                if epoch % 10 == 0 or epoch == num_epochs - 1:
+                    num_eval = min(1000, vy.shape[0])
+                    self.rng, gen_rng = jr.split(self.rng)
+                    if self.unconditional:
+                        x_gen = self.unconditional_generate((num_eval,), 20, gen_rng)
                     else:
-                        x_gen_eval = self.conditional_generate(
-                            cond_eval,
-                            num_steps=20,
-                            prng_key=gen_rng
-                        )
-                x_real_eval = vy[:num_eval_samples]
-                chamfer_dist = self.compute_chamfer_distance(x_gen_eval, x_real_eval)
-                history['val_chamfer_distances'].append(chamfer_dist)
-
+                        cond = vx[:num_eval] if vx is not None else None
+                        x_gen = self.conditional_generate(cond, 20, gen_rng) if cond is not None else self.unconditional_generate((num_eval,), 20, gen_rng)
+                    
+                    from src.utils.metrics import chamfer_distance
+                    chamfer_dist = chamfer_distance(x_gen, vy[:num_eval])
+                    history['val_chamfer_distances'].append(chamfer_dist)
+        
         return history
-
-    def evaluate(self, x_data: Optional[jnp.ndarray], y_data: jnp.ndarray, batch_size: int = 256) -> float:
-        if self.params is None:
-            raise ValueError("Model not initialized. Call initialize() first.")
-        num_samples = y_data.shape[0]
-        total = 0.0
-        steps = 0
-        for start in range(0, num_samples, batch_size):
-            end = min(start + batch_size, num_samples)
-            self.rng, eval_rng = jr.split(self.rng)
-            x_input = None if (self.unconditional or x_data is None) else x_data[start:end]
-            loss, _ = self.model.loss(self.params, x_input, y_data[start:end], eval_rng, training=False)
-            total += float(loss)
-            steps += 1
-        return total / max(steps, 1)
     
-    def evaluate_detailed(self, x_data: Optional[jnp.ndarray], y_data: jnp.ndarray, batch_size: int = 256) -> Dict[str, float]:
-        """Evaluate model and return detailed loss metrics."""
-        if self.params is None:
-            raise ValueError("Model not initialized. Call initialize() first.")
-        num_samples = y_data.shape[0]
-        metrics_sum = {'total_loss': 0.0, 'flow_loss': 0.0, 'recon_loss': 0.0, 'reg_loss': 0.0}
-        steps = 0
-        for start in range(0, num_samples, batch_size):
-            end = min(start + batch_size, num_samples)
-            self.rng, eval_rng = jr.split(self.rng)
-            x_input = None if (self.unconditional or x_data is None) else x_data[start:end]
-            _, metrics = self.model.loss(self.params, x_input, y_data[start:end], eval_rng, training=False)
-            for key in metrics_sum:
-                metrics_sum[key] += float(metrics.get(key, 0.0))
-            steps += 1
-        return {key: val / max(steps, 1) for key, val in metrics_sum.items()}
-
-    def compute_chamfer_distance(self, generated_samples: jnp.ndarray, real_samples: jnp.ndarray) -> float:
-        """
-        Compute Chamfer Distance between generated and real point clouds.
-        
-        Chamfer Distance measures the average distance from each generated point to its
-        nearest neighbor in the real data, and from each real point to its nearest neighbor
-        in the generated data.
-        
-        Args:
-            generated_samples: Generated samples [num_gen, feature_dim]
-            real_samples: Real samples [num_real, feature_dim]
-            
-        Returns:
-            Chamfer Distance (scalar), or float('inf') if generation failed (NaN/Inf present)
-        """
-        # Check for NaN or Inf in generated samples - indicates generation failure
-        gen_has_invalid = jnp.any(~jnp.isfinite(generated_samples))
-        real_has_invalid = jnp.any(~jnp.isfinite(real_samples))
-        
-        if gen_has_invalid or real_has_invalid:
-            # Return inf to indicate failure (we want to minimize, so inf is worst case)
-            return float('inf')
-        
-        # Compute pairwise squared distances: [num_gen, num_real]
-        # ||g_i - r_j||^2 = ||g_i||^2 - 2*g_i*r_j + ||r_j||^2
-        gen_norm_sq = jnp.sum(generated_samples ** 2, axis=1, keepdims=True)  # [num_gen, 1]
-        real_norm_sq = jnp.sum(real_samples ** 2, axis=1)  # [num_real,]
-        dot_product = jnp.dot(generated_samples, real_samples.T)  # [num_gen, num_real]
-        pairwise_dist_sq = gen_norm_sq - 2 * dot_product + real_norm_sq  # [num_gen, num_real]
-        
-        # Check for negative values due to numerical errors and clip
-        pairwise_dist_sq = jnp.maximum(pairwise_dist_sq, 0.0)
-        
-        # Distance from each generated point to nearest real point
-        min_dist_gen_to_real = jnp.sqrt(jnp.min(pairwise_dist_sq, axis=1))  # [num_gen,]
-        chamfer_gen_to_real = jnp.mean(min_dist_gen_to_real)
-        
-        # Distance from each real point to nearest generated point
-        min_dist_real_to_gen = jnp.sqrt(jnp.min(pairwise_dist_sq, axis=0))  # [num_real,]
-        chamfer_real_to_gen = jnp.mean(min_dist_real_to_gen)
-        
-        # Bidirectional Chamfer Distance (average of both directions)
-        chamfer_distance = (chamfer_gen_to_real + chamfer_real_to_gen) / 2.0
-        
-        # Final check for NaN/Inf (shouldn't happen now, but safety check)
-        if not jnp.isfinite(chamfer_distance):
-            return float('inf')
-        
-        return float(chamfer_distance)
-
-    def conditional_generate(
+    def evaluate(
         self,
-        cond_y: jnp.ndarray,
-        num_steps: int = 20,
-        prng_key: Optional[jr.PRNGKey] = None,
-    ) -> jnp.ndarray:
-        """
-        Generate x samples conditioned on labels y using stochastic z_0.
-        For unconditional generation, use unconditional_generate instead.
-        """
+        x_data: Optional[jnp.ndarray],
+        y_data: jnp.ndarray,
+        batch_size: int = 256
+    ) -> Dict[str, float]:
+        """Evaluate the model."""
         if self.params is None:
-            raise ValueError("Model not initialized. Call initialize() first.")
+            raise ValueError("Model not initialized.")
+        
+        y_data = jnp.asarray(y_data)
+        x_data = jnp.asarray(x_data) if x_data is not None else None
+        
+        num_samples = y_data.shape[0]
+        num_batches = (num_samples + batch_size - 1) // batch_size
+        
+        total_losses = []
+        flow_losses = []
+        recon_losses = []
+        reg_losses = []
+        
+        for i in range(num_batches):
+            start_idx = i * batch_size
+            end_idx = min(start_idx + batch_size, num_samples)
+            y_batch = y_data[start_idx:end_idx]
+            x_batch = x_data[start_idx:end_idx] if x_data is not None else None
+            
+            # Pad if needed
+            if end_idx - start_idx < batch_size:
+                pad_size = batch_size - (end_idx - start_idx)
+                y_batch = jnp.concatenate([y_batch, jnp.zeros((pad_size, *y_batch.shape[1:]))])
+                if x_batch is not None:
+                    x_batch = jnp.concatenate([x_batch, jnp.zeros((pad_size, *x_batch.shape[1:]))])
+            
+            self.rng, eval_rng = jr.split(self.rng)
+            x_input = None if (self.unconditional or x_batch is None) else x_batch
+            loss, metrics = self.model.loss(self.params, x_input, y_batch, eval_rng, training=False)
+            
+            # Scale loss by actual batch size
+            actual_batch_size = end_idx - start_idx
+            scale = batch_size / actual_batch_size if actual_batch_size < batch_size else 1.0
+            
+            total_losses.append(float(loss) * scale)
+            flow_losses.append(float(metrics.get('flow_loss', 0.0)) * scale)
+            recon_losses.append(float(metrics.get('recon_loss', 0.0)) * scale)
+            reg_losses.append(float(metrics.get('reg_loss', 0.0)) * scale)
+        
+        return {
+            'total_loss': sum(total_losses) / len(total_losses),
+            'flow_loss': sum(flow_losses) / len(flow_losses),
+            'recon_loss': sum(recon_losses) / len(recon_losses),
+            'reg_loss': sum(reg_losses) / len(reg_losses)
+        }
+    
+    def conditional_generate(self, cond_y: jnp.ndarray, num_steps: int = 20, prng_key: Optional[jr.PRNGKey] = None) -> jnp.ndarray:
+        """Generate samples conditioned on y."""
+        if self.params is None:
+            raise ValueError("Model not initialized.")
         if self.unconditional:
             raise ValueError("Use unconditional_generate() for unconditional generation")
-        # Model predict expects x as conditional input; since we trained reversed, x is y
-        return self.model.predict(self.params, cond_y, num_steps=num_steps, integration_method="midpoint", output_type="end_point", prng_key=prng_key)
+        if prng_key is None:
+            self.rng, prng_key = jr.split(self.rng)
+        return self.model.predict(self.params, cond_y, num_steps, "midpoint", "end_point", prng_key)
     
-    def unconditional_generate(
-        self,
-        batch_shape: Tuple[int, ...],
-        num_steps: int = 20,
-        prng_key: Optional[jr.PRNGKey] = None,
-    ) -> jnp.ndarray:
-        """
-        Generate x samples unconditionally using stochastic z_0.
-        """
+    def unconditional_generate(self, batch_shape: Tuple[int, ...], num_steps: int = 20, prng_key: Optional[jr.PRNGKey] = None) -> jnp.ndarray:
+        """Generate samples unconditionally."""
         if self.params is None:
-            raise ValueError("Model not initialized. Call initialize() first.")
+            raise ValueError("Model not initialized.")
         if not self.unconditional:
             raise ValueError("Model was trained conditionally. Use conditional_generate() instead")
         if prng_key is None:
             self.rng, prng_key = jr.split(self.rng)
-        
         integration_method = "midpoint" if self.model_type == "ct" else "euler"
-        # Ensure batch_shape is a tuple of Python integers for static argument
-        if isinstance(batch_shape, (list, tuple)):
-            batch_shape = tuple(int(x) for x in batch_shape)
-        return self.model.sample(self.params, prng_key, batch_shape, num_steps=num_steps, integration_method=integration_method, output_type="end_point")
-
-    def save_params(self, output_path: str):
-        Path(os.path.dirname(output_path)).mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'wb') as f:
-            pickle.dump(jax.device_get(self.params), f)
-
-    def save_generation_plot(self, x_real: np.ndarray, y_labels: Optional[np.ndarray], x_gen: np.ndarray, output_dir: str):
-        """Create generation comparison plot showing real vs generated samples."""
-        from src.utils.plotting.plot_generation import create_generation_plot
-        create_generation_plot(x_real, y_labels, x_gen, output_dir, self.unconditional)
+        batch_shape = tuple(int(x) for x in batch_shape) if isinstance(batch_shape, (list, tuple)) else batch_shape
+        return self.model.sample(self.params, prng_key, batch_shape, num_steps, integration_method, "end_point")
     
-    def save_loss_trends_plot(self, history: Dict[str, Any], output_dir: str):
-        """Plot loss terms over training epochs to diagnose training issues."""
-        from src.utils.plotting.plot_generation import create_loss_trends_plot
-        create_loss_trends_plot(history, self.model_type, output_dir)
-    
-    def save_trajectory_plot(self, cond_y: Optional[jnp.ndarray] = None, num_trajectories: int = 20, num_steps: int = 20, prng_key: Optional[jr.PRNGKey] = None, output_dir: str = None):
-        """Generate and plot latent z trajectories during integration."""
+    def save_params(self, filepath: str):
+        """Save model parameters."""
+        import pickle
+        from pathlib import Path
         if self.params is None:
-            raise ValueError("Model not initialized. Call initialize() first.")
+            raise ValueError("Model not initialized. No parameters to save.")
+        Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+        with open(filepath, 'wb') as f:
+            pickle.dump(jax.device_get(self.params), f)
+    
+    def save_results(self, history: Dict[str, Any], output_dir: str, x_real: Optional[jnp.ndarray] = None, 
+                     x_gen: Optional[jnp.ndarray] = None, y_labels: Optional[jnp.ndarray] = None):
+        """Save results and create plots.
         
-        from src.utils.plotting.plot_generation import create_latent_trajectories_plot
+        Args:
+            history: Training history dictionary
+            output_dir: Directory to save results
+            x_real: Real samples for generation plot [optional]
+            x_gen: Generated samples for generation plot [optional]
+            y_labels: Labels for conditional generation plot [optional]
+        """
+        import os
+        import pickle
+        import numpy as np
+        from pathlib import Path
         
-        # Generate PRNG key if needed
-        if prng_key is None:
-            self.rng, prng_key = jr.split(self.rng)
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
         
-        create_latent_trajectories_plot(
-            model=self.model,
-            params=self.params,
-            model_type=self.model_type,
-            unconditional=self.unconditional,
-            output_dir=output_dir,
-            cond_y=cond_y,
-            num_trajectories=num_trajectories,
-            num_steps=num_steps,
-            prng_key=prng_key,
-            rng=self.rng
-        )
-
-
+        # Save history
+        with open(f"{output_dir}/history.pkl", 'wb') as f:
+            pickle.dump(history, f)
+        
+        # Save config
+        if hasattr(self.config, 'save_yaml'):
+            self.config.save_yaml(f"{output_dir}/config.yaml")
+        
+        # Save params
+        self.save_params(f"{output_dir}/params.pkl")
+        
+        # Create plots
+        try:
+            from src.utils.plotting.plot_generation import (
+                create_generation_plot,
+                create_loss_trends_plot,
+                create_latent_trajectories_plot
+            )
+            
+            # Loss trends plot
+            create_loss_trends_plot(history, self.model_type, output_dir)
+            
+            # Generation plot (if data provided)
+            if x_gen is not None and x_real is not None:
+                create_generation_plot(
+                    np.array(x_real), 
+                    np.array(y_labels) if y_labels is not None else None, 
+                    np.array(x_gen), 
+                    output_dir, 
+                    self.unconditional
+                )
+            
+            # Latent trajectories plot
+            self.rng, traj_rng = jr.split(self.rng)
+            cond_y = None if self.unconditional else (y_labels[:20] if y_labels is not None else None)
+            create_latent_trajectories_plot(
+                model=self.model,
+                params=self.params,
+                model_type=self.model_type,
+                unconditional=self.unconditional,
+                output_dir=output_dir,
+                cond_y=cond_y,
+                num_trajectories=20,
+                num_steps=20,
+                prng_key=traj_rng,
+                rng=self.rng
+            )
+        except ImportError:
+            pass
+        except Exception as e:
+            import traceback
+            print(f"Warning: Error creating plots: {e}")
+            traceback.print_exc()
