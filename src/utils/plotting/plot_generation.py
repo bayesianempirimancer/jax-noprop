@@ -133,19 +133,20 @@ def create_loss_trends_plot(history: Dict[str, Any], model_type: str, output_dir
     ax.legend()
     ax.grid(True, alpha=0.3)
     
-    # Chamfer Distance (if available, otherwise leave empty)
+    # KL z0 Loss
     ax = axes[1, 1]
-    if history.get('val_chamfer_distances') and len(history['val_chamfer_distances']) > 0:
-        chamfer_epochs = range(len(history['val_chamfer_distances']))
-        ax.plot(chamfer_epochs, history['val_chamfer_distances'], label='Val Chamfer', color='darkorange', linewidth=2, linestyle='--')
-        ax.set_title('Chamfer Distance', fontsize=12, fontweight='bold')
+    if history.get('train_kl_z0_losses') and len(history['train_kl_z0_losses']) > 0:
+        ax.plot(epochs, history['train_kl_z0_losses'], label='Train KL z0', color='darkorange', linewidth=2)
+        if history.get('val_kl_z0_losses') and len(history['val_kl_z0_losses']) > 0:
+            ax.plot(epochs, history['val_kl_z0_losses'], label='Val KL z0', color='darkred', linewidth=2, linestyle='--')
+        ax.set_title('KL z0 Loss', fontsize=12, fontweight='bold')
         ax.set_xlabel('Epoch')
-        ax.set_ylabel('Distance')
+        ax.set_ylabel('Loss')
         ax.legend()
         ax.grid(True, alpha=0.3)
     else:
         ax.axis('off')
-        ax.text(0.5, 0.5, 'Chamfer Distance\n(Not Available)', ha='center', va='center', fontsize=12, alpha=0.5)
+        ax.text(0.5, 0.5, 'KL z0 Loss\n(Not Available)', ha='center', va='center', fontsize=12, alpha=0.5)
     
     # VAE Loss
     ax = axes[1, 2]
@@ -209,43 +210,37 @@ def create_latent_trajectories_plot(
     else:
         key = jr.PRNGKey(42)
     
-    # Split keys for each trajectory
-    prng_keys = jr.split(key, n_samples)
-    trajectories = []
-    
     integration_method = "midpoint" if model_type == "ct" else "euler"
     
-    for i in range(n_samples):
-        if unconditional:
-            # Use sample() for unconditional generation
-            traj = model.sample(
-                params,
-                prng_keys[i],
-                batch_shape=(1,),
-                num_steps=num_steps,
-                integration_method=integration_method,
-                output_type="trajectory"
-            )
-        else:
-            # Use predict() for conditional generation
-            if cond_y is None:
-                raise ValueError("cond_y must be provided for conditional generation")
-            cond_subset = cond_y[:n_samples]
-            traj = model.predict(
-                params,
-                cond_subset[i:i+1],  # Single condition with batch dim
-                num_steps=num_steps,
-                integration_method=integration_method,
-                output_type="trajectory",
-                prng_key=prng_keys[i]
-            )
-        
-        # Remove batch dimension: [num_steps, 1, output_dim] -> [num_steps, output_dim]
-        if traj.ndim == 3:
-            traj = traj[:, 0, :]
-        trajectories.append(np.array(traj))
-    
-    trajectories = np.array(trajectories)  # [n_samples, num_steps, output_dim]
+    if unconditional:
+        # Use sample() for unconditional generation with batch
+        traj = model.sample(
+            params,
+            key,
+            batch_shape=(n_samples,),
+            num_steps=num_steps,
+            integration_method=integration_method,
+            output_type="trajectory"
+        )
+        # traj shape: [num_steps, n_samples, output_dim]
+        # Reshape to [n_samples, num_steps, output_dim] for plotting
+        trajectories = np.array(traj).transpose(1, 0, 2)  # [n_samples, num_steps, output_dim]
+    else:
+        # Use predict() for conditional generation with batch
+        if cond_y is None:
+            raise ValueError("cond_y must be provided for conditional generation")
+        cond_subset = cond_y[:n_samples]
+        traj = model.predict(
+            params,
+            cond_subset,  # Full batch of conditions
+            num_steps=num_steps,
+            integration_method=integration_method,
+            output_type="trajectory",
+            prng_key=key  # predict will generate different z_0 for each sample in the batch
+        )
+        # traj shape: [num_steps, n_samples, output_dim]
+        # Reshape to [n_samples, num_steps, output_dim] for plotting
+        trajectories = np.array(traj).transpose(1, 0, 2)  # [n_samples, num_steps, output_dim]
     
     # Plot trajectories
     fig, ax = plt.subplots(figsize=(10, 8))

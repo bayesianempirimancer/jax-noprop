@@ -372,12 +372,13 @@ class LinearNoiseSchedule(NoiseSchedule):
         # Linear interpolation: alpha_bar(t) = alpha_bar_min + t * (alpha_bar_max - alpha_bar_min)
         delta_alpha = alpha_bar_max - alpha_bar_min
         alpha_bar_t = alpha_bar_min + t * delta_alpha
+        # Clip to ensure alpha_bar_t is strictly in (0, 1) to avoid division by zero
+        alpha_bar_t = jnp.clip(alpha_bar_t, 1e-8, 1.0 - 1e-8)
         
         # For linear: alpha_bar_prime is constant (delta_alpha)
         # Compute gamma_prime: gamma_prime = alpha_bar_prime / (alpha_bar * (1 - alpha_bar))
         alpha_bar_t_one_minus = alpha_bar_t * (1.0 - alpha_bar_t)
-        # Add small epsilon to avoid division by zero
-        gamma_prime_t = delta_alpha / (alpha_bar_t_one_minus + 1e-8)
+        gamma_prime_t = delta_alpha / alpha_bar_t_one_minus
         
         # Apply stop_gradient if learnable=False
         return self._apply_stop_gradient(alpha_bar_t, gamma_prime_t)

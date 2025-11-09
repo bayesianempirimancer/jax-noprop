@@ -118,6 +118,7 @@ class GenerationTrainer:
         recon_losses = []
         reg_losses = []
         vae_losses = []
+        kl_z0_losses = []
         
         for i in range(num_batches):
             start_idx = i * batch_size
@@ -147,13 +148,15 @@ class GenerationTrainer:
             recon_losses.append(float(metrics.get('recon_loss', 0.0)) * scale)
             reg_losses.append(float(metrics.get('reg_loss', 0.0)) * scale)
             vae_losses.append(float(metrics.get('vae_loss', 0.0)) * scale)
+            kl_z0_losses.append(float(metrics.get('kl_z0_loss', 0.0)) * scale)
         
         return {
             'total_loss': sum(total_losses) / len(total_losses),
             'flow_loss': sum(flow_losses) / len(flow_losses),
             'recon_loss': sum(recon_losses) / len(recon_losses),
             'reg_loss': sum(reg_losses) / len(reg_losses),
-            'vae_loss': sum(vae_losses) / len(vae_losses)
+            'vae_loss': sum(vae_losses) / len(vae_losses),
+            'kl_z0_loss': sum(kl_z0_losses) / len(kl_z0_losses)
         }
     
     def train(
@@ -175,11 +178,13 @@ class GenerationTrainer:
             'train_recon_losses': [],
             'train_reg_losses': [],
             'train_vae_losses': [],
+            'train_kl_z0_losses': [],
             'val_losses': [],
             'val_flow_losses': [],
             'val_recon_losses': [],
             'val_reg_losses': [],
             'val_vae_losses': [],
+            'val_kl_z0_losses': [],
             'val_chamfer_distances': []
         }
         
@@ -192,6 +197,7 @@ class GenerationTrainer:
             history['train_recon_losses'].append(metrics['recon_loss'])
             history['train_reg_losses'].append(metrics['reg_loss'])
             history['train_vae_losses'].append(metrics.get('vae_loss', 0.0))
+            history['train_kl_z0_losses'].append(metrics.get('kl_z0_loss', 0.0))
             
             if validation_data is not None:
                 vx, vy = validation_data
@@ -201,6 +207,7 @@ class GenerationTrainer:
                 history['val_recon_losses'].append(val_metrics['recon_loss'])
                 history['val_reg_losses'].append(val_metrics['reg_loss'])
                 history['val_vae_losses'].append(val_metrics.get('vae_loss', 0.0))
+                history['val_kl_z0_losses'].append(val_metrics.get('kl_z0_loss', 0.0))
                 
                 # Compute Chamfer distance
                 if epoch % 10 == 0 or epoch == num_epochs - 1:
@@ -239,6 +246,7 @@ class GenerationTrainer:
         recon_losses = []
         reg_losses = []
         vae_losses = []
+        kl_z0_losses = []
         
         for i in range(num_batches):
             start_idx = i * batch_size
@@ -266,13 +274,15 @@ class GenerationTrainer:
             recon_losses.append(float(metrics.get('recon_loss', 0.0)) * scale)
             reg_losses.append(float(metrics.get('reg_loss', 0.0)) * scale)
             vae_losses.append(float(metrics.get('vae_loss', 0.0)) * scale)
+            kl_z0_losses.append(float(metrics.get('kl_z0_loss', 0.0)) * scale)
         
         return {
             'total_loss': sum(total_losses) / len(total_losses),
             'flow_loss': sum(flow_losses) / len(flow_losses),
             'recon_loss': sum(recon_losses) / len(recon_losses),
             'reg_loss': sum(reg_losses) / len(reg_losses),
-            'vae_loss': sum(vae_losses) / len(vae_losses)
+            'vae_loss': sum(vae_losses) / len(vae_losses),
+            'kl_z0_loss': sum(kl_z0_losses) / len(kl_z0_losses)
         }
     
     def conditional_generate(self, cond_y: jnp.ndarray, num_steps: int = 20, prng_key: Optional[jr.PRNGKey] = None) -> jnp.ndarray:
@@ -283,11 +293,7 @@ class GenerationTrainer:
             raise ValueError("Use unconditional_generate() for unconditional generation")
         if prng_key is None:
             self.rng, prng_key = jr.split(self.rng)
-        # Only FM model has num_samples parameter, DF and CT don't
-        if self.model_type == "flow_matching":
-            return self.model.predict(self.params, cond_y, num_steps, "midpoint", "end_point", num_samples=1, prng_key=prng_key)
-        else:
-            return self.model.predict(self.params, cond_y, num_steps, "midpoint", "end_point", prng_key=prng_key)
+        return self.model.predict(self.params, cond_y, num_steps, "midpoint", "end_point", prng_key=prng_key)
     
     def unconditional_generate(self, batch_shape: Tuple[int, ...], num_steps: int = 20, prng_key: Optional[jr.PRNGKey] = None) -> jnp.ndarray:
         """Generate samples unconditionally."""

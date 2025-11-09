@@ -231,13 +231,15 @@ class VAE_flow(nn.Module):
         recon_loss_type = str(self.config.main.get("recon_loss_type", "mse"))
         recon_weight = float(self.config.main.get("recon_weight", 0.0))
         reg_weight = float(self.config.main.get("reg_weight", 0.0))
-        vae_weight = float(self.config.main.get("vae_weight", 0.0))
+        vae_weight = float(self.config.main.get("vae_weight", 1.0))
         
         # Split keys for random sampling operations (not dropout)
         key, t_key, noise_key, z_target_key, vae_noise_key = jr.split(key, 5)
         batch_shape = y.shape[:-self.y_ndims]
 
-        alpha_1 = self.apply(params, jnp.asarray(1.0), method='get_noise_params')[0]
+        alpha_0 = self.apply(params, jnp.asarray(1e-6), method='get_noise_params')[0]
+        alpha_1 = self.apply(params, jnp.asarray(1-1e-6), method='get_noise_params')[0]
+
         # Encode Target (noisy latent)
         mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})
         z_target = mu_z_target + jr.normal(z_target_key, mu_z_target.shape) * jnp.exp(0.5 * logvar_z_target)
@@ -298,10 +300,16 @@ class VAE_flow(nn.Module):
 
         vae_loss = jnp.mean(vae_loss)
 
+        # KL regularization term: KL(q(z_0|z_target), p(z_0))
+        # alpha_0 is guaranteed to be in (0, 1) and alpha_0 should be close to 0 and q_sigma_sq should be close to 1.0
+        q_sigma_sq = 1.0 - alpha_0
+        mean_q_mu_sq_over_sigma_sq = alpha_0/q_sigma_sq*jnp.mean(jnp.sum(z_target**2, axis=tuple(range(-self.z_ndims, 0))))
+        kl_z0_loss = 0.5 * (mean_q_mu_sq_over_sigma_sq + self.z_dim*(jnp.log(q_sigma_sq) - 1.0))
+
         # y_mu = self.apply(params, mu_z_target, method='decode', training=training, rngs={'dropout': key})
         # direct_recon_Loss = jnp.mean((y - y_mu)**2)
 
-        total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss
+        total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss + kl_z0_loss
         # total_loss = total_loss/snr_weight_mean
         
         return total_loss, {
@@ -309,6 +317,7 @@ class VAE_flow(nn.Module):
             'recon_loss': recon_loss, 
             'reg_loss': reg_loss,
             'vae_loss': vae_loss,
+            'kl_z0_loss': kl_z0_loss,
             'total_loss': total_loss
         }
 

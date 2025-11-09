@@ -114,6 +114,7 @@ class Trainer:
         recon_losses = []
         reg_losses = []
         vae_losses = []
+        kl_z0_losses = []
         
         for i in range(num_batches):
             start_idx = i * batch_size
@@ -141,13 +142,15 @@ class Trainer:
             recon_losses.append(float(metrics.get('recon_loss', 0.0)) * scale)
             reg_losses.append(float(metrics.get('reg_loss', 0.0)) * scale)
             vae_losses.append(float(metrics.get('vae_loss', 0.0)) * scale)
+            kl_z0_losses.append(float(metrics.get('kl_z0_loss', 0.0)) * scale)
         
         return {
             'total_loss': sum(total_losses) / len(total_losses),
             'flow_loss': sum(flow_losses) / len(flow_losses),
             'recon_loss': sum(recon_losses) / len(recon_losses),
             'reg_loss': sum(reg_losses) / len(reg_losses),
-            'vae_loss': sum(vae_losses) / len(vae_losses)
+            'vae_loss': sum(vae_losses) / len(vae_losses),
+            'kl_z0_loss': sum(kl_z0_losses) / len(kl_z0_losses)
         }
     
     def train(
@@ -169,11 +172,13 @@ class Trainer:
             'train_recon_losses': [],
             'train_reg_losses': [],
             'train_vae_losses': [],
+            'train_kl_z0_losses': [],
             'val_losses': [],
             'val_flow_losses': [],
             'val_recon_losses': [],
             'val_reg_losses': [],
             'val_vae_losses': [],
+            'val_kl_z0_losses': [],
             'train_accuracies': [],
             'val_accuracies': []
         }
@@ -187,6 +192,7 @@ class Trainer:
             history['train_recon_losses'].append(metrics['recon_loss'])
             history['train_reg_losses'].append(metrics.get('reg_loss', 0.0))
             history['train_vae_losses'].append(metrics.get('vae_loss', 0.0))
+            history['train_kl_z0_losses'].append(metrics.get('kl_z0_loss', 0.0))
             
             if validation_data is not None:
                 val_metrics = self.evaluate(validation_data[0], validation_data[1], batch_size)
@@ -195,6 +201,7 @@ class Trainer:
                 history['val_recon_losses'].append(val_metrics['recon_loss'])
                 history['val_reg_losses'].append(val_metrics.get('reg_loss', 0.0))
                 history['val_vae_losses'].append(val_metrics.get('vae_loss', 0.0))
+                history['val_kl_z0_losses'].append(val_metrics.get('kl_z0_loss', 0.0))
         
         # Store predictions and data for plotting
         import numpy as np
@@ -232,6 +239,7 @@ class Trainer:
         recon_losses = []
         reg_losses = []
         vae_losses = []
+        kl_z0_losses = []
         
         for i in range(num_batches):
             start_idx = i * batch_size
@@ -257,13 +265,15 @@ class Trainer:
             recon_losses.append(float(metrics.get('recon_loss', 0.0)) * scale)
             reg_losses.append(float(metrics.get('reg_loss', 0.0)) * scale)
             vae_losses.append(float(metrics.get('vae_loss', 0.0)) * scale)
+            kl_z0_losses.append(float(metrics.get('kl_z0_loss', 0.0)) * scale)
         
         return {
             'total_loss': sum(total_losses) / len(total_losses),
             'flow_loss': sum(flow_losses) / len(flow_losses),
             'recon_loss': sum(recon_losses) / len(recon_losses),
             'reg_loss': sum(reg_losses) / len(reg_losses),
-            'vae_loss': sum(vae_losses) / len(vae_losses)
+            'vae_loss': sum(vae_losses) / len(vae_losses),
+            'kl_z0_loss': sum(kl_z0_losses) / len(kl_z0_losses)
         }
     
     def predict(self, x_data: jnp.ndarray, num_steps: int = 20) -> jnp.ndarray:

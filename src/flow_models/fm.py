@@ -212,13 +212,14 @@ class VAE_flow(nn.Module):
         recon_loss_type = str(self.config.main.get("recon_loss_type", "mse"))
         recon_weight = float(self.config.main.get("recon_weight", 0.0))
         reg_weight = float(self.config.main.get("reg_weight", 0.0))
-        vae_weight = float(self.config.main.get("vae_weight", 0.0))
+        vae_weight = float(self.config.main.get("vae_weight", 1.0))
         
         # Split keys for random sampling operations (not dropout)
         key, t_key, z_0_key, z_t_noise_key, z_target_key, vae_noise_key = jr.split(key, 6)
         batch_shape = y.shape[:-self.y_ndims]
 
-        alpha_1 = self.apply(params, jnp.asarray(1.0), method='get_noise_params')[0]
+        alpha_0 = self.apply(params, jnp.asarray(1e-6), method='get_noise_params')[0]
+        alpha_1 = self.apply(params, jnp.asarray(1.0-1e-6), method='get_noise_params')[0]
         # Encode Target (noisy latent)
         mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})
         z_target = mu_z_target + jr.normal(z_target_key, mu_z_target.shape) * jnp.exp(0.5 * logvar_z_target)
@@ -234,6 +235,9 @@ class VAE_flow(nn.Module):
 
         # Get noise schedule parameters (use squeezed t)
         alpha_t, gamma_prime_t = self.apply(params, t, method='get_noise_params')
+        # Squeeze alpha_t and gamma_prime_t for use in SNR weight computation
+        alpha_t_squeezed = jnp.squeeze(alpha_t, axis=tuple(range(-self.z_ndims, 0))) if alpha_t.ndim > len(batch_shape) else alpha_t
+        gamma_prime_t_squeezed = jnp.squeeze(gamma_prime_t, axis=tuple(range(-self.z_ndims, 0))) if gamma_prime_t.ndim > len(batch_shape) else gamma_prime_t
 
         # Compute Flow Field and Target Estimate
         dz_dt = self.apply(params, z_t, x, t, method='dz_dt', training=training, rngs={'dropout': key})    
@@ -245,7 +249,7 @@ class VAE_flow(nn.Module):
         y_vae = self.apply(params, z_target_vae, method='decode', training=training, rngs={'dropout': key})
 
         # Compute Losses
-        snr_weight = self.lazy_flow_snr(alpha_t, gamma_prime_t)
+        snr_weight = self.lazy_flow_snr(alpha_t_squeezed, gamma_prime_t_squeezed)
         # Normalize SNR weights by their mean if normalize_snr_weight is True
         if normalize_snr_weight:
             snr_weight_mean = jnp.mean(snr_weight)
@@ -265,7 +269,7 @@ class VAE_flow(nn.Module):
             recon_loss = 0.0
             vae_loss = 0.0
         
-        recon_snr = self.lazy_target_snr(alpha_t, gamma_prime_t)
+        recon_snr = self.lazy_target_snr(alpha_t_squeezed, gamma_prime_t_squeezed)
         # Normalize recon SNR weights by their mean if normalize_snr_weight is True
         if normalize_snr_weight:
             recon_snr_mean = jnp.mean(recon_snr)
@@ -273,19 +277,27 @@ class VAE_flow(nn.Module):
         recon_loss = jnp.mean(recon_snr * recon_loss)  # Average over batch dimension if needed      
         vae_loss = jnp.mean(vae_loss)
 
-        total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss
+        # KL regularization term: KL(q(z_0|z_target), p(z_0))
+        # alpha_0 is guaranteed to be in (0, 1) by noise schedule clipping
+        q_sigma_sq = 1.0 - alpha_0
+        mean_q_mu_sq_over_sigma_sq = alpha_0/q_sigma_sq*jnp.mean(jnp.sum(z_target**2, axis=tuple(range(-self.z_ndims, 0))))
+        kl_z0_loss = 0.5 * (mean_q_mu_sq_over_sigma_sq + self.z_dim*(jnp.log(q_sigma_sq) - 1.0))
+
+
+        total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss + kl_z0_loss  
         
         return total_loss, {
             'flow_loss': flow_loss,
             'recon_loss': recon_loss, 
             'reg_loss': reg_loss,
             'vae_loss': vae_loss,
+            'kl_z0_loss': kl_z0_loss,
             'total_loss': total_loss
         }
 
 
-    @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))  # self, num_steps, integration_method, output_type, num_samples are static arguments
-    def predict(self, params: dict, x: jnp.ndarray, num_steps: int = 20, integration_method: str = "euler", output_type: str = "end_point", num_samples: int = 1, prng_key: jr.PRNGKey = None) -> jnp.ndarray:
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, num_steps, integration_method, output_type are static arguments
+    def predict(self, params: dict, x: jnp.ndarray, num_steps: int = 20, integration_method: str = "euler", output_type: str = "end_point", prng_key: jr.PRNGKey = None) -> jnp.ndarray:
         """
         Make predictions using ODE solver integration.        
         Requires x is not None... use sample method for unconditional generation.
@@ -293,18 +305,12 @@ class VAE_flow(nn.Module):
         params_no_grad = jax.lax.stop_gradient(params)
         batch_shape = x.shape[:-self.x_ndims]
         
-        # Generate flattened initial latent state z_0
-        if num_samples > 1:
-            if prng_key is not None:
-                z_0 = jr.normal(prng_key, (num_samples,) + batch_shape + (self.z_dim,))
-            else:
-                raise ValueError("prng_key is required when num_samples > 1")
-            z_0 = jr.normal(prng_key, (num_samples,) + batch_shape + (self.z_dim,))
+        if prng_key is not None:
+            # Generative mode: sample from unit normal distribution
+            z_0 = jr.normal(prng_key, batch_shape + (self.z_dim,))
         else:
-            if prng_key is not None:
-                z_0 = jr.normal(prng_key, batch_shape + (self.z_dim,))
-            else:
-                z_0 = jnp.zeros(batch_shape + (self.z_dim,))  # ode expects vectorized z
+            # Regression mode: start from zero
+            z_0 = jnp.zeros(batch_shape + (self.z_dim,))  # ode expects vectorized z
         
         def vector_field(params, z, x, t):
             z = self._unflatten_z(z)  # crn expects unflattened z

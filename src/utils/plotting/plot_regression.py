@@ -383,42 +383,20 @@ def create_loss_trends_plot(history: Dict[str, Any], model_type: str, output_dir
     ax.legend()
     ax.grid(True, alpha=0.3)
     
-    # Residuals vs Targets (if available, otherwise leave empty)
+    # KL z0 Loss
     ax = axes[1, 1]
-    if 'train_pred' in history and 'train_y' in history:
-        train_pred = np.array(history['train_pred'])
-        train_y = np.array(history['train_y'])
-        val_pred = np.array(history.get('val_pred', []))
-        val_y = np.array(history.get('val_y', []))
-        
-        # Flatten
-        train_pred_flat = train_pred.reshape(-1) if train_pred.ndim > 2 else train_pred.flatten()
-        train_y_flat = train_y.reshape(-1) if train_y.ndim > 2 else train_y.flatten()
-        
-        # Sample indices
-        n_sample = min(1000, len(train_y_flat))
-        indices = np.random.choice(len(train_y_flat), n_sample, replace=False)
-        
-        residuals = train_pred_flat - train_y_flat
-        ax.scatter(train_y_flat[indices], residuals[indices], alpha=0.6, s=15, color='blue', label='Train')
-        
-        if len(val_pred) > 0 and len(val_y) > 0:
-            val_pred_flat = val_pred.reshape(-1) if val_pred.ndim > 2 else val_pred.flatten()
-            val_y_flat = val_y.reshape(-1) if val_y.ndim > 2 else val_y.flatten()
-            n_val_sample = min(500, len(val_y_flat))
-            val_indices = np.random.choice(len(val_y_flat), n_val_sample, replace=False)
-            val_residuals = val_pred_flat - val_y_flat
-            ax.scatter(val_y_flat[val_indices], val_residuals[val_indices], alpha=0.6, s=15, color='red', label='Val')
-        
-        ax.axhline(y=0, color='k', linestyle='--', linewidth=2)
-        ax.set_xlabel('True Values')
-        ax.set_ylabel('Residuals (Predicted - True)')
-        ax.set_title('Residuals vs Targets', fontsize=12, fontweight='bold')
+    if history.get('train_kl_z0_losses') and len(history['train_kl_z0_losses']) > 0:
+        ax.plot(epochs, history['train_kl_z0_losses'], label='Train KL z0', color='darkorange', linewidth=2)
+        if history.get('val_kl_z0_losses') and len(history['val_kl_z0_losses']) > 0:
+            ax.plot(epochs, history['val_kl_z0_losses'], label='Val KL z0', color='darkred', linewidth=2, linestyle='--')
+        ax.set_title('KL z0 Loss', fontsize=12, fontweight='bold')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Loss')
         ax.legend()
         ax.grid(True, alpha=0.3)
     else:
         ax.axis('off')
-        ax.text(0.5, 0.5, 'Residuals\n(Not Available)', ha='center', va='center', fontsize=12, alpha=0.5)
+        ax.text(0.5, 0.5, 'KL z0 Loss\n(Not Available)', ha='center', va='center', fontsize=12, alpha=0.5)
     
     # VAE Loss
     ax = axes[1, 2]
