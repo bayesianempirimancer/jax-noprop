@@ -6,11 +6,18 @@ optax>=0.1.0
 numpy>=1.21.0
 scipy>=1.9.0
 
+# Configuration
+pyyaml>=6.0
+omegaconf>=2.3.0
+
+# Data loading
+jax-dataloader>=0.1.0
+
 # Visualization and utilities
 matplotlib>=3.5.0
 tqdm>=4.64.0
 
-# Data loading
+# Data loading (optional, for specific datasets)
 datasets>=2.0.0
 torchvision>=0.15.0
 

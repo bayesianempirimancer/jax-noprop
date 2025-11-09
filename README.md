@@ -45,7 +45,14 @@ cd jax-noprop
 pip install -e .
 ```
 
-Make sure you have JAX installed (with CUDA support for GPU acceleration).
+**Requirements**:
+- Python 3.8+
+- JAX 0.4.0+ (with CUDA support for GPU acceleration)
+- Flax 0.7.0+
+- PyYAML 6.0+ (for YAML config file support)
+- See `requirements.txt` for full dependency list
+
+**Note**: For GPU support, install JAX with CUDA following the [official JAX installation guide](https://github.com/google/jax#installation).
 
 ## Quick Start
 
@@ -94,10 +101,14 @@ After training, results are saved to `artifacts/{model_type}_{task}/{YYYYMMDD_HH
 - **Unconditional Generation**: `artifacts/{model_type}_uncond_gen/{timestamp}/`
 
 Each directory contains:
-- `training_results.pkl` - Training history
-- `model_params.pkl` - Trained model parameters
-- `config.yaml` - Configuration used for training
-- Various plots (generation visualizations, loss trends, trajectories, etc.)
+- `history.pkl` or `training_results.pkl` - Training history with all loss components
+- `params.pkl` or `model_params.pkl` - Trained model parameters
+- `config.yaml` - Configuration used for training (human-readable, hierarchical)
+- `loss_trends.png` - Loss trends plot showing flow_loss, recon_loss, reg_loss, vae_loss over epochs
+- `data_visualization.png` - Data visualization plots
+- `trajectories.png` - Sample trajectory visualizations
+- `trajectory_diagnostics.png` - Trajectory diagnostic plots
+- Generation-specific plots (conditional_generation.png, unconditional_generation.png, latent_trajectories.png)
 
 ## Usage Examples
 
@@ -222,33 +233,38 @@ trainer = GenerationTrainer(
 )
 
 # Initialize and train
-trainer.initialize(x_sample, y_sample, z_sample, t_sample)
+trainer.initialize(x_sample, y_sample)  # x_sample can be None for unconditional generation
 history = trainer.train(
     x_data=x_train,  # None for unconditional generation
     y_data=y_train,
     num_epochs=100,
     batch_size=256,
-    validation_data=(x_val, y_val)
+    validation_data=(x_val, y_val)  # Optional validation data
 )
 ```
 
 ### Generating Samples
 
 ```python
-# Conditional generation
+# Conditional generation (supports batched inputs)
 x_gen = trainer.conditional_generate(
-    cond_y=conditions,  # conditional inputs
+    cond_y=conditions,  # conditional inputs [batch_size, input_dim] or [input_dim]
     num_steps=20,
-    prng_key=key
+    prng_key=key  # Optional: if provided, samples z_0 from normal; otherwise z_0=0
 )
 
-# Unconditional generation
+# Unconditional generation (supports batch processing)
 x_gen = trainer.unconditional_generate(
-    batch_shape=(100,),  # number of samples
+    batch_shape=(100,),  # number of samples - can be any batch shape tuple
     num_steps=20,
-    prng_key=key
+    prng_key=key  # Required: for sampling z_0 from normal distribution
 )
 ```
+
+**Batch Processing**: Both `predict()` and `sample()` methods support batch processing:
+- `predict()` automatically handles batched conditional inputs
+- `sample()` accepts `batch_shape` tuple (e.g., `(100,)` for 100 samples, `(10, 5)` for 10x5 grid)
+- All samples in a batch are generated efficiently in parallel
 
 ## Command-Line Arguments
 
@@ -288,10 +304,10 @@ x_gen = trainer.unconditional_generate(
 ### Training Arguments
 
 - `--dropout_epochs`: Number of epochs to use dropout (default: all epochs)
-- `--recon_weight`: Reconstruction loss weight
-- `--reg_weight`: Regularization loss weight
-- `--vae_weight`: VAE loss weight (for some models)
-- `--use_snr_weight`: Apply SNR weighting
+- `--recon_weight`: Reconstruction loss weight (default: 0.0)
+- `--reg_weight`: Regularization loss weight (default: 0.0)
+- `--vae_weight`: VAE encoder-decoder reconstruction loss weight (default: 1.0 for generation, 0.0 for regression)
+- `--use_snr_weight`: Apply SNR weighting (default: True for diffusion/CT, False for flow matching)
 
 ### Generation Arguments
 
@@ -334,6 +350,26 @@ jax-noprop/
 └── README.md
 ```
 
+## Recent Features
+
+### VAE Loss Support
+All three models (Flow Matching, Diffusion, CT) now support VAE encoder-decoder reconstruction loss:
+- **VAE Loss**: Measures reconstruction quality by encoding targets to latent space and decoding back
+- **Configurable Weight**: Control via `vae_weight` parameter (default: 1.0 for generation, 0.0 for regression)
+- **Loss Tracking**: VAE loss is tracked separately in training history and loss trends plots
+
+### Batch Processing
+Efficient batch processing for sample generation:
+- **`predict()`**: Handles batched conditional inputs automatically
+- **`sample()`**: Accepts flexible `batch_shape` tuples for parallel generation
+- **Performance**: All samples in a batch are generated in parallel, significantly faster than sequential generation
+
+### Enhanced Loss Tracking
+Comprehensive loss component tracking:
+- Flow loss, reconstruction loss, regularization loss, VAE loss tracked separately
+- Loss trends plots show all components over training epochs
+- Support for sequence metrics (MSE, percent variance explained) in sequence training
+
 ## Technical Details
 
 ### Noise Schedules
@@ -348,23 +384,48 @@ Schedules are parameterized to avoid singularities at boundaries.
 
 ### Training Objectives
 
+All three models support multiple loss components that can be weighted independently:
+
 **Flow Matching**:
 ```
-Loss = E[||dz/dt(z_t, x, t) - (target - z_0)||²]
+Total Loss = Flow Loss + recon_weight * Recon Loss + reg_weight * Reg Loss + vae_weight * VAE Loss + KL(z_0) Loss
+
+Flow Loss = E[||dz/dt(z_t, x, t) - (target - z_0)||²]
+Recon Loss = E[||y_pred - y||²]  (optional, weighted by recon_weight)
+Reg Loss = E[||dz/dt||²]  (optional, weighted by reg_weight)
+VAE Loss = E[||y - decode(encode(y))||²]  (optional, weighted by vae_weight)
+KL(z_0) Loss = KL divergence for initial latent state (for some models)
 ```
-Direct flow field matching.
+Direct flow field matching with optional reconstruction, regularization, and VAE losses.
 
 **Diffusion**:
 ```
-Loss = E[SNR'(t) * ||noise_prediction - actual_noise||²] / E[SNR'(t)]
+Total Loss = Flow Loss + recon_weight * Recon Loss + reg_weight * Reg Loss + vae_weight * VAE Loss + KL(z_0) Loss
+
+Flow Loss = E[SNR'(t) * ||noise_prediction - actual_noise||²]
+Recon Loss = E[SNR'(t) * ||y_pred - y||²]  (optional, weighted by recon_weight)
+Reg Loss = E[SNR'(t) * ||dz/dt||²]  (optional, weighted by reg_weight)
+VAE Loss = E[||y - decode(encode(y))||²]  (optional, weighted by vae_weight)
+KL(z_0) Loss = KL divergence for initial latent state
 ```
-SNR-weighted noise prediction.
+SNR-weighted noise prediction with optional additional losses.
 
 **Continuous-Time**:
 ```
-Loss = E[SNR'(t) * ||target_prediction - target||²] / E[SNR'(t)]
+Total Loss = Flow Loss + recon_weight * Recon Loss + reg_weight * Reg Loss + vae_weight * VAE Loss + KL(z_0) Loss
+
+Flow Loss = E[SNR'(t) * ||target_prediction - target||²]
+Recon Loss = E[SNR'(t) * ||y_pred - y||²]  (optional, weighted by recon_weight)
+Reg Loss = E[SNR'(t) * ||dz/dt||²]  (optional, weighted by reg_weight)
+VAE Loss = E[||y - decode(encode(y))||²]  (optional, weighted by vae_weight)
+KL(z_0) Loss = KL divergence for initial latent state
 ```
-SNR-weighted target prediction.
+SNR-weighted target prediction with optional additional losses.
+
+**Loss Weight Configuration**:
+- `recon_weight`: Weight for reconstruction loss (default: 0.0)
+- `reg_weight`: Weight for regularization loss (default: 0.0)
+- `vae_weight`: Weight for VAE encoder-decoder reconstruction loss (default: 1.0 for generation tasks, 0.0 for regression)
 
 ### Configuration System
 

@@ -11,6 +11,7 @@ import jax.random as jr
 import optax
 from typing import Dict, Any, Tuple, Optional
 from functools import partial
+import jax_dataloader as jdl
 from src.flow_models.fm import VAE_flow as FlowMatchingModel
 from src.flow_models.df import VAE_flow as DiffusionModel
 from src.flow_models.ct import VAE_flow as CTModel
@@ -96,22 +97,30 @@ class GenerationTrainer:
         batch_size: int = 256,
         use_dropout: bool = True
     ) -> Dict[str, float]:
-        """Train for one epoch using regular for loop."""
+        """Train for one epoch using jax-dataloader."""
         if self.params is None or self.opt_state is None:
             raise ValueError("Model not initialized. Call initialize() first.")
         
         y_data = jnp.asarray(y_data)
         x_data = jnp.asarray(x_data) if x_data is not None else None
         
-        # Shuffle and batch
-        num_samples = y_data.shape[0]
-        self.rng, shuffle_rng = jr.split(self.rng)
-        perm = jr.permutation(shuffle_rng, num_samples)
-        y_shuffled = y_data[perm]
-        x_shuffled = x_data[perm] if x_data is not None else None
+        # Create dataset and dataloader
+        # For unconditional generation, x_data is None, so we only use y_data
+        if x_data is not None:
+            dataset = jdl.ArrayDataset(x_data, y_data)
+        else:
+            # For unconditional, create dataset with just y_data (x will be None in batches)
+            dataset = jdl.ArrayDataset(y_data)
         
-        # Regular for loop over batches
-        num_batches = (num_samples + batch_size - 1) // batch_size
+        self.rng, shuffle_rng = jr.split(self.rng)
+        dataloader = jdl.DataLoader(
+            dataset,
+            backend='jax',
+            batch_size=batch_size,
+            shuffle=True,
+            drop_last=False,
+            rng_key=shuffle_rng
+        )
         
         total_losses = []
         flow_losses = []
@@ -120,18 +129,14 @@ class GenerationTrainer:
         vae_losses = []
         kl_z0_losses = []
         
-        for i in range(num_batches):
-            start_idx = i * batch_size
-            end_idx = min(start_idx + batch_size, num_samples)
-            y_batch = y_shuffled[start_idx:end_idx]
-            x_batch = x_shuffled[start_idx:end_idx] if x_shuffled is not None else None
-            
-            # Pad if needed
-            if end_idx - start_idx < batch_size:
-                pad_size = batch_size - (end_idx - start_idx)
-                y_batch = jnp.concatenate([y_batch, jnp.zeros((pad_size, *y_batch.shape[1:]))])
-                if x_batch is not None:
-                    x_batch = jnp.concatenate([x_batch, jnp.zeros((pad_size, *x_batch.shape[1:]))])
+        for batch in dataloader:
+            if x_data is not None:
+                # Conditional: batch is (x_batch, y_batch) tuple
+                x_batch, y_batch = batch
+            else:
+                # Unconditional: batch is just y_data (single array)
+                y_batch = batch[0] if isinstance(batch, (tuple, list)) and len(batch) == 1 else batch
+                x_batch = None
             
             self.rng, step_rng = jr.split(self.rng)
             x_input = None if (self.unconditional or x_batch is None) else x_batch
@@ -139,24 +144,21 @@ class GenerationTrainer:
                 self.params, x_input, y_batch, self.opt_state, self.optimizer, step_rng, training=use_dropout
             )
             
-            # Scale loss by actual batch size
-            actual_batch_size = end_idx - start_idx
-            scale = batch_size / actual_batch_size if actual_batch_size < batch_size else 1.0
-            
-            total_losses.append(float(loss) * scale)
-            flow_losses.append(float(metrics.get('flow_loss', 0.0)) * scale)
-            recon_losses.append(float(metrics.get('recon_loss', 0.0)) * scale)
-            reg_losses.append(float(metrics.get('reg_loss', 0.0)) * scale)
-            vae_losses.append(float(metrics.get('vae_loss', 0.0)) * scale)
-            kl_z0_losses.append(float(metrics.get('kl_z0_loss', 0.0)) * scale)
+            total_losses.append(float(loss))
+            flow_losses.append(float(metrics.get('flow_loss', 0.0)))
+            recon_losses.append(float(metrics.get('recon_loss', 0.0)))
+            reg_losses.append(float(metrics.get('reg_loss', 0.0)))
+            vae_losses.append(float(metrics.get('vae_loss', 0.0)))
+            kl_z0_losses.append(float(metrics.get('kl_z0_loss', 0.0)))
         
+        num_batches = len(total_losses)
         return {
-            'total_loss': sum(total_losses) / len(total_losses),
-            'flow_loss': sum(flow_losses) / len(flow_losses),
-            'recon_loss': sum(recon_losses) / len(recon_losses),
-            'reg_loss': sum(reg_losses) / len(reg_losses),
-            'vae_loss': sum(vae_losses) / len(vae_losses),
-            'kl_z0_loss': sum(kl_z0_losses) / len(kl_z0_losses)
+            'total_loss': sum(total_losses) / num_batches if num_batches > 0 else 0.0,
+            'flow_loss': sum(flow_losses) / num_batches if num_batches > 0 else 0.0,
+            'recon_loss': sum(recon_losses) / num_batches if num_batches > 0 else 0.0,
+            'reg_loss': sum(reg_losses) / num_batches if num_batches > 0 else 0.0,
+            'vae_loss': sum(vae_losses) / num_batches if num_batches > 0 else 0.0,
+            'kl_z0_loss': sum(kl_z0_losses) / num_batches if num_batches > 0 else 0.0
         }
     
     def train(
@@ -231,15 +233,26 @@ class GenerationTrainer:
         y_data: jnp.ndarray,
         batch_size: int = 256
     ) -> Dict[str, float]:
-        """Evaluate the model."""
+        """Evaluate the model using jax-dataloader."""
         if self.params is None:
             raise ValueError("Model not initialized.")
         
         y_data = jnp.asarray(y_data)
         x_data = jnp.asarray(x_data) if x_data is not None else None
         
-        num_samples = y_data.shape[0]
-        num_batches = (num_samples + batch_size - 1) // batch_size
+        # Create dataset and dataloader (no shuffling for evaluation)
+        if x_data is not None:
+            dataset = jdl.ArrayDataset(x_data, y_data)
+        else:
+            dataset = jdl.ArrayDataset(y_data)
+        
+        dataloader = jdl.DataLoader(
+            dataset,
+            backend='jax',
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=False
+        )
         
         total_losses = []
         flow_losses = []
@@ -248,41 +261,34 @@ class GenerationTrainer:
         vae_losses = []
         kl_z0_losses = []
         
-        for i in range(num_batches):
-            start_idx = i * batch_size
-            end_idx = min(start_idx + batch_size, num_samples)
-            y_batch = y_data[start_idx:end_idx]
-            x_batch = x_data[start_idx:end_idx] if x_data is not None else None
-            
-            # Pad if needed
-            if end_idx - start_idx < batch_size:
-                pad_size = batch_size - (end_idx - start_idx)
-                y_batch = jnp.concatenate([y_batch, jnp.zeros((pad_size, *y_batch.shape[1:]))])
-                if x_batch is not None:
-                    x_batch = jnp.concatenate([x_batch, jnp.zeros((pad_size, *x_batch.shape[1:]))])
+        for batch in dataloader:
+            if x_data is not None:
+                # Conditional: batch is (x_batch, y_batch) tuple
+                x_batch, y_batch = batch
+            else:
+                # Unconditional: batch is just y_data (single array)
+                y_batch = batch[0] if isinstance(batch, (tuple, list)) and len(batch) == 1 else batch
+                x_batch = None
             
             self.rng, eval_rng = jr.split(self.rng)
             x_input = None if (self.unconditional or x_batch is None) else x_batch
             loss, metrics = self.model.loss(self.params, x_input, y_batch, eval_rng, training=False)
             
-            # Scale loss by actual batch size
-            actual_batch_size = end_idx - start_idx
-            scale = batch_size / actual_batch_size if actual_batch_size < batch_size else 1.0
-            
-            total_losses.append(float(loss) * scale)
-            flow_losses.append(float(metrics.get('flow_loss', 0.0)) * scale)
-            recon_losses.append(float(metrics.get('recon_loss', 0.0)) * scale)
-            reg_losses.append(float(metrics.get('reg_loss', 0.0)) * scale)
-            vae_losses.append(float(metrics.get('vae_loss', 0.0)) * scale)
-            kl_z0_losses.append(float(metrics.get('kl_z0_loss', 0.0)) * scale)
+            total_losses.append(float(loss))
+            flow_losses.append(float(metrics.get('flow_loss', 0.0)))
+            recon_losses.append(float(metrics.get('recon_loss', 0.0)))
+            reg_losses.append(float(metrics.get('reg_loss', 0.0)))
+            vae_losses.append(float(metrics.get('vae_loss', 0.0)))
+            kl_z0_losses.append(float(metrics.get('kl_z0_loss', 0.0)))
         
+        num_batches = len(total_losses)
         return {
-            'total_loss': sum(total_losses) / len(total_losses),
-            'flow_loss': sum(flow_losses) / len(flow_losses),
-            'recon_loss': sum(recon_losses) / len(recon_losses),
-            'reg_loss': sum(reg_losses) / len(reg_losses),
-            'vae_loss': sum(vae_losses) / len(vae_losses),
-            'kl_z0_loss': sum(kl_z0_losses) / len(kl_z0_losses)
+            'total_loss': sum(total_losses) / num_batches if num_batches > 0 else 0.0,
+            'flow_loss': sum(flow_losses) / num_batches if num_batches > 0 else 0.0,
+            'recon_loss': sum(recon_losses) / num_batches if num_batches > 0 else 0.0,
+            'reg_loss': sum(reg_losses) / num_batches if num_batches > 0 else 0.0,
+            'vae_loss': sum(vae_losses) / num_batches if num_batches > 0 else 0.0,
+            'kl_z0_loss': sum(kl_z0_losses) / num_batches if num_batches > 0 else 0.0
         }
     
     def conditional_generate(self, cond_y: jnp.ndarray, num_steps: int = 20, prng_key: Optional[jr.PRNGKey] = None) -> jnp.ndarray:
