@@ -302,6 +302,6 @@ class Trainer:
         # Create plots
         try:
             from src.utils.plotting.plot_regression import create_all_regression_plots
-            create_all_regression_plots(history, self.model, self.params, output_dir)
+            create_all_regression_plots(history, self.model, self.params, output_dir, model_type=self.model_type)
         except ImportError:
             pass

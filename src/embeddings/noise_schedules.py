@@ -285,16 +285,16 @@ class LinearNoiseSchedule(NoiseSchedule):
     In our formulation: alpha_bar(t) = alpha_bar_min + t * (alpha_bar_max - alpha_bar_min)
     
     All parameters are learnable:
-    - alpha_bar_min: bounded to [0.001, 0.999]
-    - alpha_bar_max: alpha_bar_min + delta_fraction * (0.999 - alpha_bar_min) to ensure max > min and max <= 0.999
+    - alpha_bar_min: bounded to [0, 1] via sigmoid
+    - alpha_bar_max: bounded to [alpha_bar_min, 1] via sigmoid
     
     Args:
-        alpha_bar_min: Initial value for alpha_bar_min (default: 0.01, which corresponds to logit -4.6)
-        alpha_bar_max: Initial value for alpha_bar_max (default: 0.99, computed from delta_fraction)
+        alpha_bar_min: Initial value for alpha_bar_min (default: 0.05)
+        alpha_bar_max: Initial value for alpha_bar_max (default: 0.95)
     """
     
-    alpha_bar_min: float = 0.01  # Initial alpha_bar_min value
-    alpha_bar_max: float = 0.99  # Initial alpha_bar_max value
+    alpha_bar_min: float = 0.05  # Initial alpha_bar_min value (safe: max gamma_prime ~18.95)
+    alpha_bar_max: float = 0.95  # Initial alpha_bar_max value (safe: max gamma_prime ~18.95)
     
     @staticmethod
     def default_params() -> Dict[str, Any]:
@@ -304,8 +304,8 @@ class LinearNoiseSchedule(NoiseSchedule):
             Dictionary with default initial parameter values
         """
         return {
-            "alpha_bar_min": 0.01,
-            "alpha_bar_max": 0.99,
+            "alpha_bar_min": 0.05,
+            "alpha_bar_max": 0.95,
         }
     
     @nn.compact
@@ -313,36 +313,33 @@ class LinearNoiseSchedule(NoiseSchedule):
         """Get alpha_bar(t) for linear schedule."""
         if params is not None:
             alpha_bar_min_logit = params['alpha_bar_min_logit']
-            delta_fraction_logit = params['delta_fraction_logit']
+            alpha_bar_max_logit = params['alpha_bar_max_logit']
         else:
             # Compute initial logit values from initial alpha_bar values
-            # alpha_bar_min = 0.001 + 0.998 * sigmoid(logit) -> logit = logit((alpha_bar_min - 0.001) / 0.998)
-            alpha_bar_min_logit_val = jax.scipy.special.logit((self.alpha_bar_min - 0.001) / 0.998)
-            # delta_fraction = sigmoid(delta_fraction_logit) where delta_fraction = (alpha_bar_max - alpha_bar_min) / (0.999 - alpha_bar_min)
-            # Ensure initial alpha_bar_max is valid
-            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 0.001, 0.998)
-            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
-            delta_max_init = 0.999 - alpha_bar_min_clamped
-            delta_actual_init = alpha_bar_max_clamped - alpha_bar_min_clamped
-            # Use jnp.where for JIT compatibility
-            delta_fraction_init = jnp.where(delta_max_init > 0, delta_actual_init / delta_max_init, 0.0)
-            delta_fraction_logit_val = jax.scipy.special.logit(jnp.clip(delta_fraction_init, 0.001, 0.999))
+            # alpha_bar_min = sigmoid(logit) -> logit = logit(alpha_bar_min)
+            alpha_bar_min_logit_val = jax.scipy.special.logit(jnp.clip(self.alpha_bar_min, 1e-7, 1.0 - 1e-7))
+            # alpha_bar_max = alpha_bar_min + (1 - alpha_bar_min) * sigmoid(logit)
+            # -> sigmoid(logit) = (alpha_bar_max - alpha_bar_min) / (1 - alpha_bar_min)
+            # -> logit = logit((alpha_bar_max - alpha_bar_min) / (1 - alpha_bar_min))
+            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 1e-7, 1.0 - 1e-7)
+            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 1.0 - 1e-7)
+            max_fraction = (alpha_bar_max_clamped - alpha_bar_min_clamped) / (1.0 - alpha_bar_min_clamped)
+            alpha_bar_max_logit_val = jax.scipy.special.logit(jnp.clip(max_fraction, 1e-7, 1.0 - 1e-7))
             
             alpha_bar_min_logit = self.param('alpha_bar_min_logit', 
                                             nn.initializers.constant(alpha_bar_min_logit_val), ())
-            delta_fraction_logit = self.param('delta_fraction_logit',
-                                              nn.initializers.constant(delta_fraction_logit_val), ())
+            alpha_bar_max_logit = self.param('alpha_bar_max_logit',
+                                             nn.initializers.constant(alpha_bar_max_logit_val), ())
         
-        # Transform to bounded values - optimized: cache intermediate values
-        alpha_bar_min = 0.001 + 0.998 * jax.nn.sigmoid(alpha_bar_min_logit)  # [0.001, 0.999]
-        delta_fraction = jax.nn.sigmoid(delta_fraction_logit)  # [0, 1]
-        delta_max = 0.999 - alpha_bar_min  # Maximum possible delta
-        delta_alpha = delta_fraction * delta_max  # Actual delta in [0, delta_max]
-        alpha_bar_max = alpha_bar_min + delta_alpha  # Guaranteed to be in [alpha_bar_min, 0.999]
+        # Transform to bounded values
+        alpha_bar_min = jax.nn.sigmoid(alpha_bar_min_logit)  # [0, 1]
+        max_fraction = jax.nn.sigmoid(alpha_bar_max_logit)  # [0, 1]
+        alpha_bar_max = alpha_bar_min + (1.0 - alpha_bar_min) * max_fraction  # [alpha_bar_min, 1]
         
-        # Linear interpolation - no clipping needed as bounds are guaranteed
+        # Linear interpolation: alpha_bar(t) = alpha_bar_min + t * (alpha_bar_max - alpha_bar_min)
+        delta_alpha = alpha_bar_max - alpha_bar_min
         alpha_bar_t = alpha_bar_min + t * delta_alpha
-        alpha_bar_t = jnp.clip(alpha_bar_t, 0.001, 0.999)
+        
         # Apply stop_gradient if learnable=False (handled in base class get_alpha_bar)
         return alpha_bar_t
     
@@ -353,39 +350,34 @@ class LinearNoiseSchedule(NoiseSchedule):
         """Get alpha_bar(t) and gamma_prime(t) for linear schedule."""
         if params is not None:
             alpha_bar_min_logit = params['alpha_bar_min_logit']
-            delta_fraction_logit = params['delta_fraction_logit']
+            alpha_bar_max_logit = params['alpha_bar_max_logit']
         else:
             # Compute initial logit values from initial alpha_bar values
-            alpha_bar_min_logit_val = jax.scipy.special.logit((self.alpha_bar_min - 0.001) / 0.998)
-            # delta_fraction = sigmoid(delta_fraction_logit) where delta_fraction = (alpha_bar_max - alpha_bar_min) / (0.999 - alpha_bar_min)
-            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 0.001, 0.998)
-            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
-            delta_max_init = 0.999 - alpha_bar_min_clamped
-            delta_actual_init = alpha_bar_max_clamped - alpha_bar_min_clamped
-            # Use jnp.where for JIT compatibility
-            delta_fraction_init = jnp.where(delta_max_init > 0, delta_actual_init / delta_max_init, 0.0)
-            delta_fraction_logit_val = jax.scipy.special.logit(jnp.clip(delta_fraction_init, 0.001, 0.999))
+            alpha_bar_min_logit_val = jax.scipy.special.logit(jnp.clip(self.alpha_bar_min, 1e-7, 1.0 - 1e-7))
+            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 1e-7, 1.0 - 1e-7)
+            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 1.0 - 1e-7)
+            max_fraction = (alpha_bar_max_clamped - alpha_bar_min_clamped) / (1.0 - alpha_bar_min_clamped)
+            alpha_bar_max_logit_val = jax.scipy.special.logit(jnp.clip(max_fraction, 1e-7, 1.0 - 1e-7))
             
             alpha_bar_min_logit = self.param('alpha_bar_min_logit', 
                                             nn.initializers.constant(alpha_bar_min_logit_val), ())
-            delta_fraction_logit = self.param('delta_fraction_logit',
-                                              nn.initializers.constant(delta_fraction_logit_val), ())
+            alpha_bar_max_logit = self.param('alpha_bar_max_logit',
+                                             nn.initializers.constant(alpha_bar_max_logit_val), ())
         
-        # Transform to bounded values - optimized: cache intermediate values
-        alpha_bar_min = 0.001 + 0.998 * jax.nn.sigmoid(alpha_bar_min_logit)
-        delta_fraction = jax.nn.sigmoid(delta_fraction_logit)
-        delta_max = 0.999 - alpha_bar_min
-        delta_alpha = delta_fraction * delta_max
-        alpha_bar_max = alpha_bar_min + delta_alpha  # Guaranteed to be in [alpha_bar_min, 0.999]
+        # Transform to bounded values
+        alpha_bar_min = jax.nn.sigmoid(alpha_bar_min_logit)  # [0, 1]
+        max_fraction = jax.nn.sigmoid(alpha_bar_max_logit)  # [0, 1]
+        alpha_bar_max = alpha_bar_min + (1.0 - alpha_bar_min) * max_fraction  # [alpha_bar_min, 1]
         
-        # Linear interpolation
+        # Linear interpolation: alpha_bar(t) = alpha_bar_min + t * (alpha_bar_max - alpha_bar_min)
+        delta_alpha = alpha_bar_max - alpha_bar_min
         alpha_bar_t = alpha_bar_min + t * delta_alpha
-        alpha_bar_t = jnp.clip(alpha_bar_t, 0.001, 0.999)
         
         # For linear: alpha_bar_prime is constant (delta_alpha)
-        # Compute gamma_prime efficiently: cache alpha_bar_t * (1 - alpha_bar_t)
+        # Compute gamma_prime: gamma_prime = alpha_bar_prime / (alpha_bar * (1 - alpha_bar))
         alpha_bar_t_one_minus = alpha_bar_t * (1.0 - alpha_bar_t)
-        gamma_prime_t = delta_alpha / alpha_bar_t_one_minus
+        # Add small epsilon to avoid division by zero
+        gamma_prime_t = delta_alpha / (alpha_bar_t_one_minus + 1e-8)
         
         # Apply stop_gradient if learnable=False
         return self._apply_stop_gradient(alpha_bar_t, gamma_prime_t)
@@ -402,10 +394,10 @@ class CosineNoiseSchedule(NoiseSchedule):
     - s: positive offset (default: 0.008, enforced via softplus)
     
     Args:
-        s: Initial value for s (default: 0.008)
+        s: Initial value for s (default: 30.0)
     """
     
-    s: float = 0.008  # Initial s value
+    s: float = 0.008  # Initial s value (safe: max gamma_prime ~3.20 with alpha_bar 0.05-0.95)
     
     @staticmethod
     def default_params() -> Dict[str, Any]:
@@ -415,7 +407,7 @@ class CosineNoiseSchedule(NoiseSchedule):
             Dictionary with default initial parameter values
         """
         return {
-            "s": 0.008,
+            "s": 30.0,
         }
     
     @nn.compact
@@ -552,14 +544,14 @@ class ExponentialNoiseSchedule(NoiseSchedule):
     - alpha_bar_max: alpha_bar_min + delta_fraction * (0.999 - alpha_bar_min) to ensure max > min and max <= 0.999
     
     Args:
-        beta: Initial value for beta (default: 2.0)
-        alpha_bar_min: Initial value for alpha_bar_min (default: 0.01)
-        alpha_bar_max: Initial value for alpha_bar_max (default: 0.99)
+        beta: Initial value for beta (default: 0.5)
+        alpha_bar_min: Initial value for alpha_bar_min (default: 0.05)
+        alpha_bar_max: Initial value for alpha_bar_max (default: 0.95)
     """
     
-    beta: float = 2.0  # Initial beta value
-    alpha_bar_min: float = 0.01  # Initial alpha_bar_min value
-    alpha_bar_max: float = 0.99  # Initial alpha_bar_max value
+    beta: float = 0.5  # Initial beta value (safe: max gamma_prime ~18.46 with alpha_bar 0.05-0.95)
+    alpha_bar_min: float = 0.05  # Initial alpha_bar_min value (safe: max gamma_prime ~18.46)
+    alpha_bar_max: float = 0.95  # Initial alpha_bar_max value (safe: max gamma_prime ~18.46)
     
     @staticmethod
     def default_params() -> Dict[str, Any]:
@@ -569,9 +561,9 @@ class ExponentialNoiseSchedule(NoiseSchedule):
             Dictionary with default initial parameter values
         """
         return {
-            "beta": 2.0,
-            "alpha_bar_min": 0.01,
-            "alpha_bar_max": 0.99,
+            "beta": 0.5,
+            "alpha_bar_min": 0.05,
+            "alpha_bar_max": 0.95,
         }
     
     @nn.compact
@@ -682,15 +674,15 @@ class CauchyNoiseSchedule(NoiseSchedule):
     
     Args:
         loc: Initial value for loc (default: 0.5)
-        scale: Initial value for scale (default: 0.1)
-        alpha_bar_min: Initial value for alpha_bar_min (default: 0.01)
-        alpha_bar_max: Initial value for alpha_bar_max (default: 0.99)
+        scale: Initial value for scale (default: 0.3)
+        alpha_bar_min: Initial value for alpha_bar_min (default: 0.05)
+        alpha_bar_max: Initial value for alpha_bar_max (default: 0.95)
     """
     
     loc: float = 0.5  # Initial loc value
-    scale: float = 0.1  # Initial scale value
-    alpha_bar_min: float = 0.01  # Initial alpha_bar_min value
-    alpha_bar_max: float = 0.99  # Initial alpha_bar_max value
+    scale: float = 0.3  # Initial scale value (safe: max gamma_prime ~1.34 with alpha_bar 0.05-0.95)
+    alpha_bar_min: float = 0.05  # Initial alpha_bar_min value
+    alpha_bar_max: float = 0.95  # Initial alpha_bar_max value
     
     @staticmethod
     def default_params() -> Dict[str, Any]:
@@ -701,9 +693,9 @@ class CauchyNoiseSchedule(NoiseSchedule):
         """
         return {
             "loc": 0.5,
-            "scale": 0.1,
-            "alpha_bar_min": 0.01,
-            "alpha_bar_max": 0.99,
+            "scale": 0.3,
+            "alpha_bar_min": 0.05,
+            "alpha_bar_max": 0.95,
         }
     
     @nn.compact
@@ -828,15 +820,15 @@ class LaplaceNoiseSchedule(NoiseSchedule):
     
     Args:
         loc: Initial value for loc (default: 0.5)
-        scale: Initial value for scale (default: 0.1)
-        alpha_bar_min: Initial value for alpha_bar_min (default: 0.01)
-        alpha_bar_max: Initial value for alpha_bar_max (default: 0.99)
+        scale: Initial value for scale (default: 0.3)
+        alpha_bar_min: Initial value for alpha_bar_min (default: 0.05)
+        alpha_bar_max: Initial value for alpha_bar_max (default: 0.95)
     """
     
     loc: float = 0.5  # Initial loc value
-    scale: float = 0.1  # Initial scale value
-    alpha_bar_min: float = 0.01  # Initial alpha_bar_min value
-    alpha_bar_max: float = 0.99  # Initial alpha_bar_max value
+    scale: float = 0.3  # Initial scale value (safe: max gamma_prime ~2.11 with alpha_bar 0.05-0.95)
+    alpha_bar_min: float = 0.05  # Initial alpha_bar_min value
+    alpha_bar_max: float = 0.95  # Initial alpha_bar_max value
     
     @staticmethod
     def default_params() -> Dict[str, Any]:
@@ -847,9 +839,9 @@ class LaplaceNoiseSchedule(NoiseSchedule):
         """
         return {
             "loc": 0.5,
-            "scale": 0.1,
-            "alpha_bar_min": 0.01,
-            "alpha_bar_max": 0.99,
+            "scale": 0.3,
+            "alpha_bar_min": 0.05,
+            "alpha_bar_max": 0.95,
         }
     
     @nn.compact
@@ -969,12 +961,12 @@ class QuadraticNoiseSchedule(NoiseSchedule):
     - alpha_bar_max: alpha_bar_min + delta_fraction * (0.999 - alpha_bar_min) to ensure max > min and max <= 0.999
     
     Args:
-        alpha_bar_min: Initial value for alpha_bar_min (default: 0.01)
-        alpha_bar_max: Initial value for alpha_bar_max (default: 0.99)
+        alpha_bar_min: Initial value for alpha_bar_min (default: 0.05)
+        alpha_bar_max: Initial value for alpha_bar_max (default: 0.95)
     """
     
-    alpha_bar_min: float = 0.01  # Initial alpha_bar_min value
-    alpha_bar_max: float = 0.99  # Initial alpha_bar_max value
+    alpha_bar_min: float = 0.2  # Initial alpha_bar_min value (safe: max gamma_prime ~7.50)
+    alpha_bar_max: float = 0.8  # Initial alpha_bar_max value (safe: max gamma_prime ~7.50)
     
     @staticmethod
     def default_params() -> Dict[str, Any]:
@@ -984,8 +976,8 @@ class QuadraticNoiseSchedule(NoiseSchedule):
             Dictionary with default initial parameter values
         """
         return {
-            "alpha_bar_min": 0.01,
-            "alpha_bar_max": 0.99,
+            "alpha_bar_min": 0.2,
+            "alpha_bar_max": 0.8,
         }
     
     @nn.compact
@@ -1088,14 +1080,14 @@ class PolynomialNoiseSchedule(NoiseSchedule):
     - alpha_bar_max: alpha_bar_min + delta_fraction * (0.999 - alpha_bar_min) to ensure max > min and max <= 0.999
     
     Args:
-        power: Initial value for polynomial power (default: 2.0)
-        alpha_bar_min: Initial value for alpha_bar_min (default: 0.01)
-        alpha_bar_max: Initial value for alpha_bar_max (default: 0.99)
+        power: Initial value for polynomial power (default: 1.0)
+        alpha_bar_min: Initial value for alpha_bar_min (default: 0.05)
+        alpha_bar_max: Initial value for alpha_bar_max (default: 0.95)
     """
     
-    power: float = 2.0  # Initial power value
-    alpha_bar_min: float = 0.01  # Initial alpha_bar_min value
-    alpha_bar_max: float = 0.99  # Initial alpha_bar_max value
+    power: float = 1.0  # Initial power value (safe: max gamma_prime ~18.95 with alpha_bar 0.05-0.95)
+    alpha_bar_min: float = 0.05  # Initial alpha_bar_min value (safe: max gamma_prime ~18.95)
+    alpha_bar_max: float = 0.95  # Initial alpha_bar_max value (safe: max gamma_prime ~18.95)
     
     @staticmethod
     def default_params() -> Dict[str, Any]:
@@ -1105,9 +1097,9 @@ class PolynomialNoiseSchedule(NoiseSchedule):
             Dictionary with default initial parameter values
         """
         return {
-            "power": 2.0,
-            "alpha_bar_min": 0.01,
-            "alpha_bar_max": 0.99,
+            "power": 1.0,
+            "alpha_bar_min": 0.05,
+            "alpha_bar_max": 0.95,
         }
 
     @nn.compact

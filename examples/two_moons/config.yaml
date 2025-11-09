@@ -10,18 +10,18 @@ main:
   recon_weight: 0.0
   reg_weight: 0.0
   vae_weight: 1.0
-  use_snr_weight: True
+  normalize_snr_weight: True
   integration_method: midpoint
   encode_x: false
 noise_schedule:
-  schedule_type: exponential
+  schedule_type: linear
   learnable: false
   hidden_dims:
   - 64
   - 64
   default_params:
-    alpha_bar_min: 0.01
-    alpha_bar_max: 0.99
+    alpha_bar_min: 0.05
+    alpha_bar_max: 0.95
     s: 0.008
     k: 10.0
     t_mid: 0.5

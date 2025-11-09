@@ -28,7 +28,7 @@ class Config(BaseConfig):
         "recon_weight": 0.0,  # Weight for reconstruction loss in total loss
         "reg_weight": 0.0,  # Weight for regularization loss in total loss
         "vae_weight": 1.0,  # Weight for VAE loss in total loss
-        "use_snr_weight": False,  # Apply signal-to-noise ratio weighting to loss (False for flow_matching, True for diffusion/ct)
+        "normalize_snr_weight": True,  # Normalize SNR weights by their mean (False for flow_matching, True for diffusion/ct)
         "integration_method": "euler",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
                                         # "euler" for flow_matching, "midpoint" for diffusion/ct
         "encode_x": False,  # Whether to encode x before passing to CRN (True for sequences, False for backward compatibility)
@@ -41,8 +41,8 @@ class Config(BaseConfig):
         # Comprehensive default parameters for all schedules (common naming convention)
         "default_params": FrozenDict({
             # Linear, Exponential, Cauchy, Laplace schedules
-            "alpha_bar_min": 0.01,
-            "alpha_bar_max": 0.99,
+            "alpha_bar_min": 0.05,
+            "alpha_bar_max": 0.95,
             # Cosine schedule
             "s": 0.008,
             # Sigmoid, Logistic schedules
@@ -161,7 +161,7 @@ class Config(BaseConfig):
             'recon_weight': args.recon_weight,
             'reg_weight': args.reg_weight,
             'recon_loss_type': args.recon_loss_type,
-            'use_snr_weight': args.use_snr_weight if args.use_snr_weight is not None else main_dict.get('use_snr_weight', None),
+            'normalize_snr_weight': args.normalize_snr_weight if hasattr(args, 'normalize_snr_weight') and args.normalize_snr_weight is not None else main_dict.get('normalize_snr_weight', None),
             'integration_method': getattr(args, 'integration_method', None) if getattr(args, 'integration_method', None) is not None else main_dict.get('integration_method', None),
         }
         # Add vae_weight if it exists in args (for sequences)
@@ -255,7 +255,7 @@ class Config(BaseConfig):
             'recon_weight': args.recon_weight,
             'reg_weight': args.reg_weight,
             'recon_loss_type': args.recon_loss_type,
-            'use_snr_weight': args.use_snr_weight if args.use_snr_weight is not None else main_dict.get('use_snr_weight', (model_type != 'flow_matching')),
+            'normalize_snr_weight': args.normalize_snr_weight if hasattr(args, 'normalize_snr_weight') and args.normalize_snr_weight is not None else main_dict.get('normalize_snr_weight', (model_type != 'flow_matching')),
             'integration_method': getattr(args, 'integration_method', None) if getattr(args, 'integration_method', None) is not None else main_dict.get('integration_method', ('midpoint' if model_type in ('ct', 'diffusion') else 'euler')),
         }
         # Add vae_weight if it exists in args (for sequences)

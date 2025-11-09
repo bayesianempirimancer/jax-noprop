@@ -124,10 +124,10 @@ def main():
                        help='Regularization weight (overrides config)')
     parser.add_argument('--vae_weight', type=float, default=None,
                        help='VAE loss weight (overrides config)')
-    parser.add_argument('--use_snr_weight', action='store_const', const=True, default=None,
-                       help='Apply SNR weighting (overrides config)')
-    parser.add_argument('--no_snr_weight', dest='use_snr_weight', action='store_const', const=False,
-                       help='Disable SNR weighting (overrides config)')
+    parser.add_argument('--normalize_snr_weight', action='store_const', const=True, default=None,
+                       help='Normalize SNR weights by their mean (overrides config)')
+    parser.add_argument('--no_normalize_snr_weight', dest='normalize_snr_weight', action='store_const', const=False,
+                       help='Disable SNR weight normalization (overrides config)')
     
     # Noise schedule arguments (can override config)
     parser.add_argument('--noise_schedule', type=str, default=None,

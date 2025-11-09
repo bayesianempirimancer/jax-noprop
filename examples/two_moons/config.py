@@ -46,7 +46,7 @@ class Config(Config):
         "reg_weight": 0.0,  # Weight for regularization loss (can override with --reg_weight)
         "vae_weight": 1.0,  # Weight for VAE loss (can override with --vae_weight)
         # Flow model settings
-        "use_snr_weight": True,  # Apply signal-to-noise ratio weighting to loss
+        "normalize_snr_weight": True,  # Apply signal-to-noise ratio weighting to loss
                                   # False for flow_matching, True for diffusion/ct
         "integration_method": "midpoint",  # ODE integration method: "euler" or "midpoint"
                                            # "euler" for flow_matching, "midpoint" for diffusion/ct
@@ -55,7 +55,7 @@ class Config(Config):
     
     noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
         # Noise schedule configuration (for diffusion and CT models)
-        "schedule_type": "exponential",  # Schedule type: "linear", "exponential", "cosine", etc.
+        "schedule_type": "linear",  # Schedule type: "linear", "exponential", "cosine", etc.
                                          # (can override with --noise_schedule)
         "learnable": False,  # Whether noise schedule parameters are learnable
                            # (can override with --noise_schedule_learnable)
@@ -63,10 +63,10 @@ class Config(Config):
         
         # Default parameters for different schedule types
         "default_params": FrozenDict({
-            "alpha_bar_min": 0.01,  # Minimum value for alpha_bar (noise level)
-            "alpha_bar_max": 0.99,  # Maximum value for alpha_bar
-            "s": 0.008,  # Scale parameter for exponential schedule
-            "k": 10.0,  # Shape parameter for exponential schedule
+            "alpha_bar_min": 0.05,  # Minimum value for alpha_bar (noise level) - safe: max gamma_prime ~18.95
+            "alpha_bar_max": 0.95,  # Maximum value for alpha_bar - safe: max gamma_prime ~18.95
+            "s": 30.0,  # Scale parameter for cosine schedule - safe: max gamma_prime ~3.20
+            "k": 10.0,  # Shape parameter for sigmoid/logistic schedule - safe: max gamma_prime 10.0
             "t_mid": 0.5,  # Midpoint time for certain schedules
             "beta": 2.0,  # Beta parameter for various schedules
             "loc": 0.5,  # Location parameter for Gaussian-based schedules

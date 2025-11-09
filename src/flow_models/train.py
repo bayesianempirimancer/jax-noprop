@@ -98,7 +98,7 @@ def main():
                        help='Number of epochs to use dropout. If None, defaults to num_epochs')
     parser.add_argument('--batch_size', type=int, default=256,
                        help='Batch size')
-    parser.add_argument('--learning_rate', type=float, default=1e-3,
+    parser.add_argument('--learning_rate', type=float, default=0.01,
                        help='Learning rate')
     parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd', 'adagrad'],
                        help='Optimizer')
@@ -115,10 +115,10 @@ def main():
                        help='Reconstruction loss type (overrides config)')
     parser.add_argument('--reg_weight', type=float, default=None,
                        help='Regularization weight (overrides config)')
-    parser.add_argument('--use_snr_weight', action='store_const', const=True, default=None,
-                       help='Apply SNR weighting (overrides config)')
-    parser.add_argument('--no_snr_weight', dest='use_snr_weight', action='store_const', const=False,
-                       help='Disable SNR weighting (overrides config)')
+    parser.add_argument('--normalize_snr_weight', action='store_const', const=True, default=None,
+                       help='Normalize SNR weights by their mean (overrides config)')
+    parser.add_argument('--no_normalize_snr_weight', dest='normalize_snr_weight', action='store_const', const=False,
+                       help='Disable SNR weight normalization (overrides config)')
     
     # Noise schedule arguments (can override config)
     parser.add_argument('--noise_schedule', type=str, default=None,

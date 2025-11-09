@@ -45,7 +45,7 @@ class VAE_flow(nn.Module):
         self.noise_schedule_learnable = schedule_config.get("learnable", True)
         
         # Store config values as instance variables for use in JIT-compiled functions
-        self.use_snr_weight = bool(self.config.main.get("use_snr_weight", True))
+        self.normalize_snr_weight = bool(self.config.main.get("normalize_snr_weight", False))
         self.recon_loss_type = self.config.main.get("recon_loss_type", "mse")
         self.recon_weight = float(self.config.main.get("recon_weight", 0.0))
         self.reg_weight = float(self.config.main.get("reg_weight", 0.0))
@@ -208,19 +208,20 @@ class VAE_flow(nn.Module):
         """
         # Extract config values at the start (self is static, so this is safe)
         # Convert to concrete Python types to avoid tracing issues
-        use_snr_weight = bool(self.config.main.get("use_snr_weight", True))
+        normalize_snr_weight = bool(self.config.main.get("normalize_snr_weight", False))
         recon_loss_type = str(self.config.main.get("recon_loss_type", "mse"))
         recon_weight = float(self.config.main.get("recon_weight", 0.0))
         reg_weight = float(self.config.main.get("reg_weight", 0.0))
         vae_weight = float(self.config.main.get("vae_weight", 0.0))
         
         # Split keys for random sampling operations (not dropout)
-        key, t_key, z_0_key, z_t_noise_key, z_target_key = jr.split(key, 5)
+        key, t_key, z_0_key, z_t_noise_key, z_target_key, vae_noise_key = jr.split(key, 6)
         batch_shape = y.shape[:-self.y_ndims]
-        
+
+        alpha_1 = self.apply(params, jnp.asarray(1.0), method='get_noise_params')[0]
         # Encode Target (noisy latent)
         mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})
-        z_target = mu_z_target + jnp.exp(0.5 * logvar_z_target) * jr.normal(z_target_key, mu_z_target.shape)
+        z_target = mu_z_target + jr.normal(z_target_key, mu_z_target.shape) * jnp.exp(0.5 * logvar_z_target)
 
         # Sample initial latent state and time
         t = jr.uniform(t_key, batch_shape, minval=0.0, maxval=1.0)
@@ -240,10 +241,15 @@ class VAE_flow(nn.Module):
 
         # Compute Predictions
         y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})
-        y_vae = self.apply(params, z_target, method='decode', training=training, rngs={'dropout': key})
+        z_target_vae = z_target*jnp.sqrt(alpha_1) + jr.normal(vae_noise_key, z_target.shape) * jnp.sqrt(1.0 - alpha_1)
+        y_vae = self.apply(params, z_target_vae, method='decode', training=training, rngs={'dropout': key})
 
         # Compute Losses
-        snr_weight = self.lazy_flow_snr(alpha_t, gamma_prime_t)        
+        snr_weight = self.lazy_flow_snr(alpha_t, gamma_prime_t)
+        # Normalize SNR weights by their mean if normalize_snr_weight is True
+        if normalize_snr_weight:
+            snr_weight_mean = jnp.mean(snr_weight)
+            snr_weight = snr_weight / (snr_weight_mean + 1e-8)
 
         squared_error = jnp.mean((dz_dt - diff_z)**2, axis=tuple(range(-self.z_ndims, 0)))
         flow_loss = jnp.mean(snr_weight * squared_error)
@@ -259,7 +265,12 @@ class VAE_flow(nn.Module):
             recon_loss = 0.0
             vae_loss = 0.0
         
-        recon_loss = jnp.mean(self.lazy_target_snr(alpha_t, gamma_prime_t) * recon_loss)
+        recon_snr = self.lazy_target_snr(alpha_t, gamma_prime_t)
+        # Normalize recon SNR weights by their mean if normalize_snr_weight is True
+        if normalize_snr_weight:
+            recon_snr_mean = jnp.mean(recon_snr)
+            recon_snr = recon_snr / (recon_snr_mean + 1e-8)
+        recon_loss = jnp.mean(recon_snr * recon_loss)  # Average over batch dimension if needed      
         vae_loss = jnp.mean(vae_loss)
 
         total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss

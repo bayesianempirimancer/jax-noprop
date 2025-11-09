@@ -321,14 +321,154 @@ def create_trajectory_diagnostics_plot(results: Dict[str, Any], model, params, o
         traceback.print_exc()
 
 
-def create_all_regression_plots(results: Dict[str, Any], model, params, output_dir: str):
-    """Create all diagnostic plots for regression tasks."""
+def create_loss_trends_plot(history: Dict[str, Any], model_type: str, output_dir: str):
+    """
+    Plot loss terms over training epochs to diagnose training issues.
+    Always uses 2x3 layout with 6 panels.
+    
+    Args:
+        history: Training history dictionary containing loss values
+        model_type: Type of model ('flow_matching', 'diffusion', 'ct')
+        output_dir: Directory to save the plot
+    """
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # Always use 2x3 layout
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig.suptitle(f'Loss Trends - {model_type.title()} Model', fontsize=16, fontweight='bold')
+    
+    epochs = range(len(history['train_losses']))
+    
+    # Total Loss
+    ax = axes[0, 0]
+    ax.plot(epochs, history['train_losses'], label='Train Total', color='blue', linewidth=2)
+    if history.get('val_losses') and len(history['val_losses']) > 0:
+        ax.plot(epochs, history['val_losses'], label='Val Total', color='red', linewidth=2, linestyle='--')
+    ax.set_title('Total Loss', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Loss')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Flow Loss
+    ax = axes[0, 1]
+    ax.plot(epochs, history['train_flow_losses'], label='Train Flow', color='green', linewidth=2)
+    if history.get('val_flow_losses') and len(history['val_flow_losses']) > 0:
+        ax.plot(epochs, history['val_flow_losses'], label='Val Flow', color='orange', linewidth=2, linestyle='--')
+    ax.set_title('Flow Loss', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Loss')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Reconstruction Loss
+    ax = axes[0, 2]
+    ax.plot(epochs, history['train_recon_losses'], label='Train Recon', color='purple', linewidth=2)
+    if history.get('val_recon_losses') and len(history['val_recon_losses']) > 0:
+        ax.plot(epochs, history['val_recon_losses'], label='Val Recon', color='brown', linewidth=2, linestyle='--')
+    ax.set_title('Reconstruction Loss', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Loss')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Regularization Loss
+    ax = axes[1, 0]
+    ax.plot(epochs, history['train_reg_losses'], label='Train Reg', color='cyan', linewidth=2)
+    if history.get('val_reg_losses') and len(history['val_reg_losses']) > 0:
+        ax.plot(epochs, history['val_reg_losses'], label='Val Reg', color='magenta', linewidth=2, linestyle='--')
+    ax.set_title('Regularization Loss', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Loss')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Residuals vs Targets (if available, otherwise leave empty)
+    ax = axes[1, 1]
+    if 'train_pred' in history and 'train_y' in history:
+        train_pred = np.array(history['train_pred'])
+        train_y = np.array(history['train_y'])
+        val_pred = np.array(history.get('val_pred', []))
+        val_y = np.array(history.get('val_y', []))
+        
+        # Flatten
+        train_pred_flat = train_pred.reshape(-1) if train_pred.ndim > 2 else train_pred.flatten()
+        train_y_flat = train_y.reshape(-1) if train_y.ndim > 2 else train_y.flatten()
+        
+        # Sample indices
+        n_sample = min(1000, len(train_y_flat))
+        indices = np.random.choice(len(train_y_flat), n_sample, replace=False)
+        
+        residuals = train_pred_flat - train_y_flat
+        ax.scatter(train_y_flat[indices], residuals[indices], alpha=0.6, s=15, color='blue', label='Train')
+        
+        if len(val_pred) > 0 and len(val_y) > 0:
+            val_pred_flat = val_pred.reshape(-1) if val_pred.ndim > 2 else val_pred.flatten()
+            val_y_flat = val_y.reshape(-1) if val_y.ndim > 2 else val_y.flatten()
+            n_val_sample = min(500, len(val_y_flat))
+            val_indices = np.random.choice(len(val_y_flat), n_val_sample, replace=False)
+            val_residuals = val_pred_flat - val_y_flat
+            ax.scatter(val_y_flat[val_indices], val_residuals[val_indices], alpha=0.6, s=15, color='red', label='Val')
+        
+        ax.axhline(y=0, color='k', linestyle='--', linewidth=2)
+        ax.set_xlabel('True Values')
+        ax.set_ylabel('Residuals (Predicted - True)')
+        ax.set_title('Residuals vs Targets', fontsize=12, fontweight='bold')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    else:
+        ax.axis('off')
+        ax.text(0.5, 0.5, 'Residuals\n(Not Available)', ha='center', va='center', fontsize=12, alpha=0.5)
+    
+    # VAE Loss
+    ax = axes[1, 2]
+    if history.get('train_vae_losses') and len(history['train_vae_losses']) > 0:
+        ax.plot(epochs, history['train_vae_losses'], label='Train VAE', color='teal', linewidth=2)
+        if history.get('val_vae_losses') and len(history['val_vae_losses']) > 0:
+            ax.plot(epochs, history['val_vae_losses'], label='Val VAE', color='coral', linewidth=2, linestyle='--')
+        ax.set_title('VAE Loss', fontsize=12, fontweight='bold')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Loss')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    else:
+        ax.axis('off')
+        ax.text(0.5, 0.5, 'VAE Loss\n(Not Available)', ha='center', va='center', fontsize=12, alpha=0.5)
+    
+    fig.tight_layout()
+    fig.savefig(os.path.join(output_dir, 'loss_trends.png'), dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+def create_all_regression_plots(results: Dict[str, Any], model, params, output_dir: str, model_type: Optional[str] = None):
+    """Create all diagnostic plots for regression tasks.
+    
+    Args:
+        results: Training history dictionary
+        model: Model instance
+        params: Model parameters
+        output_dir: Directory to save plots
+        model_type: Optional model type string ('flow_matching', 'diffusion', 'ct'). 
+                   If not provided, will try to infer from model.
+    """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
     try:
-        # 1. Training Progress Plot
+        # 1. Loss Trends Plot (2x3 layout with VAE loss)
         if 'train_losses' in results and len(results['train_losses']) > 0:
-            create_training_progress_plot(results, output_dir)
+            # Get model_type from parameter, model attribute, or infer from class name
+            if model_type is None:
+                model_type = getattr(model, 'model_type', None)
+            if model_type is None:
+                # Try to infer from model class name
+                model_class_name = model.__class__.__name__.lower()
+                if 'diffusion' in model_class_name:
+                    model_type = 'diffusion'
+                elif 'ct' in model_class_name or 'continuous' in model_class_name:
+                    model_type = 'ct'
+                else:
+                    model_type = 'flow_matching'
+            create_loss_trends_plot(results, model_type, output_dir)
         
         # 2. Data visualization
         if 'train_x' in results and 'train_y' in results:

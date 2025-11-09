@@ -44,7 +44,7 @@ class VAE_flow(nn.Module):
         self.noise_schedule_learnable = schedule_config.get("learnable", True)
         
         # Store config values as instance variables for use in JIT-compiled functions
-        self.use_snr_weight = bool(self.config.main.get("use_snr_weight", True))
+        self.normalize_snr_weight = bool(self.config.main.get("normalize_snr_weight", False))
         self.recon_loss_type = self.config.main.get("recon_loss_type", "mse")
         self.recon_weight = float(self.config.main.get("recon_weight", 0.0))
         self.reg_weight = float(self.config.main.get("reg_weight", 0.0))
@@ -178,7 +178,11 @@ class VAE_flow(nn.Module):
         return self.lazy_target_snr(alpha_t, gamma_prime_t)
     
     def lazy_noise_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t
-    def lazy_target_snr(self, alpha_t, gamma_prime_t): return gamma_prime_t * alpha_t / (1.0 - alpha_t)
+    def lazy_target_snr(self, alpha_t, gamma_prime_t): 
+        # Add numerical stability: clip (1.0 - alpha_t) to prevent division by zero
+        one_minus_alpha_t = jnp.maximum(1.0 - alpha_t, 1e-4)
+        return gamma_prime_t * alpha_t / one_minus_alpha_t
+
     def lazy_error_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t / (1.0 - alpha_t)
     def lazy_score_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t * (1.0 - alpha_t)
     def lazy_flow_snr(self, alpha_t, gamma_prime_t):   return  1.0 / ((1.0 - alpha_t) * alpha_t * gamma_prime_t)
@@ -218,25 +222,25 @@ class VAE_flow(nn.Module):
         """
         # Extract config values at the start (self is static, so this is safe)
         # Convert to concrete Python types to avoid tracing issues
-        use_snr_weight = bool(self.config.main.get("use_snr_weight", True))
+        normalize_snr_weight = bool(self.config.main.get("normalize_snr_weight", False))
         recon_loss_type = str(self.config.main.get("recon_loss_type", "mse"))
         recon_weight = float(self.config.main.get("recon_weight", 0.0))
         reg_weight = float(self.config.main.get("reg_weight", 0.0))
         vae_weight = float(self.config.main.get("vae_weight", 0.0))
         
         # Split keys for random sampling operations (not dropout)
-        key, t_key, noise_key, z_target_key = jr.split(key, 4)
+        key, t_key, noise_key, z_target_key, vae_noise_key = jr.split(key, 5)
         batch_shape = y.shape[:-self.y_ndims]
+        alpha_1 = self.apply(params, jnp.array(1.0), method='get_noise_params')[0]
 
         # Encode Target (noisy latent)
         mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})
-        z_target = mu_z_target + jnp.exp(0.5 * logvar_z_target) * jr.normal(z_target_key, mu_z_target.shape)
+        z_target = mu_z_target + jr.normal(z_target_key, mu_z_target.shape) * jnp.exp(0.5 * logvar_z_target)
         
         # Sample time and get noise schedule parameters
         t = jr.uniform(t_key, batch_shape, minval=0.0, maxval=1.0)
-        
+        t_expanded = jnp.expand_dims(t, axis=tuple(range(-self.z_ndims, 0)))       
         # Get noise schedule parameters (expand t to match expected shape)
-        t_expanded = jnp.expand_dims(t, axis=tuple(range(-self.z_ndims, 0)))
         alpha_t, gamma_prime_t = self.apply(params, t_expanded, method='get_noise_params')
         
         sqrt_alpha_t = jnp.sqrt(alpha_t)
@@ -251,12 +255,22 @@ class VAE_flow(nn.Module):
 
         # Compute Predictions
         y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})
-        y_vae = self.apply(params, z_target, method='decode', training=training, rngs={'dropout': key})
+        z_target_vae = z_target*jnp.sqrt(alpha_1) + jr.normal(vae_noise_key, z_target.shape) * jnp.sqrt(1.0 - alpha_1)
+        y_vae = self.apply(params, z_target_vae, method='decode', training=training, rngs={'dropout': key})
         
         # Squeeze alpha_t and gamma_prime_t for use in SNR weight computation
         alpha_t_squeezed = jnp.squeeze(alpha_t, axis=tuple(range(-self.z_ndims, 0)))
         gamma_prime_t_squeezed = jnp.squeeze(gamma_prime_t, axis=tuple(range(-self.z_ndims, 0)))
+        
+        # Compute SNR weight (always computed, used for weighting)
         snr_weight = self.lazy_target_snr(alpha_t_squeezed, gamma_prime_t_squeezed)
+        # Clip SNR weight to prevent explosion when alpha_t is close to 1
+        # Maximum reasonable SNR weight: clip to 100 to prevent numerical issues
+        snr_weight = jnp.clip(snr_weight, 0.0, 100.0)
+        # Normalize SNR weights by their mean if normalize_snr_weight is True
+        if normalize_snr_weight:
+            snr_weight_mean = jnp.mean(snr_weight)
+            snr_weight = snr_weight / (snr_weight_mean + 1e-8)
 
         # Compute Losses
         squared_error = jnp.mean((z_target_est - z_target) ** 2, axis=tuple(range(-self.z_ndims, 0)))
@@ -273,7 +287,7 @@ class VAE_flow(nn.Module):
             recon_loss = 0.0
             vae_loss = 0.0
         
-        recon_loss = jnp.mean(self.lazy_target_snr(alpha_t_squeezed, gamma_prime_t_squeezed) * recon_loss)
+        recon_loss = jnp.mean(snr_weight * recon_loss) 
         vae_loss = jnp.mean(vae_loss)
 
         total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss
