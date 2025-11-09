@@ -109,6 +109,10 @@ def main():
                        help='Learning rate')
     parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd'],
                        help='Optimizer')
+    parser.add_argument('--warmup_steps', type=int, default=0,
+                       help='Number of training steps for learning rate warmup (0 = no warmup)')
+    parser.add_argument('--warmup_epochs', type=float, default=None,
+                       help='Number of epochs for warmup (overrides warmup_steps if provided)')
     
     # Loss arguments (can override config)
     parser.add_argument('--recon_weight', type=float, default=None,
@@ -280,13 +284,24 @@ def main():
     train_x, train_y = x_train, y_train
     val_x, val_y = (x_val, y_val) if x_val is not None else (None, y_val)
     
+    # Calculate warmup_steps
+    if args.warmup_epochs is not None:
+        # Calculate number of batches per epoch
+        num_samples = train_y.shape[0]
+        batches_per_epoch = (num_samples + args.batch_size - 1) // args.batch_size
+        warmup_steps = int(args.warmup_epochs * batches_per_epoch)
+    else:
+        warmup_steps = args.warmup_steps
+    
     # Create trainer
     trainer = SequenceTrainer(
         config=config,
         learning_rate=args.learning_rate,
         optimizer_name=args.optimizer,
         seed=args.seed,
-        unconditional=args.unconditional
+        unconditional=args.unconditional,
+        warmup_steps=warmup_steps,
+        model_type=args.model_type
     )
     
     # Initialize
@@ -311,17 +326,19 @@ def main():
     val_x_input = None if args.unconditional else (val_x if val_x is not None else None)
     dropout_epochs = args.dropout_epochs if args.dropout_epochs is not None else args.num_epochs
     
-    validation_data = (val_x_input, val_y) if val_y is not None else None
+    # Convert JAX arrays to lists of sequences for the trainer
+    # Each row becomes a sequence in the list
+    train_sequences = [train_y[i] for i in range(train_y.shape[0])]
+    val_sequences = [val_y[i] for i in range(val_y.shape[0])] if val_y is not None else None
     
     print(f"Starting training for {args.num_epochs} epochs...")
     history = trainer.train(
-        x_data=train_x_input,
-        y_data=train_y,
+        sequences_data=train_sequences,
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
-        validation_data=validation_data,
+        y_seq_len=train_y.shape[1] if train_y.ndim >= 2 else 12,  # Extract sequence length from data
+        validation_data=val_sequences,
         dropout_epochs=dropout_epochs,
-        verbose=args.verbose,
     )
     
     # Save results

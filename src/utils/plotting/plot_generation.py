@@ -147,9 +147,20 @@ def create_loss_trends_plot(history: Dict[str, Any], model_type: str, output_dir
         ax.axis('off')
         ax.text(0.5, 0.5, 'Chamfer Distance\n(Not Available)', ha='center', va='center', fontsize=12, alpha=0.5)
     
-    # Leave last panel empty or add additional metric if needed
+    # VAE Loss
     ax = axes[1, 2]
-    ax.axis('off')
+    if history.get('train_vae_losses') and len(history['train_vae_losses']) > 0:
+        ax.plot(epochs, history['train_vae_losses'], label='Train VAE', color='teal', linewidth=2)
+        if history.get('val_vae_losses') and len(history['val_vae_losses']) > 0:
+            ax.plot(epochs, history['val_vae_losses'], label='Val VAE', color='coral', linewidth=2, linestyle='--')
+        ax.set_title('VAE Loss', fontsize=12, fontweight='bold')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Loss')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    else:
+        ax.axis('off')
+        ax.text(0.5, 0.5, 'VAE Loss\n(Not Available)', ha='center', va='center', fontsize=12, alpha=0.5)
     
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, 'loss_trends.png'), dpi=200, bbox_inches='tight')

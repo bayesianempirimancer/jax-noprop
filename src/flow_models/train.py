@@ -102,6 +102,10 @@ def main():
                        help='Learning rate')
     parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd', 'adagrad'],
                        help='Optimizer')
+    parser.add_argument('--warmup_steps', type=int, default=0,
+                       help='Number of training steps for learning rate warmup (0 = no warmup)')
+    parser.add_argument('--warmup_epochs', type=float, default=None,
+                       help='Number of epochs for warmup (overrides warmup_steps if provided)')
     
     # Loss arguments (can override config)
     parser.add_argument('--recon_weight', type=float, default=None,
@@ -226,13 +230,22 @@ def main():
     print(f"  Train: x={x_train.shape}, y={y_train.shape}")
     print(f"  Val: x={x_val.shape}, y={y_val.shape}")
     
+    # Calculate warmup_steps
+    if args.warmup_epochs is not None:
+        # Calculate number of batches per epoch
+        num_samples = y_train.shape[0]
+        batches_per_epoch = (num_samples + args.batch_size - 1) // args.batch_size
+        warmup_steps = int(args.warmup_epochs * batches_per_epoch)
+    else:
+        warmup_steps = args.warmup_steps
+    
     # Create trainer
     trainer = Trainer(
         config=config,
         learning_rate=args.learning_rate,
         optimizer_name=args.optimizer,
         seed=args.seed,
-        warmup_steps=getattr(args, 'warmup_steps', 0),
+        warmup_steps=warmup_steps,
         model_type=args.model_type
     )
     

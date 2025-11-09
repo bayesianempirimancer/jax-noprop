@@ -38,6 +38,12 @@ class VAE_flow(nn.Module):
         # Store whether schedule parameters should be learnable
         self.noise_schedule_learnable = schedule_config.get("learnable", True)
         
+        # Store config values as instance variables for use in JIT-compiled functions
+        self.use_snr_weight = bool(self.config.main.get("use_snr_weight", True))
+        self.recon_loss_type = self.config.main.get("recon_loss_type", "mse")
+        self.recon_weight = float(self.config.main.get("recon_weight", 0.0))
+        self.reg_weight = float(self.config.main.get("reg_weight", 0.0))
+        
         # Create schedule using factory - pass learnable flag to schedule
         # The schedule will handle stop_gradient internally if learnable=False
         # Schedule classes use their own defaults for parameters
@@ -173,6 +179,10 @@ class VAE_flow(nn.Module):
 
     # KL divergence with SNR weighting: SNR_noise_weight = gamma_prime
     # Note:  0.5 is dropped and the proof is here: https://arxiv.org/html/2312.10393v1
+    def lazy_snr_weight(self, alpha_t, gamma_prime_t):
+        # Diffusion ModelSNR weight
+        return self.lazy_noise_snr(alpha_t, gamma_prime_t)
+    
     def lazy_noise_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t
     def lazy_target_snr(self, alpha_t, gamma_prime_t): return gamma_prime_t * alpha_t / (1.0 - alpha_t)
     def lazy_error_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t / (1.0 - alpha_t)
@@ -215,74 +225,78 @@ class VAE_flow(nn.Module):
         For diffusion, the loss is MSE between predicted noise and actual noise:
         L_diff = E[||model_output - noise||²/beta], where beta is 1/t for the linear noise schedule.
         """
-        key, encoder_key, t_key, noise_key = jr.split(key, 4)
-        key, dropout_key1, dropout_key2 = jr.split(key, 3)
+        # Extract config values at the start (self is static, so this is safe)
+        # Convert to concrete Python types to avoid tracing issues
+        use_snr_weight = bool(self.config.main.get("use_snr_weight", True))
+        recon_loss_type = str(self.config.main.get("recon_loss_type", "mse"))
+        recon_weight = float(self.config.main.get("recon_weight", 0.0))
+        reg_weight = float(self.config.main.get("reg_weight", 0.0))
+        vae_weight = float(self.config.main.get("vae_weight", 0.0))
+        
+        # Split keys for random sampling operations (not dropout)
+        key, t_key, noise_key, z_target_key = jr.split(key, 4)
         batch_shape = y.shape[:-self.y_ndims]
+
         # Encode Target (noisy latent)
-        mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': encoder_key})
-        z_target = mu_z_target + jnp.exp(0.5 * logvar_z_target) * jr.normal(key, mu_z_target.shape)
-                
+        mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})
+        z_target = mu_z_target + jnp.exp(0.5 * logvar_z_target) * jr.normal(z_target_key, mu_z_target.shape)
+                        
         # Sample noise and time
         t = jr.uniform(t_key, batch_shape, minval=0.0, maxval=1.0)
         noise = jr.normal(noise_key, z_target.shape)
 
-        # Get noise schedule parameters
+        # Get noise schedule parameters or z manipulation
         t_expanded = jnp.expand_dims(t, axis=tuple(range(-self.z_ndims, 0)))
         alpha_t, gamma_prime_t = self.apply(params, t_expanded, method='get_noise_params')
         
         sqrt_alpha_t = jnp.sqrt(alpha_t)
         sqrt_1_minus_alpha_t = jnp.sqrt(1.0 - alpha_t)
 
-
-#        snr_weight_mean = jnp.mean(snr_weight)        
-        # Compute noisy latent state at time t and predicted noise, and predicted output
+        # Sample Latent state 
         z_t =  sqrt_alpha_t* z_target +  sqrt_1_minus_alpha_t * noise # noisy latent
-        predicted_noise = self.apply(params, z_t, x, t, method='pred_noise', training=training, rngs={'dropout': dropout_key1})
+
+        # Compute Predicted Noise and Target Estimate and FLow Estimate
+        predicted_noise = self.apply(params, z_t, x, t, method='pred_noise', training=training, rngs={'dropout': key})
         z_target_est = (z_t - predicted_noise * sqrt_1_minus_alpha_t)/(sqrt_alpha_t)
-        y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': dropout_key2})
         dz_dt = self.lazy_flow(z_t, predicted_noise, alpha_t, gamma_prime_t)
 
-        # Compute Losses
+        # Compute Predictions
+        y_vae = self.apply(params, z_target, method='decode', training=training, rngs={'dropout': key})
+        y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})
+
+        # Squeeze alpha_t and gamma_prime_t for use in SNR weight computation
         alpha_t = jnp.squeeze(alpha_t, axis=tuple(range(-self.z_ndims, 0)))
         gamma_prime_t = jnp.squeeze(gamma_prime_t, axis=tuple(range(-self.z_ndims, 0)))
+        snr_weight = self.lazy_noise_snr(alpha_t, gamma_prime_t)
 
-        use_snr_weight = self.config.main.get("use_snr_weight", True)
-        if use_snr_weight:
-            snr_weight = self.lazy_flow_snr(alpha_t, gamma_prime_t)
-        else: 
-            snr_weight = 1.0
-
+        # Compute Losses
         squared_error = jnp.mean((noise - predicted_noise) ** 2, axis=tuple(range(-self.z_ndims, 0)))
-#        flow_loss = jnp.mean(self.lazy_noise_snr(alpha_t, gamma_prime_t) * squared_error)
         flow_loss = jnp.mean(snr_weight * squared_error)
+        reg_loss = jnp.mean(dz_dt**2) 
 
-        reg_loss = jnp.mean(dz_dt**2, axis=tuple(range(-self.z_ndims, 0)))  # has batch_shape
-#        reg_loss = jnp.mean(self.lazy_flow_snr(alpha_t, gamma_prime_t)*reg_loss)  # Average over batch dimension
-        reg_loss = jnp.mean(snr_weight * reg_loss)
-
-        recon_loss_type = self.config.main.get("recon_loss_type", "mse")
         if recon_loss_type == "cross_entropy":
-            recon_loss = jnp.mean(-y * jnp.log(y_pred + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
+            recon_loss = jnp.sum(-y * jnp.log(y_pred + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
+            vae_loss   = jnp.sum(-y * jnp.log(y_vae + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
         elif recon_loss_type == "mse":
-            recon_loss = jnp.mean((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
+            recon_loss = jnp.sum((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
+            vae_loss   = jnp.sum((y - y_vae)**2, axis=tuple(range(-self.y_ndims, 0)))
         else:
             recon_loss = 0.0
         # recon_loss = jnp.mean(self.lazy_target_snr(alpha_t, gamma_prime_t)*recon_loss)  # Average over batch dimension if needed        
-        recon_loss = jnp.mean(snr_weight*recon_loss)  # Average over batch dimension if needed        
+        recon_loss = jnp.mean(self.lazy_target_snr(alpha_t, gamma_prime_t)*recon_loss)  # Average over batch dimension if needed        
+        vae_loss = jnp.mean(vae_loss)
 
         # y_mu = self.apply(params, mu_z_target, method='decode', training=training, rngs={'dropout': key})
         # direct_recon_Loss = jnp.mean((y - y_mu)**2)
-        
-        reg_weight = self.config.main.get("reg_weight", 0.0)
-        recon_weight = self.config.main.get("recon_weight", 0.0)
 
-        total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss
+        total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss
         # total_loss = total_loss/snr_weight_mean
         
         return total_loss, {
             'flow_loss': flow_loss,  # Add separate diffusion_loss metric
             'recon_loss': recon_loss, 
             'reg_loss': reg_loss,
+            'vae_loss': vae_loss,
             'total_loss': total_loss
         }
 

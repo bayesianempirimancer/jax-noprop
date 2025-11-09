@@ -251,7 +251,8 @@ def main():
         optimizer_name=args.optimizer,
         seed=args.seed,
         unconditional=args.unconditional,
-        warmup_steps=warmup_steps
+        warmup_steps=warmup_steps,
+        model_type=args.model_type
     )
     
     # Initialize

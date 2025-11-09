@@ -1,15 +1,17 @@
-model_name: two_moons_vae_flow
+model_name: lorenz_vae_flow
 main:
   input_shape: 
-  - 2
+  - 20
+  - 3
   output_shape:
-  - 2
+  - 20
+  - 3
   latent_shape:
-  - 2
+  - 20
+  - 3
   recon_loss_type: mse
-  recon_weight: 0.0
+  recon_weight: 1.0
   reg_weight: 0.0
-  vae_weight: 1.0
   use_snr_weight: True
   integration_method: midpoint
   encode_x: false
@@ -33,43 +35,47 @@ noise_schedule:
     - -4.0
     - 4.0
 encoder:
-  model_type: identity
+  model_type: mlp
   encoder_type: deterministic
   input_shape:
-  - 2
+  - 20
+  - 3
   latent_shape:
-  - 2
+  - 20
+  - 3
   hidden_dims:
-  - 16
-  - 32
-  - 16
+  - 64
+  - 128
+  - 64
   activation: swish
   dropout_rate: 0.0
 decoder:
-  model_type: identity
+  model_type: mlp
   decoder_type: none
   latent_shape:
-  - 2
+  - 20
+  - 3
   output_shape:
-  - 2
+  - 20
+  - 3
   hidden_dims:
-  - 16
-  - 32
-  - 16
+  - 64
+  - 128
+  - 64
   activation: swish
   dropout_rate: 0.0
 crn:
-  model_type: vanilla
-  network_type: mlp
+  model_type: transformer_seq2seq
+  network_type: transformer_seq2seq
   hidden_dims:
-  - 32
-  - 32
-  - 32
-  - 32
-  - 32
-  - 32
-  time_embed_dim: 32
+  - 128
+  - 128
+  time_embed_dim: 64
   time_embed_method: sinusoidal
   activation_fn: swish
   use_batch_norm: false
   dropout_rate: 0.1
+  num_layers: 4
+  num_heads: 8
+  mlp_ratio: 4.0
+

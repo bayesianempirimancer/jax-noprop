@@ -44,6 +44,13 @@ class VAE_flow(nn.Module):
         # Store whether schedule parameters should be learnable
         self.noise_schedule_learnable = schedule_config.get("learnable", True)
         
+        # Store config values as instance variables for use in JIT-compiled functions
+        self.use_snr_weight = bool(self.config.main.get("use_snr_weight", True))
+        self.recon_loss_type = self.config.main.get("recon_loss_type", "mse")
+        self.recon_weight = float(self.config.main.get("recon_weight", 0.0))
+        self.reg_weight = float(self.config.main.get("reg_weight", 0.0))
+        self.vae_weight = float(self.config.main.get("vae_weight", 0.0))
+        
         # Create schedule using factory - pass learnable flag to schedule
         # The schedule will handle stop_gradient internally if learnable=False
         # Schedule classes use their own defaults for parameters
@@ -139,6 +146,10 @@ class VAE_flow(nn.Module):
 
     # KL divergence with SNR weighting: SNR_noise_weight = gamma_prime
     # Note:  0.5 is dropped and the proof is here: https://arxiv.org/html/2312.10393v1
+    def lazy_snr_weight(self, alpha_t, gamma_prime_t):
+        # SNR weight: SNR'(t) = gamma_prime * alpha / (1-alpha)
+        return self.lazy_flow_snr(alpha_t, gamma_prime_t)
+    
     def lazy_noise_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t
     def lazy_target_snr(self, alpha_t, gamma_prime_t): return gamma_prime_t * alpha_t / (1.0 - alpha_t)
     def lazy_error_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t / (1.0 - alpha_t)
@@ -195,82 +206,74 @@ class VAE_flow(nn.Module):
         """
         Compute the loss by calling individual @nn.compact methods with proper rngs.
         """
+        # Extract config values at the start (self is static, so this is safe)
+        # Convert to concrete Python types to avoid tracing issues
+        use_snr_weight = bool(self.config.main.get("use_snr_weight", True))
+        recon_loss_type = str(self.config.main.get("recon_loss_type", "mse"))
+        recon_weight = float(self.config.main.get("recon_weight", 0.0))
+        reg_weight = float(self.config.main.get("reg_weight", 0.0))
+        vae_weight = float(self.config.main.get("vae_weight", 0.0))
+        
         # Split keys for random sampling operations (not dropout)
         key, t_key, z_0_key, z_t_noise_key, z_target_key = jr.split(key, 5)
-        # Keep key for dropout RNGs - will be automatically managed by @nn.compact
         batch_shape = y.shape[:-self.y_ndims]
         
-        # Encode Target (noisy latent) - @nn.compact methods handle RNG automatically
+        # Encode Target (noisy latent)
         mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})
         z_target = mu_z_target + jnp.exp(0.5 * logvar_z_target) * jr.normal(z_target_key, mu_z_target.shape)
 
-        y_vae = self.apply(params, z_target, method='decode', training=training, rngs={'dropout': key})
-        vae_loss = jnp.mean((y - y_vae)**2)
-
         # Sample initial latent state and time
+        t = jr.uniform(t_key, batch_shape, minval=0.0, maxval=1.0)
+        t_expanded = jnp.expand_dims(t, axis=tuple(range(-self.z_ndims, 0)))
         z_0 = jr.normal(z_0_key, batch_shape + self.z_shape)
-        t = jr.uniform(t_key, batch_shape + self.z_ndims*(1,), minval=0.0, maxval=1.0)
-        squeezed_t = t.squeeze(tuple(range(-self.z_ndims, 0)))
         
         # Sample latent state at time t
         diff_z = z_target - z_0
-        z_t = z_0 + t * diff_z 
-        # z_t = jnp.sqrt(alpha_t) * z_target +  jnp.sqrt(1.0 - alpha_t) * z_0 
-        # z_t = z_t + 2*(jnp.sqrt(alpha_t) - alpha_t) * jr.normal(z_t_noise_key, z_t.shape)
+        z_t = z_0 + t_expanded * diff_z
+
+        # Get noise schedule parameters (use squeezed t)
+        alpha_t, gamma_prime_t = self.apply(params, t, method='get_noise_params')
+
+        # Compute Flow Field and Target Estimate
+        dz_dt = self.apply(params, z_t, x, t, method='dz_dt', training=training, rngs={'dropout': key})    
+        z_target_est = dz_dt * (1.0-t_expanded) + z_t
+
+        # Compute Predictions
+        y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})
+        y_vae = self.apply(params, z_target, method='decode', training=training, rngs={'dropout': key})
 
         # Compute Losses
-        alpha_t, gamma_prime_t = self.apply(params, squeezed_t, method='get_noise_params')
-        
-        use_snr_weight = self.config.main.get("use_snr_weight", True)
-        if use_snr_weight:
-            snr_weight = self.lazy_flow_snr(alpha_t, gamma_prime_t)
-        else: 
-            snr_weight = 1.0
-        
-        dz_dt = self.apply(params, z_t, x, squeezed_t, method='dz_dt', training=training, rngs={'dropout': key})    
-        z_target_est = dz_dt * (1.0-t) + z_t
-        y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})
+        snr_weight = self.lazy_flow_snr(alpha_t, gamma_prime_t)        
 
-        # Compute Lossess
-        reg_loss = jnp.mean(dz_dt ** 2, axis=tuple(range(-self.z_ndims, 0)))
-        reg_loss = jnp.mean(snr_weight * reg_loss)
+        squared_error = jnp.mean((dz_dt - diff_z)**2, axis=tuple(range(-self.z_ndims, 0)))
+        flow_loss = jnp.mean(snr_weight * squared_error)
+        reg_loss = jnp.mean(dz_dt**2)
 
-#        dz_dt_target = self.lazy_flow(z_t, z_target, alpha_t, gamma_prime_t)
-        flow_loss = jnp.mean((dz_dt - diff_z)**2, axis=tuple(range(-self.z_ndims, 0)))
-        flow_loss = jnp.mean(snr_weight * flow_loss)
-
-        reg_loss = jnp.mean(dz_dt**2, axis=tuple(range(-self.z_ndims, 0)))  # has batch_shape
-        reg_loss = jnp.mean(snr_weight * reg_loss)
-
-        recon_loss_type = self.config.main.get("recon_loss_type", "mse")
         if recon_loss_type == "cross_entropy":
-            recon_loss = jnp.mean(-y * jnp.log(y_pred + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
+            recon_loss = jnp.sum(-y * jnp.log(y_pred + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
+            vae_loss   = jnp.sum(-y * jnp.log(y_vae + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
         elif recon_loss_type == "mse":
-            recon_loss = jnp.mean((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
+            recon_loss = jnp.sum((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
+            vae_loss   = jnp.sum((y - y_vae)**2, axis=tuple(range(-self.y_ndims, 0)))
         else:
             recon_loss = 0.0
-        # recon_loss = jnp.mean(self.lazy_target_snr(alpha_t, gamma_prime_t)*recon_loss)  # Average over batch dimension if needed        
-        recon_loss = jnp.mean(snr_weight*recon_loss)  # Average over batch dimension if needed        
-   
-        # Decode mu_z_target to compare with y
-        # y_mu = self.apply(params, mu_z_target, method='decode', training=training, rngs={'dropout': key})
-        # direct_recon_Loss = jnp.mean((y - y_mu)**2)
-
-        reg_weight = self.config.main.get("reg_weight", 0.0)
-        recon_weight = self.config.main.get("recon_weight", 0.0)
-        vae_weight = self.config.main.get("vae_weight", 0.0)
+            vae_loss = 0.0
+        
+        recon_loss = jnp.mean(self.lazy_target_snr(alpha_t, gamma_prime_t) * recon_loss)
+        vae_loss = jnp.mean(vae_loss)
 
         total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss
-        # total_loss = total_loss/snr_weight_mean
+        
+        return total_loss, {
+            'flow_loss': flow_loss,
+            'recon_loss': recon_loss, 
+            'reg_loss': reg_loss,
+            'vae_loss': vae_loss,
+            'total_loss': total_loss
+        }
 
-        return total_loss, {'flow_loss': flow_loss, 
-                            'recon_loss': recon_loss, 
-                            'reg_loss': reg_loss, 
-                            'vae_loss': vae_loss,
-                            'total_loss': total_loss}
 
-
-    @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, num_steps, integration_method, output_type, and training are static arguments
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))  # self, num_steps, integration_method, output_type, num_samples are static arguments
     def predict(self, params: dict, x: jnp.ndarray, num_steps: int = 20, integration_method: str = "euler", output_type: str = "end_point", num_samples: int = 1, prng_key: jr.PRNGKey = None) -> jnp.ndarray:
         """
         Make predictions using ODE solver integration.        

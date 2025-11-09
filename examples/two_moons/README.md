@@ -23,6 +23,9 @@ python examples/two_moons/generate_two_moons.py
 **Default parameters:**
 - `--n_samples`: 10000 (total samples)
 - `--noise`: 0.1 (Gaussian noise level)
+- `--scale_factor`: 10.0 (scale factor to multiply x coordinates by)
+- `--center`: `True` (center the data after scaling)
+- `--no_center`: Optional flag to disable centering
 - `--seed`: 42 (random seed)
 - `--output_dir`: `./data` (output directory)
 - `--filename`: `two_moons.pkl` (output filename)
@@ -35,12 +38,15 @@ python examples/two_moons/generate_two_moons.py
 python examples/two_moons/generate_two_moons.py \
     --n_samples 10000 \
     --noise 0.1 \
+    --scale_factor 10.0 \
     --seed 42 \
     --output_dir ./data \
     --filename two_moons.pkl \
     --train_ratio 0.80 \
     --save_plot
 ```
+
+**Note:** The `--scale_factor` parameter controls the scale of the dataset. After scaling, the data is centered by default (unless `--no_center` is specified). This is useful for testing model performance at different scales.
 
 The script will:
 1. Generate the two moons dataset
@@ -81,6 +87,10 @@ python -m src.flow_models.train --config_file examples/two_moons/config.yaml --d
 - `--learning_rate`: 0.001
 - `--optimizer`: `adam`
 - `--seed`: 42
+- `--warmup_steps`: 0 (number of training steps for learning rate warmup)
+- `--warmup_epochs`: `None` (number of epochs for warmup, overrides `--warmup_steps` if provided)
+
+**Shape arguments:** You can specify shapes using either `--input_dim`, `--output_dim`, `--latent_dim` (converted to `(dim,)` tuples) or `--input_shape`, `--output_shape`, `--latent_shape` (explicit tuples). If neither config file nor shape arguments are provided, you must specify at least `--input_shape`, `--output_shape`, and `--latent_shape` via command-line arguments.
 
 All other parameters (shapes, architecture, loss weights, etc.) are loaded from the config file but can be overridden via command-line arguments.
 
@@ -108,6 +118,10 @@ python -m src.flow_models.train_gen --config_file examples/two_moons/config.yaml
 - `--learning_rate`: 0.001
 - `--seed`: 42
 - `--unconditional`: `False` (set to `True` for unconditional generation)
+- `--warmup_steps`: 0 (number of training steps for learning rate warmup)
+- `--warmup_epochs`: `None` (number of epochs for warmup, overrides `--warmup_steps` if provided)
+
+**Shape arguments:** For conditional generation, the config file's `input_shape` and `output_shape` are automatically reversed (y→x generation). For unconditional generation, `input_shape` is set to `()` (empty tuple) and `output_shape` is taken from the config. You can override shapes using `--input_shape`, `--output_shape`, `--latent_shape` or their `_dim` equivalents.
 
 All other parameters (shapes, architecture, loss weights, noise schedules, etc.) are loaded from the config file but can be overridden via command-line arguments.
 
@@ -173,29 +187,30 @@ Both `train.py` and `train_gen.py` save results to timestamped directories in `a
 
 **For `train.py` (regression/classification):**
 - `artifacts/{model_type}_reg/{YYYYMMDD_HHMM}/`
-  - `training_results.pkl`: Training history (losses, metrics)
-  - `model_params.pkl`: Trained model parameters
-  - `config.yaml`: Configuration used for training (human-readable)
-  - `training_progress.png`: Loss trends plot
+  - `history.pkl`: Training history (losses, metrics)
+  - `params.pkl`: Trained model parameters
+  - `config.yaml`: Configuration used for training (human-readable, with hierarchical key ordering)
+  - `loss_trends.png`: Loss trends plot (2x3 layout)
   - `data_visualization.png`: Data visualization
+  - `predictions.png`: Model predictions visualization
   - `trajectories.png`: Sample trajectories
   - `trajectory_diagnostics.png`: Trajectory diagnostics
 
 **For `train_gen.py` (conditional generation):**
 - `artifacts/{model_type}_gen/{YYYYMMDD_HHMM}/`
-  - `training_results.pkl`: Training history
-  - `model_params.pkl`: Trained model parameters
-  - `config.yaml`: Configuration used for training (human-readable)
-  - `loss_trends.png`: Loss trends plot
+  - `history.pkl`: Training history
+  - `params.pkl`: Trained model parameters
+  - `config.yaml`: Configuration used for training (human-readable, with hierarchical key ordering)
+  - `loss_trends.png`: Loss trends plot (2x3 layout: Total Loss, Flow Loss, Reconstruction Loss, Regularization Loss, Chamfer Distance, Empty)
   - `conditional_generation.png`: Generation visualization
   - `latent_trajectories.png`: Latent space trajectories
 
 **For `train_gen.py` (unconditional generation):**
 - `artifacts/{model_type}_uncond_gen/{YYYYMMDD_HHMM}/`
-  - `training_results.pkl`: Training history
-  - `model_params.pkl`: Trained model parameters
-  - `config.yaml`: Configuration used for training (human-readable)
-  - `loss_trends.png`: Loss trends plot
+  - `history.pkl`: Training history
+  - `params.pkl`: Trained model parameters
+  - `config.yaml`: Configuration used for training (human-readable, with hierarchical key ordering)
+  - `loss_trends.png`: Loss trends plot (2x3 layout)
   - `unconditional_generation.png`: Generation visualization
   - `latent_trajectories.png`: Latent space trajectories
 
@@ -222,6 +237,8 @@ Both scripts support many customization options. Here are some commonly modified
 
 # Use different latent dimension (requires linear encoder/decoder)
 --latent_dim 8
+# Or use explicit shape
+--latent_shape 8
 
 # Change noise schedule (for diffusion/CT)
 --noise_schedule linear
@@ -232,6 +249,11 @@ Both scripts support many customization options. Here are some commonly modified
 # Use different encoder/decoder types
 --encoder_model_type mlp
 --decoder_model_type mlp
+
+# Add learning rate warmup (in steps or epochs)
+--warmup_steps 100
+# Or specify warmup in epochs (overrides warmup_steps)
+--warmup_epochs 2.0
 ```
 
 ### Example: Custom Training Run
@@ -263,7 +285,9 @@ The easiest way to use configuration is via the YAML file:
 python -m src.flow_models.train --config_file examples/two_moons/config.yaml --data_path data/two_moons.pkl --model_type flow_matching
 ```
 
-The YAML file contains all default parameters in a human-readable format. You can edit `config.yaml` directly to change defaults, and command-line arguments will override any values in the config file.
+The YAML file contains all default parameters in a human-readable format. The config loading system automatically merges the YAML values with default values from the Config class, ensuring all parameters are present even if not explicitly specified in the YAML. You can edit `config.yaml` directly to change defaults, and command-line arguments will override any values in the config file.
+
+**Note:** Saved config files maintain a hierarchical key order (`model_name`, `main`, `noise_schedule`, `encoder`, `decoder`, `crn`) for better readability.
 
 ### Option 2: Custom Config Class
 
@@ -295,14 +319,18 @@ Many common parameters can be overridden using command line flags. This is conve
 **Available command line overrides:**
 - `--recon_weight`: Override reconstruction loss weight
 - `--reg_weight`: Override regularization weight
-- `--noise_schedule`: Override noise schedule type (`linear`, `exponential`, etc.)
+- `--use_snr_weight`: Override SNR weighting (True/False)
+- `--integration_method`: Override ODE integration method (`euler`, `midpoint`, `heun`, `rk4`, etc.)
+- `--noise_schedule`: Override noise schedule type (`linear`, `exponential`, `sigmoid`, `cosine`, etc.)
 - `--noise_schedule_learnable`: Toggle learnable noise schedule
 - `--crn_type`: Override CRN type (`vanilla`, `geometric`, `potential`, etc.)
 - `--network_type`: Override network backbone (`mlp`, `bilinear`, `convex`)
 - `--hidden_dims`: Override hidden layer dimensions
-- `--encoder_model_type`: Override encoder type (`identity`, `linear`, `mlp`)
-- `--decoder_model_type`: Override decoder model type
-- `--decoder_type`: Override decoder type (`identity`, `linear`, `none`)
+- `--encoder_model_type`: Override encoder type (`identity`, `linear`, `mlp`, `mlp_normal`, `resnet`, `resnet_normal`)
+- `--decoder_model_type`: Override decoder model type (`identity`, `mlp`, `resnet`)
+- `--decoder_type`: Override decoder type (`linear`, `softmax`, `none`)
+- `--warmup_steps`: Number of training steps for learning rate warmup
+- `--warmup_epochs`: Number of epochs for warmup (overrides `--warmup_steps`)
 - And many more (see `--help` for each training script)
 
 **Example:**
@@ -366,9 +394,11 @@ crn: FrozenDict = field(default_factory=lambda: FrozenDict({
 
 **Important Notes:**
 - YAML config files are recommended for most use cases as they're human-readable and easy to edit
+- The config loading system automatically merges YAML values with default values from the Config class, ensuring all parameters are present even if not explicitly specified in the YAML
 - The Python config class (`config.py`) uses `FrozenDict` from Flax, which means values are immutable at runtime
 - After editing a config file, restart your training script to use the new values
 - Command line arguments will always override config file values if both are specified
+- Saved config files maintain a hierarchical key order for better readability
 - See the comments in `config.py` and the structure of `config.yaml` for detailed explanations of each parameter
 
 ### Which Method Should I Use?
@@ -401,14 +431,20 @@ crn: FrozenDict = field(default_factory=lambda: FrozenDict({
 
 3. **Default Encoder/Decoder**: With `latent_dim=2` (default), the models automatically use identity encoders and decoders. For `latent_dim>2`, linear encoders/decoders are used.
 
-4. **Config Files**: Each training run saves a `config.yaml` file with the exact configuration used, making it easy to reproduce results. The config file is saved in the same directory as the training results.
+4. **Config Files**: Each training run saves a `config.yaml` file with the exact configuration used, making it easy to reproduce results. The config file is saved in the same directory as the training results. The saved config includes all parameters (merged with defaults) and maintains a hierarchical key order for readability.
 
-5. **Directory Structure**: Results are saved to `artifacts/{model_type}_{task}/{YYYYMMDD_HHMM}/` where:
+5. **Learning Rate Warmup**: Both `train.py` and `train_gen.py` support learning rate warmup via `--warmup_steps` or `--warmup_epochs`. This helps stabilize early training iterations. Warmup uses a linear schedule from 0 to the specified learning rate over the warmup period.
+
+6. **Directory Structure**: Results are saved to `artifacts/{model_type}_{task}/{YYYYMMDD_HHMM}/` where:
    - `{model_type}` is one of: `flow_matching`, `diffusion`, `ct`
    - `{task}` is one of: `reg` (regression), `gen` (conditional generation), `uncond_gen` (unconditional generation)
    - `{YYYYMMDD_HHMM}` is a timestamp (year, month, day, hour, minute)
 
-6. **GPU Warnings**: You may see GPU autotuning warnings during training. These are harmless and don't affect the results.
+7. **Shape vs Dimension Arguments**: You can specify shapes using either `--input_dim`, `--output_dim`, `--latent_dim` (which are converted to `(dim,)` tuples) or `--input_shape`, `--output_shape`, `--latent_shape` (explicit tuples). For unconditional generation, `input_shape` is automatically set to `()` (empty tuple).
+
+8. **Data Scaling**: The `generate_two_moons.py` script supports `--scale_factor` to scale the dataset and `--no_center` to disable automatic centering. This is useful for testing model performance at different scales.
+
+9. **GPU Warnings**: You may see GPU autotuning warnings during training. These are harmless and don't affect the results.
 
 ## Troubleshooting
 
@@ -416,5 +452,7 @@ crn: FrozenDict = field(default_factory=lambda: FrozenDict({
 - **Shape mismatches**: Ensure you're using `data/two_moons.pkl` for this example.
 - **Import errors**: Make sure you're using the `numpyro` conda environment: `conda activate numpyro` or use `conda run -n numpyro` before your command.
 - **Config file not found**: Make sure the path to `config.yaml` is correct relative to the project root, or use an absolute path.
-- **No config file**: If you don't provide a config file, you must specify `--input_shape`, `--output_shape`, and `--latent_shape` (or their `_dim` equivalents) via command-line arguments.
+- **No config file**: If you don't provide a config file, you must specify `--input_shape`, `--output_shape`, and `--latent_shape` (or their `_dim` equivalents) via command-line arguments. The encoder and decoder will automatically use the shapes specified in the main config.
+- **Shape errors**: Make sure you're using the correct shape format. Use `--input_dim 2` (converted to `(2,)`) or `--input_shape 2` (explicit tuple). For unconditional generation, `input_shape` is automatically set to `()`.
+- **Warmup issues**: If warmup seems to have a negative effect, try reducing the number of warmup steps/epochs or disabling it entirely with `--warmup_steps 0`.
 

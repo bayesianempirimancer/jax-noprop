@@ -42,9 +42,9 @@ class Config(Config):
         
         # Loss configuration
         "recon_loss_type": "mse",  # Reconstruction loss type: "mse", "cross_entropy", or "none"
-        "recon_weight": 1.0,  # Weight for reconstruction loss (can override with --recon_weight)
+        "recon_weight": 0.0,  # Weight for reconstruction loss (can override with --recon_weight)
         "reg_weight": 0.0,  # Weight for regularization loss (can override with --reg_weight)
-        
+        "vae_weight": 1.0,  # Weight for VAE loss (can override with --vae_weight)
         # Flow model settings
         "use_snr_weight": True,  # Apply signal-to-noise ratio weighting to loss
                                   # False for flow_matching, True for diffusion/ct
@@ -55,7 +55,7 @@ class Config(Config):
     
     noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
         # Noise schedule configuration (for diffusion and CT models)
-        "schedule_type": "sigmoid",  # Schedule type: "linear", "exponential", "cosine", etc.
+        "schedule_type": "exponential",  # Schedule type: "linear", "exponential", "cosine", etc.
                                          # (can override with --noise_schedule)
         "learnable": False,  # Whether noise schedule parameters are learnable
                            # (can override with --noise_schedule_learnable)

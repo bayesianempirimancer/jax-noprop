@@ -39,25 +39,36 @@ class SequenceTrainer:
     optimizer_name: str = "adam"
     seed: int = 42
     unconditional: bool = False  # If True, use unconditional generation (x=None)
+    warmup_steps: int = 0  # Number of training steps for learning rate warmup
+    model_type: str = "flow_matching"  # Explicit model type to avoid config access issues
 
     def __post_init__(self):
-
-        if(self.config.model_type == "diffusion"):
-            self.model = DiffusionModel(config=config)
-            self.model_type = "diffusion"
-        elif(self.config.model_type == "flow_matching"):
-            self.model = FlowMatchingModel(config=config)
-            self.model_type = "flow_matching"
-        elif(self.config.model_type == "ct"):
-            self.model = CTModel(config=config)
-            self.model_type = "ct"
+        # Initialize model based on model_type (use explicit parameter instead of config.model_type)
+        if self.model_type == "diffusion":
+            self.model = DiffusionModel(config=self.config)
+        elif self.model_type == "flow_matching":
+            self.model = FlowMatchingModel(config=self.config)
+        elif self.model_type == "ct":
+            self.model = CTModel(config=self.config)
         else:
-            raise ValueError(f"Unsupported model type: {config.model_type}")
+            raise ValueError(f"Unsupported model type: {self.model_type}")
 
+        # Create optimizer with warmup
+        if self.warmup_steps > 0:
+            lr_schedule = optax.join_schedules(
+                [
+                    optax.linear_schedule(0.0, self.learning_rate, self.warmup_steps),
+                    optax.constant_schedule(self.learning_rate)
+                ],
+                [self.warmup_steps]
+            )
+        else:
+            lr_schedule = optax.constant_schedule(self.learning_rate)
+        
         if self.optimizer_name.lower() == "adam":
-            self.optimizer = optax.adam(self.learning_rate)
+            self.optimizer = optax.adam(lr_schedule)
         elif self.optimizer_name.lower() == "sgd":
-            self.optimizer = optax.sgd(self.learning_rate)
+            self.optimizer = optax.sgd(lr_schedule)
         else:
             raise ValueError(f"Unsupported optimizer: {self.optimizer_name}")
 
@@ -170,7 +181,6 @@ class SequenceTrainer:
         y_seq_len: int = 12,  # Target sequence length (1 hour)
         validation_data: Optional[list] = None,  # List of validation sequences
         dropout_epochs: Optional[int] = None,
-        verbose: bool = True,
     ) -> Dict[str, Any]:
         if self.params is None:
             raise ValueError("Model not initialized. Call initialize() first.")

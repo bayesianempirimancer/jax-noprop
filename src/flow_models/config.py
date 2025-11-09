@@ -25,9 +25,9 @@ class Config(BaseConfig):
         "output_shape": "NA",  # Will be set based on z_dim or z_dim**2
         "latent_shape": "NA",  # Will be set based on x_dim
         "recon_loss_type": "mse",  # Options: "cross_entropy", "mse", "none". Should be consistent with decoder type
-        "recon_weight": 1.0,  # Weight for reconstruction loss in total loss
+        "recon_weight": 0.0,  # Weight for reconstruction loss in total loss
         "reg_weight": 0.0,  # Weight for regularization loss in total loss
-        "vae_weight": 0.0,  # Weight for VAE loss in total loss
+        "vae_weight": 1.0,  # Weight for VAE loss in total loss
         "use_snr_weight": False,  # Apply signal-to-noise ratio weighting to loss (False for flow_matching, True for diffusion/ct)
         "integration_method": "euler",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
                                         # "euler" for flow_matching, "midpoint" for diffusion/ct

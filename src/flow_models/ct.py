@@ -43,6 +43,12 @@ class VAE_flow(nn.Module):
         # Store whether schedule parameters should be learnable
         self.noise_schedule_learnable = schedule_config.get("learnable", True)
         
+        # Store config values as instance variables for use in JIT-compiled functions
+        self.use_snr_weight = bool(self.config.main.get("use_snr_weight", True))
+        self.recon_loss_type = self.config.main.get("recon_loss_type", "mse")
+        self.recon_weight = float(self.config.main.get("recon_weight", 0.0))
+        self.reg_weight = float(self.config.main.get("reg_weight", 0.0))
+        
         # Create schedule using factory - pass learnable flag to schedule
         # The schedule will handle stop_gradient internally if learnable=False
         # Schedule classes use their own defaults for parameters
@@ -169,7 +175,7 @@ class VAE_flow(nn.Module):
     # Note:  0.5 is dropped and the proof is here: https://arxiv.org/html/2312.10393v1
     def lazy_snr_weight(self, alpha_t, gamma_prime_t):
         # SNR weight for CT model: SNR'(t) = gamma_prime * alpha / (1-alpha)
-        return gamma_prime_t * alpha_t / (1.0 - alpha_t)
+        return self.lazy_target_snr(alpha_t, gamma_prime_t)
     
     def lazy_noise_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t
     def lazy_target_snr(self, alpha_t, gamma_prime_t): return gamma_prime_t * alpha_t / (1.0 - alpha_t)
@@ -190,6 +196,9 @@ class VAE_flow(nn.Module):
         dummy_z = jnp.zeros(batch_shape + self.z_shape)
         dummy_t = jnp.zeros(batch_shape)
         
+        # Call get_noise_params to initialize noise schedule parameters
+        self.get_noise_params(dummy_t)
+        
         # Call flow_model to initialize the CRN model parameters and alpha_gamma_prime_t
         dz_dt = self.dz_dt(dummy_z, x, dummy_t, training)
         
@@ -202,69 +211,78 @@ class VAE_flow(nn.Module):
         # The actual forward pass logic is handled by the individual methods
         return jnp.zeros(batch_shape + self.z_shape)
 
-# JIT with training static to avoid traced bool in Dropout
     @partial(jax.jit, static_argnums=(0, 5))
     def loss(self, params: dict, x: Optional[jnp.ndarray], y: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> Tuple[jnp.ndarray, dict]:
         """
         Compute the CT-style SNR-weighted loss.
         """
-        # Get target encoding from y encoder with automatic RNG handling
+        # Extract config values at the start (self is static, so this is safe)
+        # Convert to concrete Python types to avoid tracing issues
+        use_snr_weight = bool(self.config.main.get("use_snr_weight", True))
+        recon_loss_type = str(self.config.main.get("recon_loss_type", "mse"))
+        recon_weight = float(self.config.main.get("recon_weight", 0.0))
+        reg_weight = float(self.config.main.get("reg_weight", 0.0))
+        vae_weight = float(self.config.main.get("vae_weight", 0.0))
+        
+        # Split keys for random sampling operations (not dropout)
         key, t_key, noise_key, z_target_key = jr.split(key, 4)
         batch_shape = y.shape[:-self.y_ndims]
-        # Encode Target (noisy latent)  
+
+        # Encode Target (noisy latent)
         mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})
         z_target = mu_z_target + jnp.exp(0.5 * logvar_z_target) * jr.normal(z_target_key, mu_z_target.shape)
-                
-
-        # Sample time and get noise schedule parameters and noisy latent at time t
-        t = jr.uniform(t_key, batch_shape + self.z_ndims*(1,), minval=0.0, maxval=1.0)
-        alpha_t, gamma_prime_t = self.apply(params, t, method='get_noise_params')
-        z_t = jnp.sqrt(alpha_t) * z_target +  jnp.sqrt(1.0 - alpha_t) * jr.normal(noise_key, z_target.shape)
         
-        t = t.squeeze(tuple(range(-self.z_ndims, 0)))
+        # Sample time and get noise schedule parameters
+        t = jr.uniform(t_key, batch_shape, minval=0.0, maxval=1.0)
+        
+        # Get noise schedule parameters (expand t to match expected shape)
+        t_expanded = jnp.expand_dims(t, axis=tuple(range(-self.z_ndims, 0)))
+        alpha_t, gamma_prime_t = self.apply(params, t_expanded, method='get_noise_params')
+        
+        sqrt_alpha_t = jnp.sqrt(alpha_t)
+        sqrt_1_minus_alpha_t = jnp.sqrt(1.0 - alpha_t)
+        
+        # Compute noisy latent state at time t
+        z_t = sqrt_alpha_t * z_target + sqrt_1_minus_alpha_t * jr.normal(noise_key, z_target.shape)
+        
+        # Compute Target estimate and flow prediction
         z_target_est = self.apply(params, z_t, x, t, method='crn_output', training=training, rngs={'dropout': key})
-        y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})
-
-        use_snr_weight = self.config.main.get("use_snr_weight", True)
-        if use_snr_weight:
-            snr_weight = self.lazy_snr_weight(alpha_t, gamma_prime_t).squeeze(tuple(range(-self.z_ndims, 0)))
-        else: 
-            snr_weight = 1.0
-
-        squared_error = jnp.mean((z_target_est - z_target) ** 2, axis=tuple(range(-self.z_ndims, 0)))
-        snr_loss = jnp.mean(snr_weight * squared_error)
-
         dz_dt = self.lazy_flow(z_t, z_target_est, alpha_t, gamma_prime_t)
-        reg_loss = jnp.mean(dz_dt**2, axis=tuple(range(-self.z_ndims, 0)))  # has batch_shape
-#        alpha_t_squeezed = alpha_t.squeeze(tuple(range(-self.z_ndims, 0)))
-#        gamma_prime_t_squeezed = gamma_prime_t.squeeze(tuple(range(-self.z_ndims, 0)))
-#        reg_loss = jnp.mean(self.lazy_flow_snr(alpha_t_squeezed, gamma_prime_t_squeezed) * reg_loss)
-        reg_loss = jnp.mean(snr_weight * reg_loss)
 
-        recon_loss_type = self.config.main.get("recon_loss_type", "mse")
+        # Compute Predictions
+        y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})
+        y_vae = self.apply(params, z_target, method='decode', training=training, rngs={'dropout': key})
+        
+        # Squeeze alpha_t and gamma_prime_t for use in SNR weight computation
+        alpha_t_squeezed = jnp.squeeze(alpha_t, axis=tuple(range(-self.z_ndims, 0)))
+        gamma_prime_t_squeezed = jnp.squeeze(gamma_prime_t, axis=tuple(range(-self.z_ndims, 0)))
+        snr_weight = self.lazy_target_snr(alpha_t_squeezed, gamma_prime_t_squeezed)
+
+        # Compute Losses
+        squared_error = jnp.mean((z_target_est - z_target) ** 2, axis=tuple(range(-self.z_ndims, 0)))
+        flow_loss = jnp.mean(snr_weight * squared_error)
+        reg_loss = jnp.mean(dz_dt**2)
+
         if recon_loss_type == "cross_entropy":
-            recon_loss = jnp.mean(-y * jnp.log(y_pred + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
+            recon_loss = jnp.sum(-y * jnp.log(y_pred + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
+            vae_loss   = jnp.sum(-y * jnp.log(y_vae + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
         elif recon_loss_type == "mse":
-            recon_loss = jnp.mean((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
+            recon_loss = jnp.sum((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
+            vae_loss   = jnp.sum((y - y_vae)**2, axis=tuple(range(-self.y_ndims, 0)))
         else:
             recon_loss = 0.0
-            
-        # recon_loss = jnp.mean(self.lazy_target_snr(alpha_t, gamma_prime_t).squeeze(tuple(range(-self.z_ndims, 0)))*recon_loss)  # Average over batch dimension if needed        
-        recon_loss = jnp.mean(snr_weight*recon_loss)  # Average over batch dimension if needed        
+            vae_loss = 0.0
+        
+        recon_loss = jnp.mean(self.lazy_target_snr(alpha_t_squeezed, gamma_prime_t_squeezed) * recon_loss)
+        vae_loss = jnp.mean(vae_loss)
 
-        # y_mu = self.apply(params, mu_z_target, method='decode', training=training, rngs={'dropout': key})
-        # direct_recon_Loss = jnp.mean((y - y_mu)**2)
-
-        reg_weight = self.config.main.get("reg_weight", 0.0)
-        recon_weight = self.config.main.get("recon_weight", 0.0)
-
-        total_loss = snr_loss + recon_weight * recon_loss + reg_weight * reg_loss
-        # total_loss = total_loss/snr_weight_mean
+        total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss
         
         return total_loss, {
-            'flow_loss': snr_loss,
+            'flow_loss': flow_loss,
             'recon_loss': recon_loss, 
             'reg_loss': reg_loss,
+            'vae_loss': vae_loss,
             'total_loss': total_loss
         }
 
