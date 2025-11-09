@@ -98,7 +98,7 @@ def main():
                        help='Number of epochs to use dropout. If None, defaults to num_epochs')
     parser.add_argument('--batch_size', type=int, default=256,
                        help='Batch size')
-    parser.add_argument('--learning_rate', type=float, default=0.01,
+    parser.add_argument('--learning_rate', type=float, default=0.0025,
                        help='Learning rate')
     parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd'],
                        help='Optimizer')
