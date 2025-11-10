@@ -272,8 +272,9 @@ class VAE_flow(nn.Module):
         reg_loss = jnp.mean(dz_dt**2)
 
         if recon_loss_type == "cross_entropy":
-            recon_loss = jnp.sum(-y * jnp.log(y_pred + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
-            vae_loss   = jnp.sum(-y * jnp.log(y_vae + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
+            recon_loss = optax.losses.safe_softmax_cross_entropy(y_pred, labels)
+            vae_loss   = optax.losses.safe_softmax_cross_entropy(y_vae, labels)
+        
         elif recon_loss_type == "mse":
             recon_loss = jnp.sum((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
             vae_loss   = jnp.sum((y - y_vae)**2, axis=tuple(range(-self.y_ndims, 0)))
@@ -287,8 +288,8 @@ class VAE_flow(nn.Module):
         # KL regularization term: KL(q(z_0|z_target), p(z_0))
         # alpha_0 is guaranteed to be in (0, 1) by noise schedule clipping
         q_sigma_sq = 1.0 - alpha_0
-        mean_q_mu_sq_over_sigma_sq = alpha_0*jnp.mean(jnp.sum(z_target**2, axis=tuple(range(-self.z_ndims, 0))))
-        kl_z0_loss = 0.5 * (mean_q_mu_sq_over_sigma_sq - self.z_dim*(jnp.log(q_sigma_sq) + alpha_0))
+        mean_q_mu_sq = alpha_0*jnp.mean(jnp.sum(z_target**2, axis=tuple(range(-self.z_ndims, 0))))
+        kl_z0_loss = 0.5 * (mean_q_mu_sq - self.z_dim*(jnp.log(q_sigma_sq) + alpha_0))
 
         total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss + kl_z0_loss 
         
