@@ -100,7 +100,7 @@ def main():
                        help='Batch size')
     parser.add_argument('--learning_rate', type=float, default=0.0025,
                        help='Learning rate')
-    parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd'],
+    parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sgd'],
                        help='Optimizer')
     parser.add_argument('--warmup_steps', type=int, default=0,
                        help='Number of training steps for learning rate warmup (0 = no warmup)')
