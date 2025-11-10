@@ -241,7 +241,7 @@ class VAE_flow(nn.Module):
 
         # Compute Flow Field and Target Estimate
         dz_dt = self.apply(params, z_t, x, t, method='dz_dt', training=training, rngs={'dropout': key})    
-        z_target_est = dz_dt * (1.0-t_expanded) + z_t
+        z_target_est = dz_dt * (1.0 - t_expanded) + z_t
 
         # Compute Predictions
         y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})
@@ -274,24 +274,25 @@ class VAE_flow(nn.Module):
         if normalize_snr_weight:
             recon_snr_mean = jnp.mean(recon_snr)
             recon_snr = recon_snr / (recon_snr_mean + 1e-8)
+        
         recon_loss = jnp.mean(recon_snr * recon_loss)  # Average over batch dimension if needed      
         vae_loss = jnp.mean(vae_loss)
 
         # KL regularization term: KL(q(z_0|z_target), p(z_0))
         # alpha_0 is guaranteed to be in (0, 1) by noise schedule clipping
-        q_sigma_sq = 1.0 - alpha_0
-        mean_q_mu_sq_over_sigma_sq = alpha_0/q_sigma_sq*jnp.mean(jnp.sum(z_target**2, axis=tuple(range(-self.z_ndims, 0))))
-        kl_z0_loss = 0.5 * (mean_q_mu_sq_over_sigma_sq + self.z_dim*(jnp.log(q_sigma_sq) - 1.0))
+        # q_sigma_sq = 1.0 - alpha_0
+        # mean_q_mu_sq_over_sigma_sq = alpha_0/q_sigma_sq*jnp.mean(jnp.sum(z_target**2, axis=tuple(range(-self.z_ndims, 0))))
+        # kl_z0_loss = 0.5 * (mean_q_mu_sq_over_sigma_sq + self.z_dim*(jnp.log(q_sigma_sq) - 1.0))
 
 
-        total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss + kl_z0_loss  
+        total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss # + kl_z0_loss  
         
         return total_loss, {
             'flow_loss': flow_loss,
             'recon_loss': recon_loss, 
             'reg_loss': reg_loss,
             'vae_loss': vae_loss,
-            'kl_z0_loss': kl_z0_loss,
+            'kl_z0_loss': 0.0, # kl_z0_loss,
             'total_loss': total_loss
         }
 
