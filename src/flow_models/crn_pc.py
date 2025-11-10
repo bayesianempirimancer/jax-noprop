@@ -28,7 +28,7 @@ from src.embeddings.point_cloud_positional_encoding import fourier_features_2d, 
 from src.layers.configs import AttentionConfig
 from src.layers.mlp import Mlp
 from src.layers.concatsquash import ConcatSquash
-from src.flow_models.crn_attention_blocks import PointCloudSelfAttentionBlock
+from src.flow_models.crn_attention_blocks import DitAttentionBlock
 from src.utils.activation_utils import get_activation_function
 
 
@@ -43,7 +43,7 @@ class Config(BaseConfig):
     config: FrozenDict = field(default_factory=lambda: FrozenDict({
         "point_dim": 3,  # Spatial dimension (2 for 2D, 3 for 3D)
         "z_num_points": 100,  # Fixed number of points in z
-        "feature_dim": 16,  # Feature dimension for x and z (excluding position)
+        "feature_dim": 16,  # Feature dimension for x and z (excluding position). Can be 0 for position-only points.
         "embed_dim": 64,
         "fourier_num_frequencies": 10,
         "fourier_include_original": True,
@@ -67,6 +67,7 @@ class PointCloudConditionalResnet(nn.Module):
     
     This architecture processes point clouds x and z:
     - Each point consists of position (first D elements) and features (remaining elements)
+    - Supports feature_dim = 0 for position-only point clouds (no features)
     - Positions are encoded using Fourier features
     - Fourier features are combined with point features via ConcatSquash
     - z and x embeddings are concatenated (z first, then x) and processed through self-attention
@@ -122,7 +123,7 @@ class PointCloudConditionalResnet(nn.Module):
         # Create self-attention blocks for concatenated z,x point clouds
         time_conditioning_method = self.config.get("time_conditioning_method", "film")
         self.self_attention_blocks = [
-            PointCloudSelfAttentionBlock(
+            DitAttentionBlock(
                 embed_dim=self.config["embed_dim"],
                 mlp_ratio=self.config["mlp_ratio"],
                 activation_fn=self.config["activation_fn"],
@@ -143,11 +144,16 @@ class PointCloudConditionalResnet(nn.Module):
             name='z_mlp'
         )
         
-        # Output projection: embed_dim -> z_total_dim (position + features)
+        # Output MLP: embed_dim -> z_total_dim (position + features)
+        # This MLP removes any positional information that may have leaked through transformer processing
+        # Keeps hidden dimension at embed_dim until final projection
         z_total_dim = self.config["point_dim"] + self.config["feature_dim"]
-        self.output_proj = nn.Dense(
-            z_total_dim,
-            name='output_proj'
+        self.output_mlp = Mlp(
+            hidden_features=self.config["embed_dim"],  # Keep at embed_dim, not embed_dim * mlp_ratio
+            out_features=z_total_dim,
+            act_layer=activation_fn,
+            dropout_rate=self.config["dropout_rate"],
+            name='output_mlp'
         )
     
     def _extract_positions_and_features(
@@ -161,14 +167,19 @@ class PointCloudConditionalResnet(nn.Module):
         Args:
             points: Point cloud [batch, num_points, point_dim + feature_dim]
             point_dim: Spatial dimension (D)
-            feature_dim: Feature dimension
+            feature_dim: Feature dimension (can be 0 for position-only points)
             
         Returns:
             positions: [batch, num_points, point_dim]
-            features: [batch, num_points, feature_dim]
+            features: [batch, num_points, feature_dim] (empty array if feature_dim = 0)
         """
         positions = points[:, :, :point_dim]
-        features = points[:, :, point_dim:]
+        if feature_dim > 0:
+            features = points[:, :, point_dim:]
+        else:
+            # Return empty features array with correct shape when feature_dim = 0
+            batch_size, num_points = points.shape[:2]
+            features = jnp.empty((batch_size, num_points, 0), dtype=points.dtype)
         return positions, features
     
     def _apply_fourier_encoding(
@@ -217,8 +228,10 @@ class PointCloudConditionalResnet(nn.Module):
         Args:
             z: z point cloud [batch, z_num_points, z_total_dim]
                First point_dim elements are position, remaining are features
+               z_total_dim = point_dim + feature_dim (feature_dim can be 0)
             x: x point cloud [batch, x_num_points, x_total_dim] (optional)
                First point_dim elements are position, remaining are features
+               x_total_dim = point_dim + feature_dim (feature_dim can be 0)
                Can have variable number of points
             t: Time values [batch] or scalar (optional)
             x_mask: Boolean mask for x points [batch, x_num_points] where True=valid, False=masked (optional)
@@ -268,7 +281,12 @@ class PointCloudConditionalResnet(nn.Module):
         z_fourier = self._apply_fourier_encoding(z_positions)  # [batch_flat, z_num_points, fourier_feature_dim]
         
         # Combine Fourier features with z features via ConcatSquash
-        z_embed = self.z_concat_squash(z_fourier, z_features)  # [batch_flat, z_num_points, embed_dim]
+        # Handle case where feature_dim = 0 (no features, only positions)
+        if feature_dim > 0:
+            z_embed = self.z_concat_squash(z_fourier, z_features)  # [batch_flat, z_num_points, embed_dim]
+        else:
+            # Only Fourier features, no point features
+            z_embed = self.z_concat_squash(z_fourier)  # [batch_flat, z_num_points, embed_dim]
         
         # Process x if provided
         x_embed = None
@@ -297,7 +315,12 @@ class PointCloudConditionalResnet(nn.Module):
             x_fourier = self._apply_fourier_encoding(x_positions)  # [batch_flat, x_num_points, fourier_feature_dim]
             
             # Combine Fourier features with x features via ConcatSquash
-            x_embed = self.x_concat_squash(x_fourier, x_features)  # [batch_flat, x_num_points, embed_dim]
+            # Handle case where feature_dim = 0 (no features, only positions)
+            if feature_dim > 0:
+                x_embed = self.x_concat_squash(x_fourier, x_features)  # [batch_flat, x_num_points, embed_dim]
+            else:
+                # Only Fourier features, no point features
+                x_embed = self.x_concat_squash(x_fourier)  # [batch_flat, x_num_points, embed_dim]
             
             # Process x_mask if provided
             if x_mask is not None:
@@ -353,8 +376,8 @@ class PointCloudConditionalResnet(nn.Module):
         embed_dim = self.config["embed_dim"]
         z_embed = self.z_mlp(z_embed, embed_dim, training=training)
         
-        # Project back to z_total_dim (position + features)
-        z_output = self.output_proj(z_embed)  # [batch_flat, z_num_points, z_total_dim]
+        # Final output MLP: removes positional information and projects to z_total_dim (position + features)
+        z_output = self.output_mlp(z_embed, embed_dim, training=training)  # [batch_flat, z_num_points, z_total_dim]
         
         # Reshape back to original batch shape
         output = z_output.reshape(batch_shape + (z_num_points, z_total_dim))

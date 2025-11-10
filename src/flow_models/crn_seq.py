@@ -1,9 +1,8 @@
 """
 Sequence-to-Sequence Transformer Conditional ResNet architectures for NoProp implementations.
 
-This module provides transformer-based sequence-to-sequence models with TwistedAttention,
-a time-aware attention mechanism that perturbs QKV projection matrices based on time.
-Models can be used with the NoProp algorithm for sequence inputs.
+This module provides transformer-based sequence-to-sequence models with self-attention blocks
+for point clouds. Models can be used with the NoProp algorithm for sequence inputs.
 """
 
 from typing import Optional, Tuple, Callable
@@ -16,30 +15,30 @@ import flax.linen as nn
 from src.embeddings.time_embeddings import create_time_embedding
 from src.layers.configs import AttentionConfig
 from src.layers.mlp import Mlp
-from src.flow_models.crn_attention_blocks import TwistedAttentionBlock
+from src.flow_models.crn_attention_blocks import DitAttentionBlock
 
 from src.utils.activation_utils import get_activation_function
 
 
 class TransformerSeq2SeqConditionalResnet(nn.Module):
     """
-    Sequence-to-Sequence Transformer Conditional ResNet with TwistedAttention.
+    Sequence-to-Sequence Transformer Conditional ResNet with DitAttentionBlock.
     
     This architecture processes sequences x and z using transformer blocks:
     - x and z sequences are concatenated and processed through self-attention blocks
-    - Uses TwistedAttention: time-dependent QKV matrices that are perturbed by time embeddings
-    - Positional embeddings (RoPE) are applied to the concatenated sequence
-    - Static features (x_static) are optionally embedded and prepended after RoPE
-    - Time embedding is integrated into TwistedAttention for dynamical system modeling
+    - Uses DitAttentionBlock with optional time conditioning (adaLN or FiLM)
+    - Static features (x_static) are optionally embedded and prepended
+    - Time embedding is integrated via adaptive normalization or FiLM modulation
     
     Args:
         latent_shape: Latent sequence shape tuple (e.g., (seq_len, 2)) - z is 2D (price, volume)
         output_shape: Output sequence shape tuple (e.g., (seq_len, embed_dim)) - output is in embed_dim
         input_shape: Conditional input sequence shape tuple (e.g., (seq_len, 2)) - x is 2D (price, volume)
-        embed_dim: Embedding dimension for transformer (default: 20)
+        embed_dim: Embedding dimension for transformer (default: 32)
         hidden_dims: Tuple of hidden layer dimensions for embeddings and MLPs
         time_embed_dim: Dimension of time embedding
         time_embed_method: Method for time embedding
+        time_conditioning_method: Method for time conditioning in attention blocks ("adaln", "film", or "none")
         activation_fn: Activation function to use (string)
         use_batch_norm: Whether to use batch normalization
         dropout_rate: Dropout rate for regularization
@@ -47,7 +46,6 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         num_heads: Number of attention heads
         mlp_ratio: Ratio for MLP hidden dimension relative to model dimension
         qkv_bias: Whether to use bias in QKV projections
-        rope_base: Base for RoPE frequency calculation (default: 10000.0)
         projection_seed: Random seed for 2D->embed_dim projection matrix (default: 42)
         x_static_dim: Dimension of static features x_static (default: 0, meaning no static features)
     """
@@ -58,6 +56,7 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
     hidden_dims: Tuple[int, ...] = (64,64)
     time_embed_dim: int = 32
     time_embed_method: str = "sinusoidal"
+    time_conditioning_method: Optional[str] = "adaln"  # "adaln", "film", or "none"
     activation_fn: str = "swish"
     use_batch_norm: bool = False
     dropout_rate: float = 0.1
@@ -65,8 +64,6 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
     num_heads: int = 8
     mlp_ratio: float = 4.0
     qkv_bias: bool = True
-    rope_base: float = 10000.0
-    lora_rank: int = 8  # Rank for LoRA decomposition in TwistedAttention
     projection_seed: int = 42
     x_static_dim: int = 0  # 0 means no static features
     
@@ -106,10 +103,10 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         # We'll create the embedding layer when x_static is first provided
         # This allows x_static to have any dimension and we'll embed it to embed_dim
         
-        # Time embedding module (for TwistedAttention)
+        # Time embedding module (for DitAttentionBlock)
         self.time_embed = create_time_embedding(embed_dim=self.time_embed_dim, method=self.time_embed_method)
         
-        # No output projection - z should remain in embed_dim space as provided by encoder
+        # Output MLP will be added in setup() to remove positional info and map from embed_dim to output dimension
         
         # Attention configuration
         self.attn_config = AttentionConfig(
@@ -122,16 +119,13 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         
         # Create self-attention blocks for concatenated x,z sequences
         self.self_attention_blocks = [
-            TwistedAttentionBlock(
+            DitAttentionBlock(
                 embed_dim=self.embed_dim,
                 mlp_ratio=self.mlp_ratio,
                 activation_fn=self.activation_fn,  # Pass as string
                 dropout_rate=self.dropout_rate,
                 attn_config=self.attn_config,
-                time_embed_dim=self.time_embed_dim,
-                time_embed_method=self.time_embed_method,
-                rope_base=self.rope_base,
-                lora_rank=self.lora_rank,
+                time_conditioning_method=self.time_conditioning_method,
                 name=f'self_attention_block_{i}'
             )
             for i in range(self.num_layers)
@@ -144,6 +138,19 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
             act_layer=activation_fn,
             dropout_rate=self.dropout_rate,
             name='z_mlp'
+        )
+        
+        # Output MLP: embed_dim -> output dimension per timestep
+        # This MLP removes any positional information that may have leaked through transformer processing
+        # Keeps hidden dimension at embed_dim until final projection
+        # output_shape is (seq_len, output_dim_per_timestep)
+        output_dim_per_timestep = self.output_shape[-1] if len(self.output_shape) >= 2 else self.output_shape[0]
+        self.output_mlp = Mlp(
+            hidden_features=self.embed_dim,  # Keep at embed_dim, not embed_dim * mlp_ratio
+            out_features=output_dim_per_timestep,
+            act_layer=activation_fn,
+            dropout_rate=self.dropout_rate,
+            name='output_mlp'
         )
     
     @nn.compact
@@ -276,7 +283,6 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
             xz_embed = z_embed  # [batch, z_seq_len, embed_dim]
         
         # Apply static feature embeddings if x_static is provided
-        # (RoPE is now applied inside TwistedAttention to Q and K)
         if x_static is not None:
             # Flatten batch for processing
             x_static_flat = x_static.reshape(-1, x_static.shape[-1])  # [batch, x_static_dim]
@@ -307,9 +313,9 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
             x_end = x_start + x_seq_len
             combined_mask = combined_mask.at[:, x_start:x_end].set(x_mask_processed)
         
-        # Process time embedding (for TwistedAttention)
+        # Process time embedding (for DitAttentionBlock)
         t_embed_vec = None
-        if t is not None:
+        if t is not None and self.time_conditioning_method != "none":
             t = jnp.broadcast_to(t, batch_shape)
             t_flat = t.reshape(-1)
             t_embed_vec = self.time_embed(t_flat)  # [batch, time_embed_dim]
@@ -327,13 +333,13 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         # Pass z through MLP (no additional encoding, just processing)
         z_embed = self.z_mlp(z_embed, self.embed_dim, training=training)
         
-        # No output projection - z remains in embed_dim space as provided by encoder
-        # z_embed shape: (batch, seq_len, embed_dim)
+        # Final output MLP: removes positional information and projects to output dimension
+        z_output = self.output_mlp(z_embed, self.embed_dim, training=training)  # [batch, z_seq_len, output_dim_per_timestep]
         
-        # Reshape back to original batch shape and latent_shape
-        # Output should match latent_shape (seq_len, embed_dim)
-        output = z_embed.reshape((-1, *self.latent_shape))
-        output = output.reshape(batch_shape + self.latent_shape)
+        # Reshape back to original batch shape and output_shape
+        # Output should match output_shape (seq_len, output_dim_per_timestep)
+        output = z_output.reshape((-1, *self.output_shape))
+        output = output.reshape(batch_shape + self.output_shape)
         
         return output
 

@@ -3,7 +3,7 @@ Attention blocks for Conditional ResNet architectures.
 
 This module provides attention mechanisms and attention blocks used in various CRN models:
 - TwistedAttentionBlock: Complete transformer block with time-dependent QKV matrices
-- PointCloudSelfAttentionBlock: Self-attention block for point clouds with time conditioning
+- DitAttentionBlock: Self-attention block with DiT-style time conditioning (adaLN/FiLM)
 """
 
 from typing import Optional, Tuple
@@ -22,13 +22,19 @@ class TwistedAttentionBlock(nn.Module):
     """Self-attention block with time-dependent QKV matrices for dynamical systems.
     
     This is a complete transformer block that includes:
-    - LayerNorm before attention
+    - LayerNorm before attention (optionally with adaLN)
     - TwistedAttention: Time perturbs (twists) the Q, K, V projection matrices themselves
-    - Dropout and residual connection after attention
-    - LayerNorm before MLP
-    - MLP with dropout and residual connection
+    - Dropout and residual connection after attention (optionally gated)
+    - LayerNorm before MLP (optionally with adaLN)
+    - MLP with dropout and residual connection (optionally gated)
     
-    Time perturbs the QKV matrices using LoRA (Low-Rank Adaptation) decomposition:
+    Time conditioning can be applied via:
+    - "lora": LoRA-based QKV conditioning (default, maintains backward compatibility)
+    - "adaln": Adaptive LayerNorm Zero (DiT approach) with gated residuals
+    - "both": Both LoRA QKV conditioning and adaLN
+    - "none": No time conditioning
+    
+    LoRA perturbs the QKV matrices using Low-Rank Adaptation decomposition:
     Q_time(t) = B_q(t) @ A_q(t), where A_q: [rank, x_embed_dim], B_q: [dim, rank]
     Same for K and V.
     
@@ -54,6 +60,7 @@ class TwistedAttentionBlock(nn.Module):
     rope_base: float = 10000.0
     use_rope: bool = True
     lora_rank: int = 8  # Rank for LoRA decomposition of time-dependent QKV perturbations
+    time_conditioning_method: str = "lora"  # "lora", "adaln", "both", or "none"
     
     def setup(self):
         # Convert activation function string to callable
@@ -64,6 +71,23 @@ class TwistedAttentionBlock(nn.Module):
         
         # Base QKV projection (without time conditioning)
         self.qkv_base = nn.Dense(self.attn_config.dim * 3, use_bias=self.attn_config.qkv_bias, name='qkv_base')
+        
+        # Set up time conditioning
+        if self.time_conditioning_method in ("adaln", "both"):
+            # Adaptive LayerNorm (adaLN-Zero): modulate LayerNorm parameters
+            # Output: [batch, 6 * embed_dim] for scale, shift, gate (3 for attention, 3 for MLP)
+            # Note: In DiT, this is initialized to zero (adaLN-Zero) for training stability
+            self.t_adaln = nn.Dense(
+                self.embed_dim * 6,  # 3 params (scale, shift, gate) * 2 blocks (attn, mlp)
+                kernel_init=nn.initializers.zeros,  # Zero initialization (adaLN-Zero)
+                bias_init=nn.initializers.zeros,
+                name='t_adaln'
+            )
+        elif self.time_conditioning_method not in ("lora", "none"):
+            raise ValueError(
+                f"Unknown time_conditioning_method: {self.time_conditioning_method}. "
+                f"Options: 'lora', 'adaln', 'both', 'none'"
+            )
         
         # Dropout after attention
         self.dropout1 = nn.Dropout(rate=self.dropout_rate)
@@ -147,31 +171,58 @@ class TwistedAttentionBlock(nn.Module):
         return q_rotated, k_rotated
     
     @nn.compact
-    def _twisted_attention(self, x: jnp.ndarray, t: Optional[jnp.ndarray] = None, mask: Optional[jnp.ndarray] = None, training: bool = True) -> jnp.ndarray:
-        """
-        Forward pass of twisted attention mechanism (internal method) using LoRA-style low-rank adaptations.
+    def __call__(self, x: jnp.ndarray, t: Optional[jnp.ndarray] = None, mask: Optional[jnp.ndarray] = None, 
+                 training: bool = True) -> jnp.ndarray:
+        """Forward pass through twisted attention block.
         
         Args:
             x: Input tensor [batch, seq_len, embed_dim]
-            t: Time embedding [batch, time_embed_dim] or None
+            t: Time embedding [batch, time_embed_dim] (optional, used for time conditioning)
             mask: Boolean mask [batch, seq_len] where True=valid, False=masked (optional)
-                 Prevents attention TO masked positions (columns of attention matrix)
             training: Whether in training mode
             
         Returns:
             Output tensor [batch, seq_len, embed_dim]
         """
-        B, N, x_embed_dim = x.shape
+        # Apply adaLN if enabled
+        method = self.time_conditioning_method or "lora"
+        use_adaln = method in ("adaln", "both")
+        use_lora = method in ("lora", "both")
+        
+        if use_adaln and t is not None:
+            # Adaptive LayerNorm (adaLN-Zero): modulate norm parameters with time
+            # Standard DiT approach: 6 parameters (scale, shift, gate for both attn and mlp)
+            t_params = self.t_adaln(t)  # [batch, 6 * embed_dim]
+            # Split into 6 parameters: [scale_attn, shift_attn, gate_attn, scale_mlp, shift_mlp, gate_mlp]
+            scale_attn, shift_attn, gate_attn, scale_mlp, shift_mlp, gate_mlp = jnp.split(
+                t_params, 6, axis=-1
+            )  # Each: [batch, embed_dim]
+            
+            # Apply adaLN to attention block
+            x_mean = jnp.mean(x, axis=-1, keepdims=True)  # [batch, seq_len, 1]
+            x_var = jnp.var(x, axis=-1, keepdims=True)  # [batch, seq_len, 1]
+            x_norm = (x - x_mean) / jnp.sqrt(x_var + 1e-5)
+            x_norm = (1.0 + scale_attn[:, None, :]) * x_norm + shift_attn[:, None, :]
+        else:
+            # Standard LayerNorm
+            x_norm = self.norm1(x)
+            gate_attn = None
+            scale_mlp = None
+            shift_mlp = None
+            gate_mlp = None
+        
+        # Twisted attention mechanism using LoRA-style low-rank adaptations
+        B, N, x_embed_dim = x_norm.shape
         if x_embed_dim != self.attn_config.dim:
             raise AssertionError(
                 f"Input embedding dimension ({x_embed_dim}) should match layer embedding dimension ({self.attn_config.dim})."
             )
         
         # Compute base QKV from x
-        qkv_base = self.qkv_base(x)  # [batch, seq_len, dim * 3]
+        qkv_base = self.qkv_base(x_norm)  # [batch, seq_len, dim * 3]
         
-        # Apply time conditioning if time is provided (using LoRA decomposition)
-        if t is not None:
+        # Apply LoRA-based time conditioning if enabled and time is provided
+        if use_lora and t is not None:
             # LoRA decomposition: W_time = B @ A where:
             # - A: [rank, x_embed_dim] (down-projection)
             # - B: [config.dim, rank] (up-projection)
@@ -211,7 +262,7 @@ class TwistedAttentionBlock(nn.Module):
                 # B @ A: [batch, dim, rank] @ [batch, rank, x_embed_dim] -> [batch, dim, x_embed_dim]
                 ba = jnp.einsum('bdr,brj->bdj', t_lora_b[:, i, :, :], t_lora_a[:, i, :, :])
                 # x @ (B @ A).T: [batch, seq_len, x_embed_dim] @ [batch, x_embed_dim, dim] -> [batch, seq_len, dim]
-                qkv_t_i = jnp.einsum('bnj,bdj->bnd', x, ba)
+                qkv_t_i = jnp.einsum('bnj,bdj->bnd', x_norm, ba)
                 qkv_t_list.append(qkv_t_i)
             
             # Concatenate Q, K, V: [batch, seq_len, 3 * dim]
@@ -276,43 +327,49 @@ class TwistedAttentionBlock(nn.Module):
         attn = nn.Dropout(self.attn_config.attn_drop)(attn, deterministic=not training)
         
         # Apply attention to values
-        x = (attn @ v).transpose(0, 2, 1, 3).reshape(B, N, x_embed_dim)
+        x_attn = (attn @ v).transpose(0, 2, 1, 3).reshape(B, N, x_embed_dim)
         
-        return x
-    
-    def __call__(self, x: jnp.ndarray, t: Optional[jnp.ndarray] = None, mask: Optional[jnp.ndarray] = None, 
-                 training: bool = True) -> jnp.ndarray:
-        """Forward pass through twisted attention block.
+        # Gated residual connection for attention
+        if gate_attn is not None:
+            x = x + gate_attn[:, None, :] * self.dropout1(x_attn, deterministic=not training)
+        else:
+            x = x + self.dropout1(x_attn, deterministic=not training)
         
-        Args:
-            x: Input tensor [batch, seq_len, embed_dim]
-            t: Time embedding [batch, time_embed_dim] (optional, used for time conditioning)
-            mask: Boolean mask [batch, seq_len] where True=valid, False=masked (optional)
-            training: Whether in training mode
-            
-        Returns:
-            Output tensor [batch, seq_len, embed_dim]
-        """
-        # Self-attention block with time conditioning
-        x_norm = self.norm1(x)
-        x_attn = self._twisted_attention(x_norm, t=t, mask=mask, training=training)
-        x = x + self.dropout1(x_attn, deterministic=not training)
+        # MLP block with optional adaLN
+        if use_adaln and scale_mlp is not None:
+            # Apply adaLN to MLP block
+            x_mean_mlp = jnp.mean(x, axis=-1, keepdims=True)  # [batch, seq_len, 1]
+            x_var_mlp = jnp.var(x, axis=-1, keepdims=True)  # [batch, seq_len, 1]
+            x_norm2 = (x - x_mean_mlp) / jnp.sqrt(x_var_mlp + 1e-5)
+            x_norm2 = (1.0 + scale_mlp[:, None, :]) * x_norm2 + shift_mlp[:, None, :]
+        else:
+            x_norm2 = self.norm2(x)
         
-        # MLP block
-        x_norm2 = self.norm2(x)
         x_mlp_out = self.mlp(x_norm2, self.embed_dim, training=training)
-        x = x + self.dropout2(x_mlp_out, deterministic=not training)
+        
+        # Gated residual connection for MLP
+        if gate_mlp is not None:
+            x = x + gate_mlp[:, None, :] * self.dropout2(x_mlp_out, deterministic=not training)
+        else:
+            x = x + self.dropout2(x_mlp_out, deterministic=not training)
         
         return x
 
 
-class PointCloudSelfAttentionBlock(nn.Module):
-    """Self-attention block for point clouds with time-conditioned standard attention.
+class DitAttentionBlock(nn.Module):
+    """Self-attention block with DiT-style time conditioning.
     
-    Time conditioning can be applied via:
-    - "adaln": Adaptive LayerNorm Zero (DiT approach)
-    - "film": FiLM (Feature-wise Linear Modulation)
+    This block implements a standard transformer block with optional time conditioning
+    similar to the Diffusion Transformer (DiT) architecture. Time conditioning can be
+    applied via:
+    - "adaln": Adaptive LayerNorm Zero (DiT approach) - uses 6 parameters (scale, shift, gate
+      for both attention and MLP blocks) with zero initialization
+    - "film": FiLM (Feature-wise Linear Modulation) - uses 6 parameters (scale, shift, gate
+      for both attention and MLP blocks)
     - "none": No time conditioning
+    
+    When time conditioning is enabled, adaLN-Zero is applied to both the attention and MLP
+    blocks, and gated residual connections are used (x = x + gate * output).
     """
     embed_dim: int
     mlp_ratio: float
@@ -333,19 +390,19 @@ class PointCloudSelfAttentionBlock(nn.Module):
         # Set up time conditioning for standard attention
         if self.time_conditioning_method == "adaln":
             # Adaptive LayerNorm (adaLN-Zero): modulate LayerNorm parameters
-            # Output: [batch, 2 * embed_dim] for scale and shift
+            # Output: [batch, 6 * embed_dim] for scale, shift, gate (3 for attention, 3 for MLP)
             # Note: In DiT, this is initialized to zero (adaLN-Zero) for training stability
             self.t_adaln = nn.Dense(
-                self.embed_dim * 2,
+                self.embed_dim * 6,  # 3 params (scale, shift, gate) * 2 blocks (attn, mlp)
                 kernel_init=nn.initializers.zeros,  # Zero initialization (adaLN-Zero)
                 bias_init=nn.initializers.zeros,
                 name='t_adaln'
             )
         elif self.time_conditioning_method == "film":
             # FiLM: Feature-wise Linear Modulation
-            # Output: [batch, 2 * embed_dim] for scale and shift
+            # Output: [batch, 6 * embed_dim] for scale, shift, gate (3 for attention, 3 for MLP)
             self.t_film = nn.Dense(
-                self.embed_dim * 2,
+                self.embed_dim * 6,  # 3 params (scale, shift, gate) * 2 blocks (attn, mlp)
                 name='t_film'
             )
         elif self.time_conditioning_method == "none":
@@ -385,29 +442,46 @@ class PointCloudSelfAttentionBlock(nn.Module):
         
         if method == "adaln":
             # Adaptive LayerNorm (adaLN-Zero): modulate norm parameters with time
-            # This matches DiT's approach: time modulates LayerNorm scale and shift
+            # Standard DiT approach: 6 parameters (scale, shift, gate for both attn and mlp)
             if t is not None:
-                t_params = self.t_adaln(t)  # [batch, 2 * embed_dim]
-                scale, shift = jnp.split(t_params, 2, axis=-1)  # Each: [batch, embed_dim]
-                # Apply adaptive normalization (DiT-style)
-                # Standard LayerNorm computation
+                t_params = self.t_adaln(t)  # [batch, 6 * embed_dim]
+                # Split into 6 parameters: [scale_attn, shift_attn, gate_attn, scale_mlp, shift_mlp, gate_mlp]
+                scale_attn, shift_attn, gate_attn, scale_mlp, shift_mlp, gate_mlp = jnp.split(
+                    t_params, 6, axis=-1
+                )  # Each: [batch, embed_dim]
+                
+                # Apply adaLN to attention block
                 x_mean = jnp.mean(x, axis=-1, keepdims=True)  # [batch, seq_len, 1]
                 x_var = jnp.var(x, axis=-1, keepdims=True)  # [batch, seq_len, 1]
                 x_norm = (x - x_mean) / jnp.sqrt(x_var + 1e-5)
-                # Apply time-dependent scale and shift (adaLN-Zero formula)
-                x_norm = (1.0 + scale[:, None, :]) * x_norm + shift[:, None, :]
+                x_norm = (1.0 + scale_attn[:, None, :]) * x_norm + shift_attn[:, None, :]
             else:
                 x_norm = self.norm1(x)
+                gate_attn = None
+                scale_mlp = None
+                shift_mlp = None
+                gate_mlp = None
         elif method == "film":
-            # FiLM: Feature-wise Linear Modulation
+            # FiLM: Feature-wise Linear Modulation with gates
             x_norm = self.norm1(x)
             if t is not None:
-                t_film = self.t_film(t)  # [batch, 2 * embed_dim]
-                scale, shift = jnp.split(t_film, 2, axis=-1)  # Each: [batch, embed_dim]
-                x_norm = (1.0 + scale[:, None, :]) * x_norm + shift[:, None, :]
+                t_film = self.t_film(t)  # [batch, 6 * embed_dim]
+                scale_attn, shift_attn, gate_attn, scale_mlp, shift_mlp, gate_mlp = jnp.split(
+                    t_film, 6, axis=-1
+                )  # Each: [batch, embed_dim]
+                x_norm = (1.0 + scale_attn[:, None, :]) * x_norm + shift_attn[:, None, :]
+            else:
+                gate_attn = None
+                scale_mlp = None
+                shift_mlp = None
+                gate_mlp = None
         elif method == "none":
             # No time conditioning
             x_norm = self.norm1(x)
+            gate_attn = None
+            scale_mlp = None
+            shift_mlp = None
+            gate_mlp = None
         else:
             raise ValueError(
                 f"Unknown time_conditioning_method: {method}. "
@@ -422,12 +496,29 @@ class PointCloudSelfAttentionBlock(nn.Module):
             mask_float = jnp.where(mask, 1.0, 0.0)[:, :, None]  # [batch, seq_len, 1]
             x_attn = x_attn * mask_float
         
-        x = x + self.dropout1(x_attn, deterministic=not training)
+        # Gated residual connection for attention
+        if gate_attn is not None:
+            x = x + gate_attn[:, None, :] * self.dropout1(x_attn, deterministic=not training)
+        else:
+            x = x + self.dropout1(x_attn, deterministic=not training)
         
-        # MLP block
-        x_norm2 = self.norm2(x)
+        # MLP block with adaLN
+        if method in ("adaln", "film") and scale_mlp is not None:
+            # Apply adaLN to MLP block
+            x_mean_mlp = jnp.mean(x, axis=-1, keepdims=True)  # [batch, seq_len, 1]
+            x_var_mlp = jnp.var(x, axis=-1, keepdims=True)  # [batch, seq_len, 1]
+            x_norm2 = (x - x_mean_mlp) / jnp.sqrt(x_var_mlp + 1e-5)
+            x_norm2 = (1.0 + scale_mlp[:, None, :]) * x_norm2 + shift_mlp[:, None, :]
+        else:
+            x_norm2 = self.norm2(x)
+        
         x_mlp_out = self.mlp(x_norm2, self.embed_dim, training=training)
-        x = x + self.dropout2(x_mlp_out, deterministic=not training)
+        
+        # Gated residual connection for MLP
+        if gate_mlp is not None:
+            x = x + gate_mlp[:, None, :] * self.dropout2(x_mlp_out, deterministic=not training)
+        else:
+            x = x + self.dropout2(x_mlp_out, deterministic=not training)
         
         return x
 

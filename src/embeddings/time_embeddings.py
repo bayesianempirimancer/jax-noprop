@@ -166,6 +166,93 @@ class LogFreqTimeEmbedding(nn.Module):
         
         # Squeeze out the batch dimension if input was scalar
         return embeddings
+
+class FourierTimeEmbedding(nn.Module):
+    """
+    Simple Fourier time embedding using evenly spaced frequencies.
+    
+    This creates embeddings using sin and cos functions with evenly spaced
+    frequencies from 0 to dim//2.
+    """
+    
+    embed_dim: int
+    
+    def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
+        """
+        Create Fourier time embedding.
+        
+        Args:
+            t: Time value(s) ∈ [0, 1]
+            
+        Returns:
+            Time embedding [embed_dim,] or [batch_shape..., embed_dim]
+        """
+        # Convert scalar to (1,) array to unify handling
+        # Match original embeddings.py behavior: expects t to be 2D [batch, 1]
+        is_scalar = isinstance(t, float) or (hasattr(t, 'ndim') and t.ndim == 0)
+        if is_scalar:
+            t = jnp.array([t])[:, None]  # shape [1, 1]
+        elif t.ndim == 1:
+            t = t[:, None]  # shape [batch, 1]
+        
+        # Create evenly spaced frequencies (matching embeddings.py behavior)
+        # Note: This creates 2*embed_dim output (sin + cos), matching original implementation
+        freqs = jnp.linspace(0, self.embed_dim // 2, self.embed_dim)
+        
+        # Apply frequencies to time: t has shape (batch_shape, 1), freqs has shape (embed_dim,)
+        # Result: (batch_shape, embed_dim) for sin, (batch_shape, embed_dim) for cos
+        # Final: (batch_shape, 2*embed_dim)
+        sin_embed = jnp.sin(jnp.pi * t * freqs)
+        cos_embed = jnp.cos(jnp.pi * t * freqs)
+        
+        embeddings = jnp.concatenate([sin_embed, cos_embed], axis=-1)
+        
+        # Squeeze out the batch dimension if input was scalar
+        return embeddings
+
+class GaussianTimeEmbedding(nn.Module):
+    """
+    Gaussian time embedding using Gaussian basis functions.
+    
+    This creates time embeddings using Gaussian basis functions centered
+    at different time points. This can be useful for capturing temporal smoothness.
+    """
+    
+    embed_dim: int
+    sigma: float = 1.0
+    
+    def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
+        """
+        Create Gaussian time embedding.
+        
+        Args:
+            t: Time value(s) ∈ [0, 1]
+            
+        Returns:
+            Time embedding [embed_dim,] or [batch_shape..., embed_dim]
+        """
+        # Convert scalar to (1,) array to unify handling
+        is_scalar = isinstance(t, float) or (hasattr(t, 'ndim') and t.ndim == 0)
+        if is_scalar:
+            t = jnp.array(t)[None]
+        elif t.ndim == 1:
+            t = t[:, None]
+        
+        # Create Gaussian centers evenly spaced from 0 to 1
+        centers = jnp.linspace(0, 1, self.embed_dim)
+        
+        # Compute Gaussian activations
+        # t has shape (batch_shape, 1), centers has shape (embed_dim,)
+        # Broadcast: (batch_shape, 1) - (1, embed_dim) -> (batch_shape, embed_dim)
+        t_expanded = t  # [batch_shape, 1]
+        centers_expanded = centers[None, :]  # [1, embed_dim]
+        
+        # Gaussian: exp(-(t - center)^2 / (2 * sigma^2))
+        diff = t_expanded - centers_expanded
+        gaussian_emb = jnp.exp(-(diff ** 2) / (2 * self.sigma ** 2))
+        
+        # Squeeze out the batch dimension if input was scalar
+        return gaussian_emb
         
 
 # Convenience functions for creating time embeddings
@@ -173,25 +260,31 @@ def create_time_embedding(embed_dim: int,
                          method: str,
                          min_freq: float = 0.1,
                          max_freq: float = 10.0,
-                         T_max: float = 1.0):
+                         T_max: float = 1.0,
+                         sigma: float = 1.0):
     """
     Create a time embedding instance.
     
     Args:
         embed_dim: Dimension of the time embedding
-        method: Method to use ("fourier", "log_freq", "cyclical_fourier", "sinusoidal", "linear", "constant")
+        method: Method to use ("fourier", "log_freq", "cyclical_fourier", "sinusoidal", "linear", "constant", "gaussian")
         min_freq: Minimum frequency for log frequency embeddings
         max_freq: Maximum frequency for Fourier embeddings
         T_max: Maximum period for cyclical Fourier embeddings
+        sigma: Standard deviation for Gaussian embeddings
         
     Returns:
         TimeEmbedding instance
     """
-    if method == "fourier" or method == "log_freq":
+    if method == "log_freq":
         return LogFreqTimeEmbedding(
             embed_dim=embed_dim,
             min_freq=min_freq,
             max_freq=max_freq
+        )
+    elif method == "fourier":
+        return FourierTimeEmbedding(
+            embed_dim=embed_dim
         )
     elif method == "cyclical_fourier":
         return CyclicalFourierTimeEmbedding(
@@ -210,9 +303,109 @@ def create_time_embedding(embed_dim: int,
         return ConstantTimeEmbedding(
             embed_dim=embed_dim
         )
+    elif method == "gaussian":
+        return GaussianTimeEmbedding(
+            embed_dim=embed_dim,
+            sigma=sigma
+        )
     else:
-        raise ValueError(f"Unknown method: {method}. Use 'fourier', 'log_freq', 'cyclical_fourier', 'sinusoidal', 'linear', 'simple', or 'constant'")
+        raise ValueError(f"Unknown method: {method}. Use 'fourier', 'log_freq', 'cyclical_fourier', 'sinusoidal', 'linear', 'simple', 'constant', or 'gaussian'")
 
+# Backward compatibility wrapper functions (matching embeddings.py API)
+def sinusoidal_time_embedding(t: jnp.ndarray, dim: int) -> jnp.ndarray:
+    """Create sinusoidal time embeddings as used in the NoProp paper.
+    
+    This is a wrapper function for backward compatibility.
+    See SinusoidalTimeEmbedding class for details.
+    
+    Args:
+        t: Time values [batch_size] or [batch_size, 1]
+        dim: Embedding dimension (must be even for proper sin/cos pairing)
+        
+    Returns:
+        Time embeddings [batch_size, dim]
+    """
+    embedding = SinusoidalTimeEmbedding(embed_dim=dim)
+    return embedding(t)
+
+def linear_time_embedding(t: jnp.ndarray, dim: int) -> jnp.ndarray:
+    """Create linear time embeddings.
+    
+    This is a wrapper function for backward compatibility.
+    See LinearTimeEmbedding class for details.
+    
+    Args:
+        t: Time values [batch_size]
+        dim: Embedding dimension
+        
+    Returns:
+        Time embeddings [batch_size, dim]
+    """
+    embedding = LinearTimeEmbedding(embed_dim=dim)
+    return embedding(t)
+
+def fourier_time_embedding(t: jnp.ndarray, dim: int) -> jnp.ndarray:
+    """Create Fourier time embeddings.
+    
+    This is a wrapper function for backward compatibility.
+    See FourierTimeEmbedding class for details.
+    
+    Note: This returns 2*dim dimensions (sin + cos concatenated).
+    
+    Args:
+        t: Time values [batch_size] or [batch_size, 1]
+        dim: Embedding dimension
+        
+    Returns:
+        Time embeddings [batch_size, 2*dim]
+    """
+    embedding = FourierTimeEmbedding(embed_dim=dim)
+    return embedding(t)
+
+def gaussian_time_embedding(t: jnp.ndarray, dim: int, sigma: float = 1.0) -> jnp.ndarray:
+    """Create Gaussian time embeddings.
+    
+    This is a wrapper function for backward compatibility.
+    See GaussianTimeEmbedding class for details.
+    
+    Args:
+        t: Time values [batch_size] or [batch_size, 1]
+        dim: Embedding dimension
+        sigma: Standard deviation of Gaussian basis functions
+        
+    Returns:
+        Time embeddings [batch_size, dim]
+    """
+    embedding = GaussianTimeEmbedding(embed_dim=dim, sigma=sigma)
+    return embedding(t)
+
+def get_time_embedding(t: jnp.ndarray, dim: int, method: str = "sinusoidal", **kwargs) -> jnp.ndarray:
+    """Get time embedding using the specified method.
+    
+    This is a convenience function that allows switching between
+    different time embedding methods.
+    
+    Args:
+        t: Time values [batch_size]
+        dim: Embedding dimension
+        method: Embedding method ("sinusoidal", "fourier", "linear", "gaussian")
+        **kwargs: Additional arguments passed to embedding classes (e.g., sigma for gaussian)
+        
+    Returns:
+        Time embeddings [batch_size, dim] (or [batch_size, 2*dim] for fourier)
+        
+    Raises:
+        ValueError: If method is not supported
+    """
+    # Handle fourier method which expects 2D input in original implementation
+    if method == "fourier":
+        if t.ndim == 1:
+            t = t[:, None]
+        embedding = create_time_embedding(embed_dim=dim, method=method, **kwargs)
+        return embedding(t)
+    else:
+        embedding = create_time_embedding(embed_dim=dim, method=method, **kwargs)
+        return embedding(t)
 # Example usage and testing
 if __name__ == "__main__":
     import jax
@@ -223,27 +416,34 @@ if __name__ == "__main__":
     t_single = 0.5
     print(f"\nSingle time value: {t_single}")
     
-    # Test Fourier embedding
-    fourier_embed = fourier_time_embedding(t_single, embed_dim=8, max_freq=5.0)
-    print(f"Fourier embedding shape: {fourier_embed.shape}")
-    print(f"Fourier embedding values: {fourier_embed}")
-    
-    # Test simple embedding
-    simple_embed = simple_time_embedding(t_single, embed_dim=8)
-    print(f"Simple embedding shape: {simple_embed.shape}")
-    print(f"Simple embedding values: {simple_embed}")
-    
     # Test with batch of time values
     t_batch = jnp.array([0.0, 0.25, 0.5, 0.75, 1.0])
     print(f"\nBatch time values: {t_batch}")
     
-    fourier_batch = fourier_time_embedding(t_batch, embed_dim=6, max_freq=3.0)
-    print(f"Fourier batch shape: {fourier_batch.shape}")
-    print(f"Fourier batch values:\n{fourier_batch}")
-    
     # Test class-based usage
     print(f"\nClass-based usage:")
-    embedding = create_time_embedding(embed_dim=4, method="fourier")
-    class_embed = embedding(t_single)
-    print(f"Class embedding shape: {class_embed.shape}")
-    print(f"Class embedding values: {class_embed}")
+    
+    # Test Fourier embedding
+    fourier_embedding = create_time_embedding(embed_dim=8, method="fourier")
+    fourier_embed = fourier_embedding(t_single)
+    print(f"Fourier embedding shape: {fourier_embed.shape}")
+    print(f"Fourier embedding values: {fourier_embed}")
+    
+    # Test linear embedding
+    linear_embedding = create_time_embedding(embed_dim=8, method="linear")
+    linear_embed = linear_embedding(t_single)
+    print(f"Linear embedding shape: {linear_embed.shape}")
+    print(f"Linear embedding values: {linear_embed}")
+    
+    # Test sinusoidal embedding
+    sinusoidal_embedding = create_time_embedding(embed_dim=8, method="sinusoidal")
+    sinusoidal_embed = sinusoidal_embedding(t_batch)
+    print(f"Sinusoidal batch shape: {sinusoidal_embed.shape}")
+    print(f"Sinusoidal batch values:\n{sinusoidal_embed}")
+    
+    # Test Gaussian embedding
+    gaussian_embedding = create_time_embedding(embed_dim=6, method="gaussian", sigma=1.0)
+    gaussian_embed = gaussian_embedding(t_batch)
+    print(f"Gaussian batch shape: {gaussian_embed.shape}")
+    print(f"Gaussian batch values:\n{gaussian_embed}")
+

@@ -18,7 +18,7 @@ from typing import Tuple, Callable
 
 try:
     # Try relative imports first (when used as a module)
-    from ..embeddings.embeddings import get_time_embedding
+    from ..embeddings.time_embeddings import get_time_embedding
     from ..layers.concatsquash import ConcatSquash
     from .weights import load_pretrained_dinov2_vits14
     from .vit import DinoV2
@@ -27,7 +27,7 @@ except ImportError:
     import sys
     import os
     sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
-    from src.embeddings.embeddings import get_time_embedding
+    from src.embeddings.time_embeddings import get_time_embedding
     from src.layers.concatsquash import ConcatSquash
     from src.models.weights import load_pretrained_dinov2_vits14
     from src.models.vit import DinoV2

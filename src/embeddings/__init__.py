@@ -7,8 +7,19 @@ This module provides various embedding functions and classes for:
 - Noise schedules (linear, cosine, sigmoid, learnable)
 """
 
-# Time embedding functions
-from .embeddings import (
+# Time embedding functions and classes
+from .time_embeddings import (
+    # Classes
+    ConstantTimeEmbedding,
+    LinearTimeEmbedding,
+    CyclicalFourierTimeEmbedding,
+    SinusoidalTimeEmbedding,
+    LogFreqTimeEmbedding,
+    FourierTimeEmbedding,
+    GaussianTimeEmbedding,
+    # Factory function
+    create_time_embedding,
+    # Backward compatibility wrapper functions
     sinusoidal_time_embedding,
     linear_time_embedding,
     fourier_time_embedding,
@@ -24,8 +35,17 @@ from .positional_encoding import (
     get_positional_encoding,
 )
 
-# Point cloud positional encoding functions
+# Point cloud positional encoding classes and functions
 from .point_cloud_positional_encoding import (
+    # Classes
+    Sinusoidal3DPositionalEncoding,
+    FourierFeaturesPositionalEncoding,
+    RelativePositionalEncodingPointCloud,
+    DistanceBasedPositionalEncoding,
+    ContextAwarePositionalEncoding,
+    # Factory function
+    create_point_cloud_positional_encoding,
+    # Backward compatibility wrapper functions
     sinusoidal_3d_positional_encoding,
     fourier_features_2d,
     fourier_features_3d,
@@ -48,7 +68,17 @@ from .noise_schedules import (
 )
 
 __all__ = [
-    # Time embeddings
+    # Time embedding classes
+    "ConstantTimeEmbedding",
+    "LinearTimeEmbedding",
+    "CyclicalFourierTimeEmbedding",
+    "SinusoidalTimeEmbedding",
+    "LogFreqTimeEmbedding",
+    "FourierTimeEmbedding",
+    "GaussianTimeEmbedding",
+    # Time embedding factory function
+    "create_time_embedding",
+    # Time embedding functions (backward compatibility)
     "sinusoidal_time_embedding",
     "linear_time_embedding", 
     "fourier_time_embedding",
@@ -61,7 +91,15 @@ __all__ = [
     "rotary_positional_encoding", 
     "get_positional_encoding",
     
-    # Point cloud positional encodings
+    # Point cloud positional encoding classes
+    "Sinusoidal3DPositionalEncoding",
+    "FourierFeaturesPositionalEncoding",
+    "RelativePositionalEncodingPointCloud",
+    "DistanceBasedPositionalEncoding",
+    "ContextAwarePositionalEncoding",
+    # Point cloud positional encoding factory function
+    "create_point_cloud_positional_encoding",
+    # Point cloud positional encoding functions (backward compatibility)
     "sinusoidal_3d_positional_encoding",
     "fourier_features_2d",
     "fourier_features_3d",

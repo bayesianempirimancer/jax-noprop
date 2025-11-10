@@ -110,7 +110,7 @@ def get_positional_encoding(seq_len: int, d_model: int, method: str = "sinusoida
     Args:
         seq_len: Sequence length
         d_model: Model dimension
-        method: Method to use ("sinusoidal", "learnable", "relative", "rotary")
+        method: Method to use ("sinusoidal", "relative", "rotary")
         
     Returns:
         Positional encoding [seq_len, d_model] or [seq_len, seq_len, d_model] for relative
