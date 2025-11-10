@@ -449,7 +449,7 @@ class CosineNoiseSchedule(NoiseSchedule):
         cos_arg_val = jnp.cos(cos_arg)
         
         alpha_bar_t = sin_arg * sin_arg  # More efficient than sin^2
-        alpha_bar_t = clip(alpha_bar_t, 0.001, 0.999)
+        alpha_bar_t = clip(alpha_bar_t, 1e-8, 1-1e-8)
         
         # Derivative: d/dx sin^2(x) = 2*sin(x)*cos(x)
         # Cache pi_half / one_plus_s
@@ -607,7 +607,7 @@ class ExponentialNoiseSchedule(NoiseSchedule):
         exp_val = jnp.exp(beta_t_neg)
         one_minus_exp = 1.0 - exp_val  # Cache (1 - exp)
         alpha_bar_t = alpha_bar_min + delta_alpha * one_minus_exp
-        return clip(alpha_bar_t, 0.001, 0.999)
+        return alpha_bar_t
     
     @nn.compact
     def _get_alpha_bar_gamma_prime(
@@ -649,7 +649,7 @@ class ExponentialNoiseSchedule(NoiseSchedule):
         exp_val = jnp.exp(beta_t_neg)
         one_minus_exp = 1.0 - exp_val  # Cache (1 - exp)
         alpha_bar_t = alpha_bar_min + delta_alpha * one_minus_exp
-        alpha_bar_t = clip(alpha_bar_t, 0.001, 0.999)
+        alpha_bar_t = alpha_bar_t
         
         # Derivative: d/dt [1 - exp(-beta*t)] = beta * exp(-beta*t)
         alpha_bar_prime_t = delta_alpha * beta * exp_val
@@ -1014,11 +1014,10 @@ class QuadraticNoiseSchedule(NoiseSchedule):
         
         # Quadratic: alpha_bar(t) = alpha_bar_min + (alpha_bar_max - alpha_bar_min) * t^2
         # Clamp t to slightly above 0 and below 1 for numerical stability
-        t_clamped = clip(t, 1e-7, 1.0 - 1e-7)
+        t_clamped = clip(t, 1e-6, 1.0 - 1e-6)
         t_squared = t_clamped * t_clamped  # t^2 in [0, 1]
         alpha_bar_t = alpha_bar_min + (alpha_bar_max - alpha_bar_min) * t_squared
-        # Final clipping ensures alpha_bar_t in [0.001, 0.999] for numerical stability
-        alpha_bar_t = clip(alpha_bar_t, 0.001, 0.999)
+
         return alpha_bar_t
     
     @nn.compact
@@ -1223,7 +1222,7 @@ class LogisticNoiseSchedule(NoiseSchedule):
         t_mid: Initial value for t_mid (default: 0.5)
     """
     
-    k: float = 10.0  # Initial k value
+    k: float = 8.0  # Initial k value
     t_mid: float = 0.5  # Initial t_mid value
     
     @staticmethod
@@ -1234,7 +1233,7 @@ class LogisticNoiseSchedule(NoiseSchedule):
             Dictionary with default initial parameter values
         """
         return {
-            "k": 10.0,
+            "k": 8.0,
             "t_mid": 0.5,
         }
 
@@ -1380,7 +1379,7 @@ class NoiseScheduleNetwork(NoiseSchedule):
             gt = clip((f_t - g0) / (g1 - g0 + 1e-8), 0.0, 1.0)
             # f_t = t_input + (1 - t_input) * t_input * nn.sigmoid(scale_logit) * nn.sigmoid(f_t)
             gamma_t = gamma_min + (gamma_max - gamma_min) * ( 1 - gt)
-            return clip(gamma_t, - 8.0, 8.0)
+            return gamma_t
         
         t = jnp.asarray(t)
         t_flat = t.reshape(-1)
