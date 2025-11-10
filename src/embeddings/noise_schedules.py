@@ -453,7 +453,9 @@ class CosineNoiseSchedule(NoiseSchedule):
         
         # Derivative: d/dx sin^2(x) = 2*sin(x)*cos(x)
         # Note: better to use grad because of cliping
-        alpha_bar_t, alpha_bar_prime_t = jax.vmap(jax.value_and_grad(alpha_bar))(t)
+        value, grads = jax.vmap(jax.value_and_grad(alpha_bar))(t.reshape(-1))
+        alpha_bar_t = value.reshape(t.shape)
+        alpha_bar_prime_t = grads.reshape(t.shape)
 
         # Compute gamma_prime efficiently
         alpha_bar_t_one_minus = alpha_bar_t * (1.0 - alpha_bar_t)
