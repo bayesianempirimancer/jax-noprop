@@ -178,7 +178,7 @@ class VAE_flow(nn.Module):
         return self.lazy_target_snr(alpha_t, gamma_prime_t)
     
     def lazy_noise_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t
-    def lazy_target_snr(self, alpha_t, gamma_prime_t): return - gamma_prime_t * alpha_t / (1.0 - alpha_t)
+    def lazy_target_snr(self, alpha_t, gamma_prime_t): return gamma_prime_t * alpha_t / (1.0 - alpha_t)
     def lazy_error_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t / (1.0 - alpha_t)
     def lazy_score_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t * (1.0 - alpha_t)
     def lazy_flow_snr(self, alpha_t, gamma_prime_t):   return  1.0 / ((1.0 - alpha_t) * alpha_t * gamma_prime_t)
