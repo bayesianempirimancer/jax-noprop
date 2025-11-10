@@ -409,9 +409,12 @@ def _integrate_ode_midpoint_scan(
     def rk4_step_scan(carry, _):
         z, t = carry
         # Stage 1
-        dz_dt = vector_field(params, z, x, t + 0.5*dt)
+        k1 = vector_field(params, z, x, t)
+
+        # Stage 2
+        k2 = vector_field(params, z + dt * k1 / 2, x, t + dt / 2)
         
-        z_new = z + dt * dz_dt
+        z_new = z + dt * k2
         t_new = t + dt
         
         return (z_new, t_new), z_new

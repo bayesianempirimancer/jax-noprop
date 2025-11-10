@@ -59,7 +59,7 @@ class GenerationTrainer:
         else:
             lr_schedule = optax.constant_schedule(learning_rate)
         
-        self.optimizer = optax.adam(lr_schedule) if optimizer_name.lower() == "adam" else optax.sgd(lr_schedule)
+        self.optimizer = optax.adamw(lr_schedule) if optimizer_name.lower() == "adamw" else optax.sgd(lr_schedule)
         
         # State
         self.params = None

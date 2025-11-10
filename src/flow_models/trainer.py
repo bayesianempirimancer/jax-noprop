@@ -8,6 +8,7 @@ flow models with scan-optimized training loops.
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+import jax.tree as jt
 import optax
 from typing import Dict, Any, Tuple, Optional
 from functools import partial
@@ -83,16 +84,31 @@ class Trainer:
         self.rng, init_rng = jr.split(self.rng)
         self.params = self.model.init(init_rng, x_sample, y_sample, init_rng)
         self.opt_state = self.optimizer.init(self.params)
-    
-    # JIT removed to avoid static argument tracing issues
-    def train_epoch(
-        self,
-        x_data: jnp.ndarray,
-        y_data: jnp.ndarray,
-        batch_size: int = 256,
-        use_dropout: bool = True
-    ) -> Dict[str, float]:
-        """Train for one epoch using jax-dataloader."""
+        print(f"Model initialized with {sum(x.size for x in jt.leaves(self.params))} parameters")
+        
+        # Debug: print parameter tree summary (module path -> shape, dtype)
+        try:
+            flat_params = traverse_util.flatten_dict(self.params, keep_empty_nodes=True)
+            print("Parameter tree summary (path: shape dtype):")
+            for path, value in flat_params.items():
+                if hasattr(value, 'shape'):
+                    key_path = "/".join(str(k) for k in path)
+                    print(f"  {key_path}: {tuple(value.shape)} {value.dtype}")
+        except Exception as e:
+            print(f"Warning: could not summarize parameter tree: {e}")
+        
+    def train_step(self, x_batch: jnp.ndarray, y_batch: jnp.ndarray, use_dropout: bool = True) -> Dict[str, float]:
+        """
+        Single training step using VAE_flow's built-in train_step method.
+        
+        Args:
+            x_batch: Input batch [batch_size, input_dim]
+            y_batch: Target batch [batch_size, output_dim]
+            use_dropout: Whether to use dropout during training
+            
+        Returns:
+            Dictionary of training metrics
+        """
         if self.params is None or self.opt_state is None:
             raise ValueError("Model not initialized. Call initialize() first.")
         
