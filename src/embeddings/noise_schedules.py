@@ -1374,17 +1374,20 @@ class NoiseScheduleNetwork(NoiseSchedule):
         def gamma_fn_scalar(t_input):
             # Ensure scalar/1D input compatibility; network handles shaping internally
             f_t = network(t_input)
-            f_t = t_input + (1 - t_input) * t_input * nn.sigmoid(scale_logit) * nn.sigmoid(f_t)
-            return gamma_min + (gamma_max - gamma_min) * f_t
+            g0 = network(jnp.zeros_like(t_input))
+            g1 = network(jnp.ones_like(t_input))
+            gt = (f_t - g0) / (g1 - g0 + 1e-8)
+            # f_t = t_input + (1 - t_input) * t_input * nn.sigmoid(scale_logit) * nn.sigmoid(f_t)
+            return gamma_min + (gamma_max - gamma_min) * ( 1 - gt)
         
         t = jnp.asarray(t)
         t_flat = t.reshape(-1)
         vals, grads = jax.vmap(jax.value_and_grad(gamma_fn_scalar))(t_flat)
-        gamma_t = vals.reshape(t.shape)
+        gamma_t = vals.reshape(t.shape) 
         gamma_prime_t = grads.reshape(t.shape)
         
         # Compute alpha_bar from gamma
-        alpha_bar_t = jax.nn.sigmoid(gamma_t)
+        alpha_bar_t = jax.nn.sigmoid(- gamma_t)
         
         return alpha_bar_t, gamma_prime_t
 

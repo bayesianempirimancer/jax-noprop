@@ -178,7 +178,7 @@ class VAE_flow(nn.Module):
         return self.lazy_target_snr(alpha_t, gamma_prime_t)
     
     def lazy_noise_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t
-    def lazy_target_snr(self, alpha_t, gamma_prime_t): return gamma_prime_t * alpha_t / (1.0 - alpha_t)
+    def lazy_target_snr(self, alpha_t, gamma_prime_t): return - gamma_prime_t * alpha_t / (1.0 - alpha_t)
     def lazy_error_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t / (1.0 - alpha_t)
     def lazy_score_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t * (1.0 - alpha_t)
     def lazy_flow_snr(self, alpha_t, gamma_prime_t):   return  1.0 / ((1.0 - alpha_t) * alpha_t * gamma_prime_t)
@@ -287,8 +287,8 @@ class VAE_flow(nn.Module):
         # KL regularization term: KL(q(z_0|z_target), p(z_0))
         # alpha_0 is guaranteed to be in (0, 1) by noise schedule clipping
         q_sigma_sq = 1.0 - alpha_0
-        mean_q_mu_sq_over_sigma_sq = alpha_0/q_sigma_sq*jnp.mean(jnp.sum(z_target**2, axis=tuple(range(-self.z_ndims, 0))))
-        kl_z0_loss = 0.5 * (mean_q_mu_sq_over_sigma_sq + self.z_dim*(jnp.log(q_sigma_sq) - 1.0))
+        mean_q_mu_sq_over_sigma_sq = alpha_0*jnp.mean(jnp.sum(z_target**2, axis=tuple(range(-self.z_ndims, 0))))
+        kl_z0_loss = 0.5 * (mean_q_mu_sq_over_sigma_sq - self.z_dim*(jnp.log(q_sigma_sq) + alpha_0))
 
         total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss + kl_z0_loss 
         
