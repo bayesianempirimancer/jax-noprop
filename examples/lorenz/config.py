@@ -36,13 +36,14 @@ class Config(Config):
 
     main: FrozenDict = field(default_factory=lambda: FrozenDict({
         # Data shapes (sequences)
-        "input_shape": (20, 3),  # Input sequence shape: (seq_len, embed_dim) - past states
-        "output_shape": (20, 3),  # Output sequence shape: (seq_len, embed_dim) - future states
-        "latent_shape": (20, 3),  # Latent space shape: (seq_len, embed_dim)
+        "input_shape": (1, 3),  # minimum input sequence length
+        "output_shape": (4, 3),  # Output sequence shape: (seq_len, embed_dim) - future states
+        "latent_shape": (4, 16),  # Latent space shape: (seq_len, latent_dim) - 16-dimensional latent space
         
         # Loss configuration
         "recon_loss_type": "mse",  # Reconstruction loss type: "mse", "cross_entropy", or "none"
         "recon_weight": 1.0,  # Weight for reconstruction loss (can override with --recon_weight)
+        "vae_weight": 1.0,  # Weight for reconstruction loss (can override with --recon_weight)
         "reg_weight": 0.0,  # Weight for regularization loss (can override with --reg_weight)
         
         # Flow model settings
@@ -50,12 +51,12 @@ class Config(Config):
                                   # False for flow_matching, True for diffusion/ct
         "integration_method": "midpoint",  # ODE integration method: "euler" or "midpoint"
                                            # "euler" for flow_matching, "midpoint" for diffusion/ct
-        "encode_x": False,  # Whether to use sequence encoding (False for Lorenz, sequences handled by CRN)
+        "encode_x": True,  # Whether to encode x sequences (True to encode x to latent space before CRN)
     }))
     
     noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
         # Noise schedule configuration (for diffusion and CT models)
-        "schedule_type": "exponential",  # Schedule type: "linear", "exponential", "cosine", etc.
+        "schedule_type": "linear",  # Schedule type: "linear", "exponential", "cosine", etc.
                                          # (can override with --noise_schedule)
         "learnable": False,  # Whether noise schedule parameters are learnable
                              # (can override with --noise_schedule_learnable)
@@ -77,45 +78,60 @@ class Config(Config):
     
     encoder: FrozenDict = field(default_factory=lambda: FrozenDict({
         # Encoder configuration
+        # For sequences: encoder treats (batch, seq_len) as batch dimension
+        # Only encodes the observation dimension (last dim of input_shape)
         "model_type": "mlp",  # Encoder type: "identity", "linear", "mlp", "mlp_normal", "resnet", "resnet_normal"
-                              # (can override with --encoder_model_type)
         "encoder_type": "deterministic",  # "deterministic" or "stochastic"
-        "input_shape": (20, 3),  # Input shape (matches main.input_shape)
-        "latent_shape": (20, 3),  # Latent shape (matches main.latent_shape)
-        "hidden_dims": (64, 128, 64),  # Hidden dimensions for MLP encoder
+        "input_shape": (3,),  # Input shape: only observation dimension (encoder handles batch+seq_len automatically)
+        "latent_shape": (16,),  # Latent shape: 16-dimensional latent space
+        "hidden_dims": (64, 64),  # Hidden dimensions for MLP encoder
         "activation": "swish",  # Activation function
         "dropout_rate": 0.0,  # Dropout rate
     }))
     
     decoder: FrozenDict = field(default_factory=lambda: FrozenDict({
         # Decoder configuration
+        # For sequences: decoder treats (batch, seq_len) as batch dimension
+        # Only decodes the observation dimension (last dim of output_shape)
         "model_type": "mlp",  # Decoder type: "identity", "mlp", "resnet"
-                              # (can override with --decoder_model_type)
-        "decoder_type": "none",  # Output type: "linear", "softmax", or "none"
-                                 # (can override with --decoder_type)
-        "latent_shape": (20, 3),  # Latent shape (matches main.latent_shape)
-        "output_shape": (20, 3),  # Output shape (matches main.output_shape)
-        "hidden_dims": (64, 128, 64),  # Hidden dimensions for MLP decoder
+        "decoder_type": "linear",  # Output type: "linear", "softmax", "none", or "identity"
+        "latent_shape": (16,),  # Latent shape: 16-dimensional latent space
+        "output_shape": (3,),  # Output shape: only observation dimension (decoder handles batch+seq_len automatically)
+        "hidden_dims": (64, 64),  # Hidden dimensions for MLP decoder
         "activation": "swish",  # Activation function
         "dropout_rate": 0.0,  # Dropout rate
     }))
     
     crn: FrozenDict = field(default_factory=lambda: FrozenDict({
         # CRN (Conditional Residual Network) configuration
-        "model_type": "transformer_seq2seq",  # CRN type: "vanilla", "geometric", "potential", "transformer_seq2seq"
-                                              # (can override with --crn_type)
+        "model_type": "vanilla",  # CRN type: "vanilla", "geometric", "potential", "natural", "hamiltonian"
+                                  # Use "vanilla" for transformer_seq2seq (no gradient wrapper needed)
+                                  # (can override with --crn_type)
         "network_type": "transformer_seq2seq",  # Network backbone: "mlp", "bilinear", "convex", "transformer_seq2seq"
                                                 # (can override with --network_type)
-        "hidden_dims": (128, 128),  # Hidden dimensions for MLP-based CRNs
+        "hidden_dims": (64, 64),  # Hidden dimensions for MLP-based CRNs
                                     # (can override with --hidden_dims)
         "time_embed_dim": 64,  # Time embedding dimension
         "time_embed_method": "sinusoidal",  # Time embedding method: "sinusoidal" or "learnable"
+        "x_embed_method": "fourier_features_3d",  # X embedding method: "fourier_features_3d", "positional_encoding", "none"
+        "z_embed_method": "fourier_features_3d",  # Z embedding method: "fourier_features_3d", "positional_encoding", "none"
         "activation_fn": "swish",  # Activation function
         "use_batch_norm": False,  # Whether to use batch normalization
         "dropout_rate": 0.1,  # Dropout rate
         # Transformer-specific parameters
-        "num_layers": 4,  # Number of transformer layers (can override with --num_layers)
-        "num_heads": 8,  # Number of attention heads (can override with --num_heads)
-        "mlp_ratio": 4.0,  # MLP ratio for transformer (can override with --mlp_ratio)
+        "transformer_config": FrozenDict({
+            "embed_dim": 16,  # Embedding dimension for transformer
+            "num_heads": 4,  # Number of attention heads
+            "num_layers": 3,  # Number of transformer layers
+            "mlp_ratio": 4.0,  # Ratio for MLP hidden dimension relative to embed_dim
+            "qkv_bias": True,  # Whether to use bias in QKV projections
+            "rope_base": 10000.0,  # Base for RoPE frequency calculation
+            "lora_rank": 8,  # Rank for LoRA decomposition in TwistedAttention (default: 8)
+            "attention_dropout": 0.1,  # Dropout rate for attention (optional, uses top-level dropout_rate if not specified)
+            "mlp_dropout": 0.1,  # Dropout rate for MLP (optional, uses top-level dropout_rate if not specified)
+            "activation": "swish",  # Activation function (can also use "activation_fn")
+            "x_static_dim": 0,  # Dimension of static features x_static (0 means no static features)
+            "projection_seed": 42,  # Random seed for projection matrices (if needed)
+        }),
     }))
 

@@ -14,9 +14,9 @@ import jax
 import flax.linen as nn
 
 from src.embeddings.time_embeddings import create_time_embedding
-from src.embeddings.positional_encoding import rotary_positional_encoding
 from src.layers.configs import AttentionConfig
 from src.layers.mlp import Mlp
+from src.flow_models.crn_attention_blocks import TwistedAttentionBlock
 
 from src.utils.activation_utils import get_activation_function
 
@@ -54,9 +54,9 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
     latent_shape: Tuple[int, ...]
     input_shape: Tuple[int, ...]
     output_shape: Tuple[int, ...]
-    embed_dim: int = 20
-    hidden_dims: Tuple[int, ...] = (256,)
-    time_embed_dim: int = 64
+    embed_dim: int = 32
+    hidden_dims: Tuple[int, ...] = (64,64)
+    time_embed_dim: int = 32
     time_embed_method: str = "sinusoidal"
     activation_fn: str = "swish"
     use_batch_norm: bool = False
@@ -66,6 +66,7 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
     mlp_ratio: float = 4.0
     qkv_bias: bool = True
     rope_base: float = 10000.0
+    lora_rank: int = 8  # Rank for LoRA decomposition in TwistedAttention
     projection_seed: int = 42
     x_static_dim: int = 0  # 0 means no static features
     
@@ -121,7 +122,7 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         
         # Create self-attention blocks for concatenated x,z sequences
         self.self_attention_blocks = [
-            SelfAttentionBlock(
+            TwistedAttentionBlock(
                 embed_dim=self.embed_dim,
                 mlp_ratio=self.mlp_ratio,
                 activation_fn=self.activation_fn,  # Pass as string
@@ -130,6 +131,7 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
                 time_embed_dim=self.time_embed_dim,
                 time_embed_method=self.time_embed_method,
                 rope_base=self.rope_base,
+                lora_rank=self.lora_rank,
                 name=f'self_attention_block_{i}'
             )
             for i in range(self.num_layers)
@@ -173,7 +175,8 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
     
     @nn.compact
     def __call__(self, z: jnp.ndarray, x: Optional[jnp.ndarray] = None, t: Optional[jnp.ndarray] = None, 
-                 x_static: Optional[jnp.ndarray] = None, training: bool = True) -> jnp.ndarray:
+                 x_static: Optional[jnp.ndarray] = None, x_mask: Optional[jnp.ndarray] = None, 
+                 training: bool = True) -> jnp.ndarray:
         """Forward pass through sequence-to-sequence transformer.
         
         Args:
@@ -182,6 +185,8 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
                variable length allowed
             t: Time values [batch_size] or scalar (optional)
             x_static: Static features [batch_size, x_static_dim] or [batch_shape, x_static_dim] (optional, only used if x_static_dim > 0)
+            x_mask: Boolean mask for x sequence [batch_size, x_seq_len] where True=valid, False=masked (optional)
+                   Only x positions are masked; z and x_static are never masked
             training: Whether in training mode
             
         Returns:
@@ -229,6 +234,7 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         # Process x sequence if provided
         x_embed = None
         x_seq_len = 0
+        x_mask_processed = None
         if x is not None:
             # Get actual shape dimensions (excluding batch)
             x_trailing_dims = x.shape[-len(self.input_shape):]
@@ -255,6 +261,12 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
             )
             
             x_embed = x_flat_batch.reshape(-1, x_seq_len, self.embed_dim)  # [batch, seq_len, embed_dim]
+            
+            # Process x_mask if provided
+            if x_mask is not None:
+                # Broadcast x_mask to match batch shape
+                x_mask = jnp.broadcast_to(x_mask, batch_shape + (x_seq_len,))
+                x_mask_processed = x_mask.reshape(-1, x_seq_len)  # [batch, x_seq_len]
         
         # Concatenate x and z along sequence dimension: [batch, x_seq_len + z_seq_len, embed_dim]
         # x immediately precedes z temporally
@@ -276,6 +288,25 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
             x_static_emb = x_static_emb[:, None, :]  # [batch, 1, embed_dim]
             xz_embed = jnp.concatenate([x_static_emb, xz_embed], axis=-2)  # [batch, 1 + x_seq_len + z_seq_len, embed_dim]
         
+        # Build combined mask for concatenated sequence (x_static + x + z)
+        # x_static and z are never masked, only x positions use x_mask
+        # Build mask after all concatenations so we know the final sequence structure
+        combined_mask = None
+        if x_mask_processed is not None:
+            batch_size = xz_embed.shape[0]
+            total_seq_len = xz_embed.shape[1]
+            
+            # Start with all True (unmasked)
+            combined_mask = jnp.ones((batch_size, total_seq_len), dtype=bool)
+            
+            # Apply x_mask to x positions
+            # Final sequence structure: [x_static (if present), x, z]
+            # x positions are at indices [x_static_offset, x_static_offset + x_seq_len)
+            x_static_offset = 1 if (x_static is not None) else 0
+            x_start = x_static_offset
+            x_end = x_start + x_seq_len
+            combined_mask = combined_mask.at[:, x_start:x_end].set(x_mask_processed)
+        
         # Process time embedding (for TwistedAttention)
         t_embed_vec = None
         if t is not None:
@@ -285,7 +316,7 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         
         # Process concatenated x,z sequence with self-attention blocks
         for self_attn_block in self.self_attention_blocks:
-            xz_embed = self_attn_block(xz_embed, t=t_embed_vec, training=training)
+            xz_embed = self_attn_block(xz_embed, t=t_embed_vec, mask=combined_mask, training=training)
         
         # Extract z portion from concatenated sequence
         # Account for x_static (if present) and x_seq_len
@@ -294,7 +325,7 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
         z_embed = xz_embed[:, z_start_idx:, :]  # [batch, z_seq_len, embed_dim]
         
         # Pass z through MLP (no additional encoding, just processing)
-        z_embed = self.z_mlp(z_embed, self.embed_dim)
+        z_embed = self.z_mlp(z_embed, self.embed_dim, training=training)
         
         # No output projection - z remains in embed_dim space as provided by encoder
         # z_embed shape: (batch, seq_len, embed_dim)
@@ -310,167 +341,6 @@ class TransformerSeq2SeqConditionalResnet(nn.Module):
 # ============================================================================
 # Network Blocks
 # ============================================================================
-
-class TwistedAttention(nn.Module):
-    """Attention with time-dependent QKV matrices for dynamical systems.
-    
-    Time perturbs (twists) the Q, K, V projection matrices themselves, so that:
-    q = (Q_base + Q_time(t)) @ x
-    k = (K_base + K_time(t)) @ x
-    v = (V_base + V_time(t)) @ x
-    
-    Also applies RoPE (Rotary Position Embedding) to Q and K vectors.
-    """
-    config: AttentionConfig
-    time_embed_dim: int
-    time_embed_method: str
-    rope_base: float = 10000.0
-    use_rope: bool = True
-    
-    def setup(self):
-        # Base QKV projection (without time conditioning)
-        self.qkv_base = nn.Dense(self.config.dim * 3, use_bias=self.config.qkv_bias, name='qkv_base')
-    
-    def _apply_rope_to_qk(self, q: jnp.ndarray, k: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Apply RoPE rotation to Q and K vectors.
-        
-        Args:
-            q: Query tensor [batch, num_heads, seq_len, head_dim]
-            k: Key tensor [batch, num_heads, seq_len, head_dim]
-            
-        Returns:
-            Rotated Q and K tensors with same shapes
-        """
-        B, H, N, head_dim = q.shape
-        
-        # RoPE requires even head_dim - if odd, use head_dim-1 pairs and keep last dimension unrotated
-        head_dim_pairs = head_dim // 2
-        head_dim_used = head_dim_pairs * 2
-        
-        # Generate RoPE encoding for sequence length (using head_dim_used, which is even)
-        rope_encoding = rotary_positional_encoding(N, head_dim_used, base=self.rope_base)
-        rope_encoding = rope_encoding.astype(q.dtype)
-        
-        # Reshape Q and K into pairs: [batch, num_heads, seq_len, head_dim_pairs, 2]
-        q_reshaped = q[:, :, :, :head_dim_used].reshape(B, H, N, head_dim_pairs, 2)
-        k_reshaped = k[:, :, :, :head_dim_used].reshape(B, H, N, head_dim_pairs, 2)
-        rope_reshaped = rope_encoding.reshape(N, head_dim_pairs, 2)
-        
-        # Extract cos and sin components
-        cos_vals = rope_reshaped[:, :, 1]  # [seq_len, head_dim_pairs] - cos components
-        sin_vals = rope_reshaped[:, :, 0]  # [seq_len, head_dim_pairs] - sin components
-        
-        # Apply rotation matrix: [cos, -sin; sin, cos] to each pair using einsum
-        # q_reshaped: [batch, num_heads, seq_len, head_dim_pairs, 2] -> indices: b, h, n, p, r
-        # cos_vals: [seq_len, head_dim_pairs] -> indices: n, p
-        # sin_vals: [seq_len, head_dim_pairs] -> indices: n, p
-        
-        # Rotation: [cos, -sin; sin, cos] @ [q_0, q_1]
-        # First component: q_0 * cos - q_1 * sin
-        q_rotated_0 = jnp.einsum('bhnp,np->bhnp', q_reshaped[:, :, :, :, 0], cos_vals) - \
-                      jnp.einsum('bhnp,np->bhnp', q_reshaped[:, :, :, :, 1], sin_vals)
-        
-        # Second component: q_0 * sin + q_1 * cos
-        q_rotated_1 = jnp.einsum('bhnp,np->bhnp', q_reshaped[:, :, :, :, 0], sin_vals) + \
-                      jnp.einsum('bhnp,np->bhnp', q_reshaped[:, :, :, :, 1], cos_vals)
-        
-        q_rotated = jnp.stack([q_rotated_0, q_rotated_1], axis=-1)
-        
-        # Same for k
-        k_rotated_0 = jnp.einsum('bhnp,np->bhnp', k_reshaped[:, :, :, :, 0], cos_vals) - \
-                      jnp.einsum('bhnp,np->bhnp', k_reshaped[:, :, :, :, 1], sin_vals)
-        k_rotated_1 = jnp.einsum('bhnp,np->bhnp', k_reshaped[:, :, :, :, 0], sin_vals) + \
-                      jnp.einsum('bhnp,np->bhnp', k_reshaped[:, :, :, :, 1], cos_vals)
-        
-        k_rotated = jnp.stack([k_rotated_0, k_rotated_1], axis=-1)
-        
-        # Reshape back and concatenate with unrotated dimensions if head_dim was odd
-        q_rotated = q_rotated.reshape(B, H, N, head_dim_used)
-        k_rotated = k_rotated.reshape(B, H, N, head_dim_used)
-        
-        if head_dim_used < head_dim:
-            # If head_dim was odd, concatenate the last unrotated dimension
-            q_rotated = jnp.concatenate([q_rotated, q[:, :, :, head_dim_used:]], axis=-1)
-            k_rotated = jnp.concatenate([k_rotated, k[:, :, :, head_dim_used:]], axis=-1)
-        
-        return q_rotated, k_rotated
-    
-    @nn.compact
-    def __call__(self, x: jnp.ndarray, t: Optional[jnp.ndarray] = None) -> jnp.ndarray:
-        """
-        Forward pass of TwistedAttention.
-        
-        Args:
-            x: Input tensor [batch, seq_len, embed_dim]
-            t: Time embedding [batch, time_embed_dim] or None
-            
-        Returns:
-            Output tensor [batch, seq_len, embed_dim]
-        """
-        B, N, x_embed_dim = x.shape
-        if x_embed_dim != self.config.dim:
-            raise AssertionError(
-                f"Input embedding dimension ({x_embed_dim}) should match layer embedding dimension ({self.config.dim})."
-            )
-        
-        # Compute base QKV from x
-        qkv_base = self.qkv_base(x)  # [batch, seq_len, dim * 3]
-        
-        # Apply time conditioning if time is provided
-        if t is not None:
-            # MLP that takes t and outputs QKV perturbation matrices
-            # t: [batch, time_embed_dim] -> [batch, 3 * config.dim * x_embed_dim]
-            t_qkv_mlp = nn.Dense(3 * self.config.dim * x_embed_dim, name='t_qkv_mlp')
-            t_qkv_flat = t_qkv_mlp(t)  # [batch, 3 * config.dim * x_embed_dim]
-            
-            # Reshape to get QKV perturbation matrices: [batch, 3 * config_dim, x_embed_dim]
-            # t_QKV contains the actual perturbation matrices for Q, K, V
-            batch_shape = t_qkv_flat.shape[:-1]  # [batch]
-            t_QKV = t_qkv_flat.reshape(batch_shape + (3 * self.config.dim, x_embed_dim))
-            
-            qkv_t = jnp.einsum('bkj,bnj->bnk', t_QKV, x)  # [batch, seq_len, 3*config.dim]
-                        
-            qkv = qkv_base + qkv_t  # [batch, seq_len, dim * 3]
-        else:
-            # No time conditioning - just use base QKV
-            qkv = qkv_base
-        
-        # Reshape to [batch, seq_len, 3, num_heads, head_dim]
-        qkv = qkv.reshape(B, N, 3, self.config.num_heads, x_embed_dim // self.config.num_heads)
-        
-        # Transpose to [3, batch, num_heads, seq_len, head_dim] and split
-        qkv = jnp.transpose(qkv, (2, 0, 3, 1, 4))
-        q, k, v = tuple(qkv)
-        
-        # Apply RoPE to Q and K (standard approach)
-        q, k = self._apply_rope_to_qk(q, k)
-        
-        # Apply QK normalization if configured
-        if self.config.qk_norm:
-            match self.config.norm_layer:
-                case "layernorm":
-                    q = nn.LayerNorm()(q)
-                    k = nn.LayerNorm()(k)
-                case "rmsnormgated":
-                    from src.layers.norm import RMSNormGated
-                    q = RMSNormGated()(q)
-                    k = RMSNormGated()(k)
-                case "batchnorm":
-                    q = nn.BatchNorm()(q)
-                    k = nn.BatchNorm()(k)
-                case _:
-                    raise ValueError(f"Unknown norm `{self.config.norm_layer}`")
-        
-        # Compute attention
-        attn = q @ k.transpose((0, 1, 3, 2)) / jnp.sqrt(self.config.head_dim)
-        attn = nn.softmax(attn, axis=-1)
-        attn = nn.Dropout(self.config.attn_drop)(attn, deterministic=False)
-        
-        # Apply attention to values
-        x = (attn @ v).transpose(0, 2, 1, 3).reshape(B, N, x_embed_dim)
-        
-        return x
-
 
 class MLPBlock(nn.Module):
     """Block of MLPs defined by a features tuple for embedding static features.
@@ -515,49 +385,4 @@ class MLPBlock(nn.Module):
         return x
 
 
-class SelfAttentionBlock(nn.Module):
-    """Self-attention block for concatenated x,z sequences: self-attention + MLP."""
-    embed_dim: int
-    mlp_ratio: float
-    activation_fn: str
-    dropout_rate: float
-    attn_config: AttentionConfig
-    time_embed_dim: int
-    time_embed_method: str
-    rope_base: float = 10000.0
-    
-    def setup(self):
-        # Convert activation function string to callable
-        activation_fn = get_activation_function(self.activation_fn)
-        
-        self.norm1 = nn.LayerNorm()
-        # Use TwistedAttention instead of standard attention
-        self.attn = TwistedAttention(
-            config=self.attn_config,
-            time_embed_dim=self.time_embed_dim,
-            time_embed_method=self.time_embed_method,
-            rope_base=self.rope_base
-        )
-        self.dropout1 = nn.Dropout(rate=self.dropout_rate)
-        self.norm2 = nn.LayerNorm()
-        self.mlp = Mlp(
-            hidden_features=int(self.embed_dim * self.mlp_ratio),
-            out_features=self.embed_dim,
-            act_layer=activation_fn,
-            dropout_rate=self.dropout_rate
-        )
-        self.dropout2 = nn.Dropout(rate=self.dropout_rate)
-    
-    def __call__(self, xz: jnp.ndarray, t: Optional[jnp.ndarray] = None, training: bool = True) -> jnp.ndarray:
-        # Self-attention block with time conditioning
-        xz_norm = self.norm1(xz)
-        xz_attn = self.attn(xz_norm, t=t)
-        xz = xz + self.dropout1(xz_attn, deterministic=not training)
-        
-        # MLP block
-        xz_norm2 = self.norm2(xz)
-        xz_mlp_out = self.mlp(xz_norm2, self.embed_dim)
-        xz = xz + self.dropout2(xz_mlp_out, deterministic=not training)
-        
-        return xz
 

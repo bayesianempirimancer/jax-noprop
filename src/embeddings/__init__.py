@@ -24,6 +24,17 @@ from .positional_encoding import (
     get_positional_encoding,
 )
 
+# Point cloud positional encoding functions
+from .point_cloud_positional_encoding import (
+    sinusoidal_3d_positional_encoding,
+    fourier_features_2d,
+    fourier_features_3d,
+    relative_positional_encoding_point_cloud,
+    distance_based_positional_encoding,
+    context_aware_positional_encoding,
+    get_point_cloud_positional_encoding,
+)
+
 # Noise schedule classes and functions
 from .noise_schedules import (
     NoiseSchedule,
@@ -49,6 +60,15 @@ __all__ = [
     "relative_positional_encoding",
     "rotary_positional_encoding", 
     "get_positional_encoding",
+    
+    # Point cloud positional encodings
+    "sinusoidal_3d_positional_encoding",
+    "fourier_features_2d",
+    "fourier_features_3d",
+    "relative_positional_encoding_point_cloud",
+    "distance_based_positional_encoding",
+    "context_aware_positional_encoding",
+    "get_point_cloud_positional_encoding",
     
     # Noise schedules
     "NoiseSchedule",

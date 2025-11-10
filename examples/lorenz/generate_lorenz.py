@@ -204,6 +204,46 @@ def split_sequences(
     return np.array(x_sequences), np.array(y_sequences)
 
 
+def create_patched_trajectories(
+    trajectories: np.ndarray,
+    window_length: int = 4
+) -> np.ndarray:
+    """
+    Create patched trajectories by flattening non-overlapping time windows.
+    
+    For each trajectory of shape (traj_len, features), creates a patched version
+    of shape (traj_len // window_length, window_length * features) by:
+    1. Taking non-overlapping windows of length window_length
+    2. Flattening each window along the feature dimension
+    
+    Args:
+        trajectories: Array of trajectories [n_trajectories, traj_len, features]
+        window_length: Length of each time window to flatten (default: 4)
+        
+    Returns:
+        Array of patched trajectories [n_trajectories, traj_len // window_length, window_length * features]
+    """
+    n_trajectories, traj_len, features = trajectories.shape
+    
+    # Check that traj_len is divisible by window_length
+    if traj_len % window_length != 0:
+        raise ValueError(
+            f"traj_len ({traj_len}) must be divisible by window_length ({window_length})"
+        )
+    
+    num_patches = traj_len // window_length
+    patched_trajectories = []
+    
+    for traj in trajectories:
+        # Reshape to (num_patches, window_length, features)
+        windows = traj.reshape(num_patches, window_length, features)
+        # Flatten each window: (num_patches, window_length * features)
+        patched = windows.reshape(num_patches, window_length * features)
+        patched_trajectories.append(patched)
+    
+    return np.array(patched_trajectories)
+
+
 def visualize_trajectories(trajectories: np.ndarray, save_path: str = None, n_samples: int = 4):
     """
     Visualize sample Lorenz trajectories.
@@ -263,10 +303,10 @@ def main():
         description='Generate Lorenz system dataset for sequence modeling'
     )
     
-    parser.add_argument('--n_trajectories', type=int, default=1000,
-                       help='Number of trajectories to generate (default: 1000)')
-    parser.add_argument('--trajectory_length', type=int, default=200,
-                       help='Length of each trajectory (default: 200)')
+    parser.add_argument('--n_trajectories', type=int, default=320,
+                       help='Number of trajectories to generate (default: 320)')
+    parser.add_argument('--trajectory_length', type=int, default=1024,
+                       help='Length of each trajectory (default: 1024)')
     parser.add_argument('--input_seq_len', type=int, default=20,
                        help='Length of input sequences (default: 20)')
     parser.add_argument('--output_seq_len', type=int, default=20,
@@ -281,8 +321,8 @@ def main():
                        help='Lorenz parameter beta (default: 8.0/3.0)')
     parser.add_argument('--noise', type=float, default=0.0,
                        help='Standard deviation of Gaussian noise (default: 0.0)')
-    parser.add_argument('--t_span', type=float, nargs=2, default=[0.0, 20.0],
-                       help='Time span [t_start, t_end] (default: [0.0, 20.0])')
+    parser.add_argument('--t_span', type=float, nargs=2, default=[0.0, 100.0],
+                       help='Time span [t_start, t_end] (default: [0.0, 100.0])')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed (default: 42)')
     parser.add_argument('--output_dir', type=str, default='./data',
@@ -299,7 +339,7 @@ def main():
     args = parser.parse_args()
     
     # Generate trajectories
-    print(f"Generating {args.n_trajectories} Lorenz trajectories...")
+    print(f"Generating {args.n_trajectories} Lorenz trajectories of length {args.trajectory_length}...")
     trajectories = generate_lorenz_dataset(
         n_trajectories=args.n_trajectories,
         trajectory_length=args.trajectory_length,
@@ -312,98 +352,70 @@ def main():
     )
     print(f"Generated trajectories shape: {trajectories.shape}")
     
-    # Split into sequences
-    print(f"Splitting trajectories into sequences (input_len={args.input_seq_len}, output_len={args.output_seq_len})...")
-    x_sequences, y_sequences = split_sequences(
-        trajectories,
-        input_seq_len=args.input_seq_len,
-        output_seq_len=args.output_seq_len,
-        stride=args.stride
-    )
-    print(f"Generated sequences:")
-    print(f"  X sequences: {x_sequences.shape}")
-    print(f"  Y sequences: {y_sequences.shape}")
+    # Center data by subtracting the mean
+    print("Centering data (subtracting mean)...")
+    # Compute mean for each dimension across all trajectories and time steps
+    mean_vals = trajectories.mean(axis=(0, 1))  # Shape: (3,)
     
-    # Shuffle and split into train/val
-    n_total = len(x_sequences)
+    print(f"  Mean values per dimension: {mean_vals}")
+    print(f"  Original data range: [{trajectories.min():.4f}, {trajectories.max():.4f}]")
     
-    # Calculate target to get exactly 1024 training sequences
-    target_train = 1024
-    target_total = int(target_train / args.train_ratio)  # Need 1280 total for 1024 train (80/20 split)
+    # Center by subtracting mean
+    trajectories = trajectories - mean_vals
     
-    # Limit to target_total if we have more
-    if n_total > target_total:
-        n_total = target_total
-        x_sequences = x_sequences[:target_total]
-        y_sequences = y_sequences[:target_total]
+    print(f"  Centered data range: [{trajectories.min():.4f}, {trajectories.max():.4f}]")
+    print(f"  Centered data mean: {trajectories.mean(axis=(0, 1))}")
     
-    indices = np.random.RandomState(args.seed).permutation(n_total)
-    n_train = int(args.train_ratio * n_total)
-    
-    train_indices = indices[:n_train]
-    val_indices = indices[n_train:]
-    
-    x_train = x_sequences[train_indices]
-    y_train = y_sequences[train_indices]
-    x_val = x_sequences[val_indices]
-    y_val = y_sequences[val_indices]
-    
-    print(f"Train/Val split:")
-    print(f"  Train: {len(x_train)} sequences")
-    print(f"  Val: {len(x_val)} sequences")
-    
-    # Scale data to [0, 10] using min-max normalization per dimension
-    print("Scaling data to [0, 10] range per dimension...")
-    # Combine all data to compute global min/max per dimension
-    all_x = np.concatenate([x_train, x_val], axis=0)
-    all_y = np.concatenate([y_train, y_val], axis=0)
-    all_data = np.concatenate([all_x, all_y], axis=0)  # Shape: [n_total*2, seq_len, 3]
-    
-    # Compute min and max for each dimension (axis 2, the 3D coordinates)
-    min_vals = all_data.min(axis=(0, 1))  # Shape: (3,)
-    max_vals = all_data.max(axis=(0, 1))  # Shape: (3,)
-    
-    print(f"  Min values per dimension: {min_vals}")
-    print(f"  Max values per dimension: {max_vals}")
-    
-    # Normalize to [0, 1] then scale to [0, 10]
-    def scale_sequences(sequences, min_vals, max_vals):
-        """Scale sequences using min-max normalization per dimension."""
-        # Normalize: (value - min) / (max - min)
-        # Avoid division by zero
-        ranges = max_vals - min_vals
-        ranges = np.where(ranges == 0, 1.0, ranges)  # Replace zeros with 1.0
-        
-        # Normalize to [0, 1] then scale to [0, 10]
-        normalized = (sequences - min_vals) / ranges
-        scaled = normalized * 10.0
-        return scaled
-    
-    x_train = scale_sequences(x_train, min_vals, max_vals)
-    y_train = scale_sequences(y_train, min_vals, max_vals)
-    x_val = scale_sequences(x_val, min_vals, max_vals)
-    y_val = scale_sequences(y_val, min_vals, max_vals)
-    
-    print(f"  Scaled data range: [{x_train.min():.4f}, {x_train.max():.4f}]")
-    
-    # Save data
-    output_path = Path(args.output_dir) / args.filename
+    # Save lorenz.pkl: 320 trajectories of shape (1024, 3)
+    print("\nSaving lorenz.pkl (320 trajectories of shape (1024, 3))...")
+    output_path = Path(args.output_dir) / 'lorenz.pkl'
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     data = {
         'train': {
-            'x': x_train,
-            'y': y_train
+            'x': None,
+            'y': trajectories  # (320, 1024, 3)
         },
         'val': {
-            'x': x_val,
-            'y': y_val
+            'x': None,
+            'y': None  # No split for this dataset
         }
     }
     
     with open(output_path, 'wb') as f:
         pickle.dump(data, f)
     print(f"Saved data to {output_path}")
+    print(f"  Shape: {trajectories.shape}")
+    
+    # Create patched trajectories: 320 trajectories of shape (256, 12)
+    # Each window of length 4 from (1024, 3) gets flattened to (12,)
+    # 1024 / 4 = 256 windows per trajectory
+    print("\nCreating patched trajectories...")
+    print(f"  Window length: 4 (flattening 4 timesteps)")
+    print(f"  Original: (1024, 3) -> Patched: (256, 12)")
+    
+    patched_trajectories = create_patched_trajectories(trajectories, window_length=4)
+    print(f"  Patched trajectories shape: {patched_trajectories.shape}")
+    
+    # Save lorenz_patches.pkl: 320 trajectories of shape (256, 12)
+    print("\nSaving lorenz_patches.pkl (320 trajectories of shape (256, 12))...")
+    patches_output_path = Path(args.output_dir) / 'lorenz_patches.pkl'
+    
+    patches_data = {
+        'train': {
+            'x': None,
+            'y': patched_trajectories  # (320, 256, 12)
+        },
+        'val': {
+            'x': None,
+            'y': None  # No split for this dataset
+        }
+    }
+    
+    with open(patches_output_path, 'wb') as f:
+        pickle.dump(patches_data, f)
+    print(f"Saved patched data to {patches_output_path}")
+    print(f"  Shape: {patched_trajectories.shape}")
     
     # Visualization
     if args.visualize or args.save_plot:

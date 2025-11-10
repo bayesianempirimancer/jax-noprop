@@ -133,6 +133,11 @@ class VAE_flow(nn.Module):
         return alpha_t, gamma_prime_t
     
     @nn.compact
+    def get_alpha_bar(self, t: jnp.ndarray):
+        """Get alpha_bar(t) from noise schedule using @nn.compact method."""
+        return self.noise_schedule.get_alpha_bar(t)
+    
+    @nn.compact
     def crn_output(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         """Raw model output from CRN.  Called u_y in paper"""
         # Encode x to latent space before passing to CRN (if encode_x is True)
@@ -227,8 +232,8 @@ class VAE_flow(nn.Module):
         # Split keys for random sampling operations (not dropout)
         key, t_key, noise_key, z_target_key, vae_noise_key = jr.split(key, 5)
         batch_shape = y.shape[:-self.y_ndims]
-        alpha_0 = self.apply(params, jnp.asarray(0.0), method='get_noise_params')[0]
-        alpha_1 = self.apply(params, jnp.array(1.0), method='get_noise_params')[0]
+        alpha_0 = self.apply(params, jnp.asarray(1e-6), method='get_alpha_bar')
+        alpha_1 = self.apply(params, jnp.array(1.0-1e-6), method='get_alpha_bar')
 
         # Encode Target (noisy latent)
         mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})

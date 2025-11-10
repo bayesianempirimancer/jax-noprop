@@ -237,8 +237,8 @@ class VAE_flow(nn.Module):
         key, t_key, noise_key, z_target_key, vae_noise_key = jr.split(key, 5)
         batch_shape = y.shape[:-self.y_ndims]
 
-        alpha_0 = self.apply(params, jnp.asarray(1e-6), method='get_noise_params')[0]
-        alpha_1 = self.apply(params, jnp.asarray(1-1e-6), method='get_noise_params')[0]
+        alpha_0 = self.apply(params, jnp.asarray(1e-6), method='get_alpha_bar')
+        alpha_1 = self.apply(params, jnp.array(1.0-1e-6), method='get_alpha_bar')
 
         # Encode Target (noisy latent)
         mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})

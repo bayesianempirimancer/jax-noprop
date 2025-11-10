@@ -237,18 +237,15 @@ def sequence_metrics(
     # Compute cosine similarity
     cosine_sim = cosine_similarity(gen_flat, real_flat)
     
-    # Compute R² (coefficient of determination) on price dimension
-    real_price = real_sequences[:, :, price_dim]  # [batch, seq_len]
-    gen_price = generated_sequences[:, :, price_dim]  # [batch, seq_len]
+    # Compute R² (coefficient of determination) on all dimensions (not just price_dim)
+    # Flatten all dimensions for overall R² computation
+    real_flat_all = real_sequences.reshape(-1)  # [batch * seq_len * embed_dim]
+    gen_flat_all = generated_sequences.reshape(-1)  # [batch * seq_len * embed_dim]
     
-    # Flatten price sequences
-    real_price_flat = real_price.reshape(-1)  # [batch * seq_len]
-    gen_price_flat = gen_price.reshape(-1)  # [batch * seq_len]
-    
-    # Compute R² on price only
-    ss_res = jnp.sum((real_price_flat - gen_price_flat) ** 2)
-    real_price_mean = jnp.mean(real_price_flat)
-    ss_tot = jnp.sum((real_price_flat - real_price_mean) ** 2)
+    # Compute R² on all dimensions
+    ss_res = jnp.sum((real_flat_all - gen_flat_all) ** 2)
+    real_mean = jnp.mean(real_flat_all)
+    ss_tot = jnp.sum((real_flat_all - real_mean) ** 2)
     
     # Avoid division by zero
     if ss_tot > 1e-10:

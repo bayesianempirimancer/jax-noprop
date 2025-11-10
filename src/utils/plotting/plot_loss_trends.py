@@ -19,12 +19,8 @@ def plot_loss_trends(history: Dict[str, Any], model_type: str, output_dir: str):
     """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
-    # Check if we have sequence metrics to determine subplot layout
-    has_seq_metrics = history.get('val_seq_metrics') and len(history['val_seq_metrics']) > 0
-    if has_seq_metrics:
-        fig, axes = plt.subplots(2, 4, figsize=(24, 10))
-    else:
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    # Always use 2x4 layout for sequence data
+    fig, axes = plt.subplots(2, 4, figsize=(24, 10))
     fig.suptitle(f'Loss Trends - {model_type.title()} Model (Sequence Data)', fontsize=16, fontweight='bold')
     
     epochs = range(len(history['train_losses']))
@@ -52,17 +48,16 @@ def plot_loss_trends(history: Dict[str, Any], model_type: str, output_dir: str):
     ax.grid(True, alpha=0.3)
     
     # VAE Loss (Panel 3)
-    if has_seq_metrics:
-        ax = axes[0, 2]
-        if 'train_vae_losses' in history and len(history['train_vae_losses']) > 0:
-            ax.plot(epochs, history['train_vae_losses'], label='Train VAE', color='teal', linewidth=2)
-        if history.get('val_vae_losses') and len(history['val_vae_losses']) > 0:
-            ax.plot(epochs, history['val_vae_losses'], label='Val VAE', color='coral', linewidth=2, linestyle='--')
-        ax.set_title('VAE Loss', fontsize=12, fontweight='bold')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Loss')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+    ax = axes[0, 2]
+    if 'train_vae_losses' in history and len(history['train_vae_losses']) > 0:
+        ax.plot(epochs, history['train_vae_losses'], label='Train VAE', color='teal', linewidth=2)
+    if history.get('val_vae_losses') and len(history['val_vae_losses']) > 0:
+        ax.plot(epochs, history['val_vae_losses'], label='Val VAE', color='coral', linewidth=2, linestyle='--')
+    ax.set_title('VAE Loss', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Loss')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
     
     # Reconstruction Loss
     ax = axes[1, 0]
@@ -87,37 +82,42 @@ def plot_loss_trends(history: Dict[str, Any], model_type: str, output_dir: str):
     ax.grid(True, alpha=0.3)
     
     # Percent Variance Explained (Panel 6)
+    ax = axes[1, 2]
+    has_seq_metrics = history.get('val_seq_metrics') and len(history['val_seq_metrics']) > 0
+    pve_vals = []
     if has_seq_metrics:
-        ax = axes[1, 2]
         seq_epochs = range(len(history['val_seq_metrics']))
         pve_vals = [m.get('percent_variance_explained', float('nan')) for m in history['val_seq_metrics'] 
                    if 'percent_variance_explained' in m and np.isfinite(m.get('percent_variance_explained', float('nan')))]
         
         if pve_vals:
             ax.plot(seq_epochs[:len(pve_vals)], pve_vals, label='% Variance Explained', color='green', linewidth=2, linestyle='-')
-        
-        ax.set_title('% Variance Explained', fontsize=12, fontweight='bold')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('% Variance Explained', color='green')
-        ax.tick_params(axis='y', labelcolor='green')
+    
+    ax.set_title('% Variance Explained', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('% Variance Explained', color='green')
+    ax.tick_params(axis='y', labelcolor='green')
+    if has_seq_metrics and len(pve_vals) > 0:
         ax.legend()
-        ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.3)
     
     # Sequence Metrics (MSE) (Panel 7)
+    ax = axes[1, 3]
+    mse_vals = []
     if has_seq_metrics:
-        ax = axes[1, 3]
         seq_epochs = range(len(history['val_seq_metrics']))
         mse_vals = [m['mse'] for m in history['val_seq_metrics'] if 'mse' in m]
         
         if mse_vals:
             ax.plot(seq_epochs[:len(mse_vals)], mse_vals, label='MSE', color='darkorange', linewidth=2, linestyle='--')
-        
-        ax.set_title('Sequence Metrics (MSE)', fontsize=12, fontweight='bold')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('MSE', color='darkorange')
-        ax.tick_params(axis='y', labelcolor='darkorange')
+    
+    ax.set_title('Sequence Metrics (MSE)', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('MSE', color='darkorange')
+    ax.tick_params(axis='y', labelcolor='darkorange')
+    if has_seq_metrics and len(mse_vals) > 0:
         ax.legend()
-        ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.3)
     
     fig.tight_layout()
     plot_path = os.path.join(output_dir, 'loss_trends.png')

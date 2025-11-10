@@ -29,13 +29,14 @@ class Mlp(nn.Module):
     bias: bool = True
 
     @nn.compact
-    def __call__(self, x: jnp.ndarray, in_features: int) -> jnp.ndarray:
+    def __call__(self, x: jnp.ndarray, in_features: int, training: bool = True) -> jnp.ndarray:
         """
         Forward pass of the MLP.
 
         Args:
             x (jnp.ndarray): Input tensor of shape (B, ..., in_features).
             in_features (int): Number of input features.
+            training (bool): Whether in training mode (affects dropout).
 
         Returns:
             jnp.ndarray: Output tensor of shape (B, ..., out_features).
@@ -45,9 +46,9 @@ class Mlp(nn.Module):
 
         x = nn.Dense(hidden_features, use_bias=self.bias, name='fc1')(x)
         x = self.act_layer(x)
-        x = nn.Dropout(self.dropout_rate)(x, deterministic=False)
+        x = nn.Dropout(self.dropout_rate)(x, deterministic=not training)
         x = nn.Dense(out_features, use_bias=self.bias, name='fc2')(x)
-        x = nn.Dropout(self.dropout_rate)(x, deterministic=False)
+        x = nn.Dropout(self.dropout_rate)(x, deterministic=not training)
 
         return x
 

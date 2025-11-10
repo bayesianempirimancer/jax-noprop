@@ -128,7 +128,7 @@ class VAE_flow(nn.Module):
         return z, x, t
 
     @nn.compact
-    def dz_dt(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+    def dz_dt(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, x_mask: Optional[jnp.ndarray] = None, training: bool = True) -> jnp.ndarray:
         """Flow model that computes dz/dt using CRN."""
         # Optimized: minimize broadcasting and avoid redundant operations
         t = jnp.asarray(t)
@@ -138,7 +138,8 @@ class VAE_flow(nn.Module):
         if self.config.main.get("encode_x", False) and x is not None:
             x = self.encode(x, training)[0]
         
-        dz_dt = self.crn_model(z, x, t, training=training)            
+        # Pass x_mask to CRN if provided (for sequence models with masking)
+        dz_dt = self.crn_model(z, x, t, x_mask=x_mask, training=training)            
         return dz_dt
 
     def lazy_flow(self, z_t, z_target, alpha_t, gamma_prime_t):
@@ -167,6 +168,11 @@ class VAE_flow(nn.Module):
         alpha_bar_t, gamma_prime_t = self.noise_schedule.get_alpha_bar_gamma_prime(t)
         return alpha_bar_t, gamma_prime_t
     
+    @nn.compact
+    def get_alpha_bar(self, t: jnp.ndarray):
+        """Get alpha_bar(t) from noise schedule using @nn.compact method."""
+        return self.noise_schedule.get_alpha_bar(t)
+    
     
     @nn.compact
     def encode(self, x: jnp.ndarray, training: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -193,7 +199,7 @@ class VAE_flow(nn.Module):
         
         # Call get_noise_params to initialize noise schedule parameters
         self.get_noise_params(dummy_t)
-        
+        self.get_alpha_bar(dummy_t)
         # initialize model components
         flow_output = self.dz_dt(dummy_z, x, dummy_t, training)
         encoder_output = self.encode(y, training)
@@ -202,7 +208,7 @@ class VAE_flow(nn.Module):
         return jnp.zeros(batch_shape + self.z_shape) # batch consistent with expectations
 
     @partial(jax.jit, static_argnums=(0, 5))    
-    def loss(self, params: dict, x: Optional[jnp.ndarray], y: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> Tuple[jnp.ndarray, dict]:
+    def loss(self, params: dict, x: Optional[jnp.ndarray], y: jnp.ndarray, key: jr.PRNGKey, training: bool = True, x_mask: Optional[jnp.ndarray] = None) -> Tuple[jnp.ndarray, dict]:
         """
         Compute the loss by calling individual @nn.compact methods with proper rngs.
         """
@@ -218,8 +224,9 @@ class VAE_flow(nn.Module):
         key, t_key, z_0_key, z_t_noise_key, z_target_key, vae_noise_key = jr.split(key, 6)
         batch_shape = y.shape[:-self.y_ndims]
 
-        alpha_0 = self.apply(params, jnp.asarray(1e-6), method='get_noise_params')[0]
-        alpha_1 = self.apply(params, jnp.asarray(1.0-1e-6), method='get_noise_params')[0]
+        # Get alpha_bar values at boundaries
+        alpha_0 = self.apply(params, jnp.asarray(1e-6), method='get_alpha_bar')
+        alpha_1 = self.apply(params, jnp.array(1.0-1e-6), method='get_alpha_bar')
         # Encode Target (noisy latent)
         mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})
         z_target = mu_z_target + jr.normal(z_target_key, mu_z_target.shape) * jnp.exp(0.5 * logvar_z_target)
@@ -240,8 +247,8 @@ class VAE_flow(nn.Module):
         gamma_prime_t_squeezed = jnp.squeeze(gamma_prime_t, axis=tuple(range(-self.z_ndims, 0))) if gamma_prime_t.ndim > len(batch_shape) else gamma_prime_t
 
         # Compute Flow Field and Target Estimate
-        dz_dt = self.apply(params, z_t, x, t, method='dz_dt', training=training, rngs={'dropout': key})    
-        z_target_est = dz_dt * (1.0 - t_expanded) + z_t
+        dz_dt = self.apply(params, z_t, x, t, x_mask, method='dz_dt', training=training, rngs={'dropout': key})    
+        z_target_est = dz_dt * (1.0-t_expanded) + z_t
 
         # Compute Predictions
         y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})
@@ -364,18 +371,19 @@ class VAE_flow(nn.Module):
     
 
     @partial(jax.jit, static_argnums=(0, 5, 7))  # self, optimizer, and training are static arguments
-    def train_step(self, params: dict, x: Optional[jnp.ndarray], y: jnp.ndarray, opt_state: dict, optimizer, key: jr.PRNGKey, training: bool = True) -> Tuple[dict, dict, jnp.ndarray, dict]:
+    def train_step(self, params: dict, x: Optional[jnp.ndarray], y: jnp.ndarray, opt_state: dict, optimizer, key: jr.PRNGKey, training: bool = True, x_mask: Optional[jnp.ndarray] = None) -> Tuple[dict, dict, jnp.ndarray, dict]:
         """
         JIT-compiled training step for VAE with flow model.
         
         Args:
             params: Current model parameters
-            x: Conditional input [batch_size, input_dim]
-            y: Target output [batch_size, output_dim]
+            x: Conditional input [batch_size, input_dim] or [batch_size, seq_len, embed_dim] for sequences
+            y: Target output [batch_size, output_dim] or [batch_size, seq_len, embed_dim] for sequences
             opt_state: Optimizer state
             optimizer: Optax optimizer
             key: Random key
-            use_dropout: Whether to use dropout during training
+            training: Whether in training mode
+            x_mask: Boolean mask [batch_size, x_seq_len] for sequence models (True=valid, False=masked)
             
         Returns:
             params: Updated model parameters
@@ -385,7 +393,7 @@ class VAE_flow(nn.Module):
         """
         # Compute loss and gradients
         def loss_fn(params):
-            return self.loss(params, x, y, key, training=training)  
+            return self.loss(params, x, y, key, training=training, x_mask=x_mask)  
         
         (loss, metrics), grads = jax.value_and_grad(
             loss_fn, has_aux=True
@@ -398,10 +406,10 @@ class VAE_flow(nn.Module):
         return params, opt_state, loss, metrics
     
     @partial(jax.jit, static_argnums=(0, 5, 7))  # self and optimizer are static arguments
-    def train_step_without_dropout(self, params: dict, x: jnp.ndarray, y: jnp.ndarray, opt_state: dict, optimizer, key: jr.PRNGKey, training: bool = False) -> Tuple[dict, dict, jnp.ndarray, dict]:
+    def train_step_without_dropout(self, params: dict, x: jnp.ndarray, y: jnp.ndarray, opt_state: dict, optimizer, key: jr.PRNGKey, training: bool = False, x_mask: Optional[jnp.ndarray] = None) -> Tuple[dict, dict, jnp.ndarray, dict]:
         # Compute loss and gradients
         def loss_fn(params):
-            return self.loss(params, x, y, key, training=training)  
+            return self.loss(params, x, y, key, training=training, x_mask=x_mask)  
         
         (loss, metrics), grads = jax.value_and_grad(
             loss_fn, has_aux=True

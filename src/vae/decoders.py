@@ -201,30 +201,25 @@ class IdentityDecoder(nn.Module):
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        # For identity behavior: if decoder_type is 'none' or 'identity', return x as-is (reshape if needed)
-        decoder_type = self.config.get("decoder_type", "linear")
-        if decoder_type == "none" or decoder_type == "identity":
-            # Determine desired batch shape and reshape if total elements match
-            batch_ndims = x.ndim - len(self.latent_shape) if self.latent_shape is not None else x.ndim - len(self.output_shape)
-            batch_ndims = max(batch_ndims, 1)
-            batch_shape = x.shape[:batch_ndims]
-            # If already in desired output shape, return directly
-            if x.shape[-len(self.output_shape):] == self.output_shape:
-                return x
-            # Attempt reshape to output shape if sizes match
-            total_current = 1
-            for d in x.shape[batch_ndims:]:
-                total_current *= d
-            total_target = 1
-            for d in self.output_shape:
-                total_target *= d
-            if total_current == total_target:
-                return x.reshape(batch_shape + self.output_shape)
-            # Fallback to linear projection only if shapes incompatible
-        
-        # Linear mapping fallback (e.g., when decoder_type != 'none' or shapes incompatible)
-        output = nn.Dense(self.output_shape[0])(x)
-        return apply_output_transformation(output, decoder_type)
+        # For identity model_type, always return x as-is (reshape if needed to match output_shape)
+        # Determine desired batch shape and reshape if total elements match
+        batch_ndims = x.ndim - len(self.latent_shape) if self.latent_shape is not None else x.ndim - len(self.output_shape)
+        batch_ndims = max(batch_ndims, 1)
+        batch_shape = x.shape[:batch_ndims]
+        # If already in desired output shape, return directly
+        if x.shape[-len(self.output_shape):] == self.output_shape:
+            return x
+        # Attempt reshape to output shape if sizes match
+        total_current = 1
+        for d in x.shape[batch_ndims:]:
+            total_current *= d
+        total_target = 1
+        for d in self.output_shape:
+            total_target *= d
+        if total_current == total_target:
+            return x.reshape(batch_shape + self.output_shape)
+        # If shapes are incompatible, return x as-is (should not happen with correct config)
+        return x
 
 
 class LinearDecoder(nn.Module):

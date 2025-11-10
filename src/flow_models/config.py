@@ -69,6 +69,20 @@ class Config(BaseConfig):
         "activation_fn": "swish",
         "use_batch_norm": False,
         "dropout_rate": 0.1,
+        "transformer_config": FrozenDict({
+            "embed_dim": 32,  # Embedding dimension for transformer
+            "num_heads": 4,  # Number of attention heads
+            "num_layers": 2,  # Number of transformer layers
+            "mlp_ratio": 4.0,  # Ratio for MLP hidden dimension relative to embed_dim
+            "qkv_bias": True,  # Whether to use bias in QKV projections
+            "rope_base": 10000.0,  # Base for RoPE frequency calculation
+            "lora_rank": 8,  # Rank for LoRA decomposition in TwistedAttention (default: 8)
+            "attention_dropout": 0.1,  # Dropout rate for attention (optional, uses top-level dropout_rate if not specified)
+            "mlp_dropout": 0.1,  # Dropout rate for MLP (optional, uses top-level dropout_rate if not specified)
+            "activation": "swish",  # Activation function (can also use "activation_fn")
+            "x_static_dim": 0,  # Dimension of static features x_static (0 means no static features)
+            "projection_seed": 42,  # Random seed for projection matrices (if needed)
+        }),
     }))
     
     encoder: FrozenDict = field(default_factory=lambda: FrozenDict({
@@ -139,15 +153,18 @@ class Config(BaseConfig):
             input_shape = ()  # Always empty for unconditional
         else:
             # Conditional generation: reverse config values (y->x generation)
+            # BUT: if args.input_shape/args.output_shape are None, use config values directly (don't reverse)
+            # This allows config files to specify shapes directly without being reversed
             if args.input_shape is not None or args.output_shape is not None:
                 # Args provided: input_shape is x shape, output_shape is y shape
                 # For generation: input is y, output is x
                 input_shape = tuple(args.output_shape) if args.output_shape is not None else tuple(main_dict.get('output_shape', (2,)))
                 output_shape = tuple(args.input_shape) if args.input_shape is not None else tuple(main_dict.get('input_shape', (2,)))
             else:
-                # No args: reverse config file values (config assumed to be x->y, we need y->x)
-                input_shape = tuple(main_dict.get('output_shape', (2,)))
-                output_shape = tuple(main_dict.get('input_shape', (2,)))
+                # No args: use config values directly (don't reverse) - config file should have correct shapes
+                # This is important for sequences where config already has x->y format
+                input_shape = tuple(main_dict.get('input_shape', (2,))) if isinstance(main_dict.get('input_shape'), (list, tuple)) else (main_dict.get('input_shape', 2),)
+                output_shape = tuple(main_dict.get('output_shape', (2,))) if isinstance(main_dict.get('output_shape'), (list, tuple)) else (main_dict.get('output_shape', 2),)
         
         # Latent shape is always from config or args, unchanged
         latent_shape = tuple(args.latent_shape) if args.latent_shape is not None else tuple(main_dict.get('latent_shape', (2,)))
@@ -271,18 +288,24 @@ class Config(BaseConfig):
         })
         
         # Build updates for encoder config (encoder encodes x)
+        # For sequences: encoder/decoder shapes should NOT be overridden - they operate on terminal dimension only
+        # Only override if explicitly provided in args, otherwise keep config values
+        encoder_dict = dict(self.encoder)
         encoder_updates = BaseConfig.filter_none({
             'model_type': args.encoder_model_type,
-            'input_shape': input_shape,  # Encoder encodes x (inputs)
-            'latent_shape': latent_shape,  # Must match main config
+            # Only override input_shape/latent_shape if not already set in config (for sequences, config has correct values)
+            'input_shape': input_shape if encoder_dict.get('input_shape') == "NA" or encoder_dict.get('input_shape') is None else None,
+            'latent_shape': latent_shape if encoder_dict.get('latent_shape') == "NA" or encoder_dict.get('latent_shape') is None else None,
         })
         
         # Build updates for decoder config
+        decoder_dict = dict(self.decoder)
         decoder_updates = BaseConfig.filter_none({
             'model_type': args.decoder_model_type,
             'decoder_type': args.decoder_type,
-            'output_shape': output_shape,
-            'latent_shape': latent_shape,  # Must match main config
+            # Only override output_shape/latent_shape if not already set in config (for sequences, config has correct values)
+            'output_shape': output_shape if decoder_dict.get('output_shape') == "NA" or decoder_dict.get('output_shape') is None else None,
+            'latent_shape': latent_shape if decoder_dict.get('latent_shape') == "NA" or decoder_dict.get('latent_shape') is None else None,
         })
         
         # Build updates for noise schedule config

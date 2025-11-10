@@ -124,6 +124,75 @@ def create_conditional_resnet(config_dict: Union[Dict[str, Any], FrozenDict], la
     # Filter out model_type and network_type from the final config before passing to CRN classes
     crn_config = {k: v for k, v in config.config.items() if k not in ["model_type", "network_type"]}
     
+    # For transformer_seq2seq, extract and flatten transformer_config
+    # For other network types, remove transformer_config if present
+    if network_type == "transformer_seq2seq":
+        if "transformer_config" not in crn_config:
+            raise ValueError(f"transformer_config is required for network_type='transformer_seq2seq'")
+        
+        # Extract transformer_config and flatten it into crn_config
+        transformer_config = crn_config.pop("transformer_config")
+        
+        # Convert FrozenDict to dict if needed
+        if hasattr(transformer_config, 'unfreeze'):
+            transformer_config = transformer_config.unfreeze()
+        else:
+            transformer_config = dict(transformer_config)
+        
+        # Map transformer_config keys to TransformerSeq2SeqConditionalResnet parameter names
+        # Handle parameter name mappings
+        transformer_params = {}
+        
+        # Direct mappings
+        if "embed_dim" in transformer_config:
+            transformer_params["embed_dim"] = transformer_config["embed_dim"]
+        if "num_layers" in transformer_config:
+            transformer_params["num_layers"] = transformer_config["num_layers"]
+        if "num_heads" in transformer_config:
+            transformer_params["num_heads"] = transformer_config["num_heads"]
+        if "mlp_ratio" in transformer_config:
+            transformer_params["mlp_ratio"] = transformer_config["mlp_ratio"]
+        if "qkv_bias" in transformer_config:
+            transformer_params["qkv_bias"] = transformer_config["qkv_bias"]
+        if "rope_base" in transformer_config:
+            transformer_params["rope_base"] = transformer_config["rope_base"]
+        if "lora_rank" in transformer_config:
+            transformer_params["lora_rank"] = transformer_config["lora_rank"]
+        if "x_static_dim" in transformer_config:
+            transformer_params["x_static_dim"] = transformer_config["x_static_dim"]
+        if "projection_seed" in transformer_config:
+            transformer_params["projection_seed"] = transformer_config["projection_seed"]
+        
+        # Parameter name mappings
+        if "activation" in transformer_config:
+            transformer_params["activation_fn"] = transformer_config["activation"]
+        elif "activation_fn" in transformer_config:
+            transformer_params["activation_fn"] = transformer_config["activation_fn"]
+        
+        # Dropout: use attention_dropout or mlp_dropout if specified, otherwise use top-level dropout_rate
+        if "attention_dropout" in transformer_config or "mlp_dropout" in transformer_config:
+            # Use the first available dropout value
+            transformer_params["dropout_rate"] = transformer_config.get("attention_dropout") or transformer_config.get("mlp_dropout")
+        
+        # Merge transformer_params into crn_config (transformer_params take precedence)
+        crn_config = {**crn_config, **transformer_params}
+        
+        # Filter out parameters that TransformerSeq2SeqConditionalResnet doesn't accept
+        # These are used by other models or are not needed
+        excluded_params = {
+            "x_embed_method",  # Not used by TransformerSeq2SeqConditionalResnet
+            "z_embed_method",  # Not used by TransformerSeq2SeqConditionalResnet
+            "hidden_dims",  # Not used by TransformerSeq2SeqConditionalResnet (uses embed_dim instead)
+            "use_batch_norm",  # Not used by TransformerSeq2SeqConditionalResnet
+        }
+        crn_config = {k: v for k, v in crn_config.items() if k not in excluded_params}
+        
+        # Note: lora_rank is now accepted by TransformerSeq2SeqConditionalResnet and passed to TwistedAttentionBlock
+    else:
+        # For non-transformer network types, remove transformer_config if present
+        if "transformer_config" in crn_config:
+            crn_config.pop("transformer_config")
+    
     # Create the base ResNet
     if network_type == "mlp":
         base_resnet = ConditionalResnet_MLP(**crn_config)
