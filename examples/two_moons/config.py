@@ -43,8 +43,8 @@ class Config(Config):
         # Loss configuration
         "recon_loss_type": "mse",  # Reconstruction loss type: "mse", "cross_entropy", or "none"
         "recon_weight": 0.0,  # Weight for reconstruction loss (can override with --recon_weight)
-        "reg_weight": 0.0,  # Weight for regularization loss (can override with --reg_weight)
         "vae_weight": 1.0,  # Weight for VAE loss (can override with --vae_weight)
+        "reg_weight": 0.0,  # Weight for regularization loss (can override with --reg_weight)
         # Flow model settings
         "normalize_snr_weight": True,  # Apply signal-to-noise ratio weighting to loss
                                   # False for flow_matching, True for diffusion/ct
