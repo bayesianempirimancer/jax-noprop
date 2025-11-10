@@ -342,7 +342,7 @@ class LinearNoiseSchedule(NoiseSchedule):
         alpha_bar_t = alpha_bar_min + t * delta_alpha
         
         # Apply stop_gradient if learnable=False (handled in base class get_alpha_bar)
-        return alpha_bar_t
+        return clip(alpha_bar_t, 1e-5, 1-1e-5)
     
     @nn.compact
     def _get_alpha_bar_gamma_prime(
@@ -374,7 +374,7 @@ class LinearNoiseSchedule(NoiseSchedule):
         delta_alpha = alpha_bar_max - alpha_bar_min
         alpha_bar_t = alpha_bar_min + t * delta_alpha
         # Clip to ensure alpha_bar_t is strictly in (0, 1) to avoid division by zero
-        alpha_bar_t = clip(alpha_bar_t, 1e-8, 1.0 - 1e-8)
+        alpha_bar_t = clip(alpha_bar_t, 1e-5, 1.0 - 1e-5)
         
         # For linear: alpha_bar_prime is constant (delta_alpha)
         # Compute gamma_prime: gamma_prime = alpha_bar_prime / (alpha_bar * (1 - alpha_bar))
@@ -428,7 +428,7 @@ class CosineNoiseSchedule(NoiseSchedule):
         cos_arg = (t + s) / one_plus_s * (0.5 * jnp.pi)  # Cache pi/2
         sin_arg = jnp.sin(cos_arg)
         alpha_bar_t = sin_arg * sin_arg  # More efficient than sin^2
-        return clip(alpha_bar_t, 0.001, 0.999)
+        return clip(alpha_bar_t, 1e-5, 1-1e-5)
     
     @nn.compact
     def _get_alpha_bar_gamma_prime(
@@ -444,18 +444,17 @@ class CosineNoiseSchedule(NoiseSchedule):
         s = jax.nn.softplus(s_logit)
         one_plus_s = 1.0 + s  # Cache denominator
         pi_half = 0.5 * jnp.pi  # Cache pi/2
-        cos_arg = (t + s) / one_plus_s * pi_half
-        sin_arg = jnp.sin(cos_arg)
-        cos_arg_val = jnp.cos(cos_arg)
+
+        def alpha_bar(t):
+            cos_arg = (t + s) / one_plus_s * pi_half
+            sin_arg = jnp.sin(cos_arg)
         
-        alpha_bar_t = sin_arg * sin_arg  # More efficient than sin^2
-        alpha_bar_t = clip(alpha_bar_t, 1e-8, 1-1e-8)
+            return clip(jnp.square(sin_arg), 1e-5, 1-1e-5)
         
         # Derivative: d/dx sin^2(x) = 2*sin(x)*cos(x)
-        # Cache pi_half / one_plus_s
-        pi_half_over_one_plus_s = pi_half / one_plus_s
-        alpha_bar_prime_t = 2.0 * sin_arg * cos_arg_val * pi_half_over_one_plus_s
-        
+        # Note: better to use grad because of cliping
+        alpha_bar_t, alpha_bar_prime_t = jax.vmap(jax.value_and_grad(alpha_bar))(t)
+
         # Compute gamma_prime efficiently
         alpha_bar_t_one_minus = alpha_bar_t * (1.0 - alpha_bar_t)
         gamma_prime_t = alpha_bar_prime_t / alpha_bar_t_one_minus
@@ -1014,7 +1013,7 @@ class QuadraticNoiseSchedule(NoiseSchedule):
         
         # Quadratic: alpha_bar(t) = alpha_bar_min + (alpha_bar_max - alpha_bar_min) * t^2
         # Clamp t to slightly above 0 and below 1 for numerical stability
-        t_clamped = clip(t, 1e-6, 1.0 - 1e-6)
+        t_clamped = clip(t, 0.0, 1.0)
         t_squared = t_clamped * t_clamped  # t^2 in [0, 1]
         alpha_bar_t = alpha_bar_min + (alpha_bar_max - alpha_bar_min) * t_squared
 
@@ -1054,11 +1053,9 @@ class QuadraticNoiseSchedule(NoiseSchedule):
         
         # Quadratic: alpha_bar(t) = alpha_bar_min + delta_alpha * t^2
         # Clamp t to [0, 1] to ensure t^2 is in [0, 1]
-        t_clamped = clip(t, 0.0, 1.0)
+        t_clamped = clip(t, 0, 1.0)
         t_squared = t_clamped * t_clamped  # t^2 in [0, 1]
         alpha_bar_t = alpha_bar_min + delta_alpha * t_squared
-        # Final clipping ensures alpha_bar_t in [0.001, 0.999] for numerical stability
-        alpha_bar_t = clip(alpha_bar_t, 0.001, 0.999)
         
         # Derivative: d/dt [t^2] = 2*t (use clamped t for consistency)
         alpha_bar_prime_t = delta_alpha * 2.0 * t_clamped
