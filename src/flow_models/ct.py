@@ -227,8 +227,8 @@ class VAE_flow(nn.Module):
         # Split keys for random sampling operations (not dropout)
         key, t_key, noise_key, z_target_key, vae_noise_key = jr.split(key, 5)
         batch_shape = y.shape[:-self.y_ndims]
-        alpha_0 = self.apply(params, jnp.asarray(1e-6), method='get_noise_params')[0]
-        alpha_1 = self.apply(params, jnp.array(1.0-1e-6), method='get_noise_params')[0]
+        alpha_0 = self.apply(params, jnp.asarray(0.0), method='get_noise_params')[0]
+        alpha_1 = self.apply(params, jnp.array(1.0), method='get_noise_params')[0]
 
         # Encode Target (noisy latent)
         mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})
@@ -236,7 +236,7 @@ class VAE_flow(nn.Module):
         
         # Sample time and get noise schedule parameters
         t = jr.uniform(t_key, batch_shape, minval=0.0, maxval=1.0)
-        t_expanded = jnp.expand_dims(t, axis=tuple(range(-self.z_ndims, 0)))       
+        t_expanded = jnp.expand_dims(t, axis=tuple(range(-self.z_ndims, 0)))     
         # Get noise schedule parameters (expand t to match expected shape)
         alpha_t, gamma_prime_t = self.apply(params, t_expanded, method='get_noise_params')
         
@@ -287,9 +287,9 @@ class VAE_flow(nn.Module):
 
         # KL regularization term: KL(q(z_0|z_target), p(z_0))
         # alpha_0 is guaranteed to be in (0, 1) by noise schedule clipping
-        q_sigma_sq = 1.0 - alpha_0
-        mean_q_mu_sq = alpha_0*jnp.mean(jnp.sum(z_target**2, axis=tuple(range(-self.z_ndims, 0))))
-        kl_z0_loss = 0.5 * (mean_q_mu_sq - self.z_dim*(jnp.log(q_sigma_sq) + alpha_0))
+        # we assume that p(z_0) = N(z_0; 0, 1 - \alpha_0)
+        snr_0 = alpha_0 / (1 - alpha_0)
+        kl_z0_loss = jnp.mean(jnp.sum(z_target**2, axis=tuple(range(-self.z_ndims, 0)))) * snr_0
 
         total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss + kl_z0_loss 
         
