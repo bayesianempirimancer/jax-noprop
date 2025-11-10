@@ -90,8 +90,6 @@ from typing import Any, Dict, Optional, Tuple
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from tensorflow_probability.substrates import jax as tfp
-clip = tfp.math.clip_by_value_preserve_gradient
 
 class NoiseSchedule(nn.Module):
     """Abstract base class for noise schedules.
@@ -318,14 +316,14 @@ class LinearNoiseSchedule(NoiseSchedule):
         else:
             # Compute initial logit values from initial alpha_bar values
             # alpha_bar_min = sigmoid(logit) -> logit = logit(alpha_bar_min)
-            alpha_bar_min_logit_val = jax.scipy.special.logit(clip(self.alpha_bar_min, 1e-7, 1.0 - 1e-7))
+            alpha_bar_min_logit_val = jax.scipy.special.logit(jnp.clip(self.alpha_bar_min, 1e-7, 1.0 - 1e-7))
             # alpha_bar_max = alpha_bar_min + (1 - alpha_bar_min) * sigmoid(logit)
             # -> sigmoid(logit) = (alpha_bar_max - alpha_bar_min) / (1 - alpha_bar_min)
             # -> logit = logit((alpha_bar_max - alpha_bar_min) / (1 - alpha_bar_min))
-            alpha_bar_min_clamped = clip(self.alpha_bar_min, 1e-7, 1.0 - 1e-7)
-            alpha_bar_max_clamped = clip(self.alpha_bar_max, alpha_bar_min_clamped, 1.0 - 1e-7)
+            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 1e-7, 1.0 - 1e-7)
+            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 1.0 - 1e-7)
             max_fraction = (alpha_bar_max_clamped - alpha_bar_min_clamped) / (1.0 - alpha_bar_min_clamped)
-            alpha_bar_max_logit_val = jax.scipy.special.logit(clip(max_fraction, 1e-7, 1.0 - 1e-7))
+            alpha_bar_max_logit_val = jax.scipy.special.logit(jnp.clip(max_fraction, 1e-7, 1.0 - 1e-7))
             
             alpha_bar_min_logit = self.param('alpha_bar_min_logit', 
                                             nn.initializers.constant(alpha_bar_min_logit_val), ())
@@ -342,7 +340,7 @@ class LinearNoiseSchedule(NoiseSchedule):
         alpha_bar_t = alpha_bar_min + t * delta_alpha
         
         # Apply stop_gradient if learnable=False (handled in base class get_alpha_bar)
-        return clip(alpha_bar_t, 1e-5, 1-1e-5)
+        return jnp.clip(alpha_bar_t, 1e-5, 1-1e-5)
     
     @nn.compact
     def _get_alpha_bar_gamma_prime(
@@ -374,7 +372,7 @@ class LinearNoiseSchedule(NoiseSchedule):
         delta_alpha = alpha_bar_max - alpha_bar_min
         alpha_bar_t = alpha_bar_min + t * delta_alpha
         # Clip to ensure alpha_bar_t is strictly in (0, 1) to avoid division by zero
-        alpha_bar_t = clip(alpha_bar_t, 1e-5, 1.0 - 1e-5)
+        alpha_bar_t = jnp.clip(alpha_bar_t, 1e-5, 1.0 - 1e-5)
         
         # For linear: alpha_bar_prime is constant (delta_alpha)
         # Compute gamma_prime: gamma_prime = alpha_bar_prime / (alpha_bar * (1 - alpha_bar))
@@ -428,7 +426,7 @@ class CosineNoiseSchedule(NoiseSchedule):
         cos_arg = (t + s) / one_plus_s * (0.5 * jnp.pi)  # Cache pi/2
         sin_arg = jnp.sin(cos_arg)
         alpha_bar_t = sin_arg * sin_arg  # More efficient than sin^2
-        return clip(alpha_bar_t, 1e-5, 1-1e-5)
+        return jnp.clip(alpha_bar_t, 1e-5, 1-1e-5)
     
     @nn.compact
     def _get_alpha_bar_gamma_prime(
@@ -449,7 +447,7 @@ class CosineNoiseSchedule(NoiseSchedule):
             cos_arg = (t + s) / one_plus_s * pi_half
             sin_arg = jnp.sin(cos_arg)
         
-            return clip(jnp.square(sin_arg), 1e-5, 1-1e-5)
+            return jnp.clip(jnp.square(sin_arg), 1e-5, 1-1e-5)
         
         # Derivative: d/dx sin^2(x) = 2*sin(x)*cos(x)
         # Note: better to use grad because of cliping
@@ -582,13 +580,13 @@ class ExponentialNoiseSchedule(NoiseSchedule):
             beta_logit_val = jnp.log1p(jnp.expm1(self.beta)) if self.beta > 0 else -10.0
             alpha_bar_min_logit_val = jax.scipy.special.logit((self.alpha_bar_min - 0.001) / 0.998)
             # delta_fraction = sigmoid(delta_fraction_logit) where delta_fraction = (alpha_bar_max - alpha_bar_min) / (0.999 - alpha_bar_min)
-            alpha_bar_min_clamped = clip(self.alpha_bar_min, 0.001, 0.998)
-            alpha_bar_max_clamped = clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
+            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 0.001, 0.998)
+            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
             delta_max_init = 0.999 - alpha_bar_min_clamped
             delta_actual_init = alpha_bar_max_clamped - alpha_bar_min_clamped
             # Use jnp.where for JIT compatibility
             delta_fraction_init = jnp.where(delta_max_init > 0, delta_actual_init / delta_max_init, 0.0)
-            delta_fraction_logit_val = jax.scipy.special.logit(clip(delta_fraction_init, 0.001, 0.999))
+            delta_fraction_logit_val = jax.scipy.special.logit(jnp.clip(delta_fraction_init, 0.001, 0.999))
             
             beta_logit = self.param('beta_logit', nn.initializers.constant(beta_logit_val), ())
             alpha_bar_min_logit = self.param('alpha_bar_min_logit', 
@@ -624,13 +622,13 @@ class ExponentialNoiseSchedule(NoiseSchedule):
             beta_logit_val = jnp.log1p(jnp.expm1(self.beta)) if self.beta > 0 else -10.0
             alpha_bar_min_logit_val = jax.scipy.special.logit((self.alpha_bar_min - 0.001) / 0.998)
             # delta_fraction = sigmoid(delta_fraction_logit) where delta_fraction = (alpha_bar_max - alpha_bar_min) / (0.999 - alpha_bar_min)
-            alpha_bar_min_clamped = clip(self.alpha_bar_min, 0.001, 0.998)
-            alpha_bar_max_clamped = clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
+            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 0.001, 0.998)
+            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
             delta_max_init = 0.999 - alpha_bar_min_clamped
             delta_actual_init = alpha_bar_max_clamped - alpha_bar_min_clamped
             # Use jnp.where for JIT compatibility
             delta_fraction_init = jnp.where(delta_max_init > 0, delta_actual_init / delta_max_init, 0.0)
-            delta_fraction_logit_val = jax.scipy.special.logit(clip(delta_fraction_init, 0.001, 0.999))
+            delta_fraction_logit_val = jax.scipy.special.logit(jnp.clip(delta_fraction_init, 0.001, 0.999))
             
             beta_logit = self.param('beta_logit', nn.initializers.constant(beta_logit_val), ())
             alpha_bar_min_logit = self.param('alpha_bar_min_logit', 
@@ -715,13 +713,13 @@ class CauchyNoiseSchedule(NoiseSchedule):
             scale_logit_val = jnp.log1p(jnp.expm1(self.scale)) if self.scale > 0 else -10.0
             alpha_bar_min_logit_val = jax.scipy.special.logit((self.alpha_bar_min - 0.001) / 0.998)
             # delta_fraction = sigmoid(delta_fraction_logit) where delta_fraction = (alpha_bar_max - alpha_bar_min) / (0.999 - alpha_bar_min)
-            alpha_bar_min_clamped = clip(self.alpha_bar_min, 0.001, 0.998)
-            alpha_bar_max_clamped = clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
+            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 0.001, 0.998)
+            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
             delta_max_init = 0.999 - alpha_bar_min_clamped
             delta_actual_init = alpha_bar_max_clamped - alpha_bar_min_clamped
             # Use jnp.where for JIT compatibility
             delta_fraction_init = jnp.where(delta_max_init > 0, delta_actual_init / delta_max_init, 0.0)
-            delta_fraction_logit_val = jax.scipy.special.logit(clip(delta_fraction_init, 0.001, 0.999))
+            delta_fraction_logit_val = jax.scipy.special.logit(jnp.clip(delta_fraction_init, 0.001, 0.999))
             
             loc = self.param('loc', nn.initializers.constant(self.loc), ())
             scale_logit = self.param('scale_logit', nn.initializers.constant(scale_logit_val), ())
@@ -738,14 +736,14 @@ class CauchyNoiseSchedule(NoiseSchedule):
         alpha_bar_max = alpha_bar_min + delta_alpha  # Guaranteed to be in [alpha_bar_min, 0.999]
         
         # Clamp t to slightly above 0 and below 1 for numerical stability
-        t_clamped = clip(t, 1e-7, 1.0 - 1e-7)
+        t_clamped = jnp.clip(t, 1e-7, 1.0 - 1e-7)
         # Optimized: cache 1/scale and 1/pi
         scale_inv = 1.0 / scale  # Cache 1/scale
         pi_inv = 1.0 / jnp.pi  # Cache 1/pi
         normalized = (t_clamped - loc) * scale_inv  # More efficient than (t - loc) / scale
         cdf_val = 0.5 + pi_inv * jnp.arctan(normalized)  # Cache CDF value
         alpha_bar_t = alpha_bar_min + delta_alpha * cdf_val
-        return clip(alpha_bar_t, 0.001, 0.999)
+        return jnp.clip(alpha_bar_t, 0.001, 0.999)
     
     @nn.compact
     def _get_alpha_bar_gamma_prime(
@@ -762,13 +760,13 @@ class CauchyNoiseSchedule(NoiseSchedule):
             scale_logit_val = jnp.log1p(jnp.expm1(self.scale)) if self.scale > 0 else -10.0
             alpha_bar_min_logit_val = jax.scipy.special.logit((self.alpha_bar_min - 0.001) / 0.998)
             # delta_fraction = sigmoid(delta_fraction_logit) where delta_fraction = (alpha_bar_max - alpha_bar_min) / (0.999 - alpha_bar_min)
-            alpha_bar_min_clamped = clip(self.alpha_bar_min, 0.001, 0.998)
-            alpha_bar_max_clamped = clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
+            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 0.001, 0.998)
+            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
             delta_max_init = 0.999 - alpha_bar_min_clamped
             delta_actual_init = alpha_bar_max_clamped - alpha_bar_min_clamped
             # Use jnp.where for JIT compatibility
             delta_fraction_init = jnp.where(delta_max_init > 0, delta_actual_init / delta_max_init, 0.0)
-            delta_fraction_logit_val = jax.scipy.special.logit(clip(delta_fraction_init, 0.001, 0.999))
+            delta_fraction_logit_val = jax.scipy.special.logit(jnp.clip(delta_fraction_init, 0.001, 0.999))
             
             loc = self.param('loc', nn.initializers.constant(self.loc), ())
             scale_logit = self.param('scale_logit', nn.initializers.constant(scale_logit_val), ())
@@ -785,7 +783,7 @@ class CauchyNoiseSchedule(NoiseSchedule):
         alpha_bar_max = alpha_bar_min + delta_alpha  # Guaranteed to be in [alpha_bar_min, 0.999]
         
         # Clamp t to slightly above 0 and below 1 for numerical stability
-        t_clamped = clip(t, 1e-7, 1.0 - 1e-7)
+        t_clamped = jnp.clip(t, 1e-7, 1.0 - 1e-7)
         # Optimized: cache 1/scale and 1/pi
         scale_inv = 1.0 / scale  # Cache 1/scale
         pi_inv = 1.0 / jnp.pi  # Cache 1/pi
@@ -793,7 +791,7 @@ class CauchyNoiseSchedule(NoiseSchedule):
         normalized_sq = normalized * normalized  # Cache normalized^2
         cdf_val = 0.5 + pi_inv * jnp.arctan(normalized)  # Cache CDF value
         alpha_bar_t = alpha_bar_min + delta_alpha * cdf_val
-        alpha_bar_t = clip(alpha_bar_t, 0.001, 0.999)
+        alpha_bar_t = jnp.clip(alpha_bar_t, 0.001, 0.999)
         
         # Cauchy PDF: 1 / (pi * scale * (1 + normalized^2))
         # Optimized: cache 1 + normalized^2
@@ -860,13 +858,13 @@ class LaplaceNoiseSchedule(NoiseSchedule):
             scale_logit_val = jnp.log1p(jnp.expm1(self.scale)) if self.scale > 0 else -10.0
             alpha_bar_min_logit_val = jax.scipy.special.logit((self.alpha_bar_min - 0.001) / 0.998)
             # delta_fraction = sigmoid(delta_fraction_logit) where delta_fraction = (alpha_bar_max - alpha_bar_min) / (0.999 - alpha_bar_min)
-            alpha_bar_min_clamped = clip(self.alpha_bar_min, 0.001, 0.998)
-            alpha_bar_max_clamped = clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
+            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 0.001, 0.998)
+            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
             delta_max_init = 0.999 - alpha_bar_min_clamped
             delta_actual_init = alpha_bar_max_clamped - alpha_bar_min_clamped
             # Use jnp.where for JIT compatibility
             delta_fraction_init = jnp.where(delta_max_init > 0, delta_actual_init / delta_max_init, 0.0)
-            delta_fraction_logit_val = jax.scipy.special.logit(clip(delta_fraction_init, 0.001, 0.999))
+            delta_fraction_logit_val = jax.scipy.special.logit(jnp.clip(delta_fraction_init, 0.001, 0.999))
             
             loc = self.param('loc', nn.initializers.constant(self.loc), ())
             scale_logit = self.param('scale_logit', nn.initializers.constant(scale_logit_val), ())
@@ -883,7 +881,7 @@ class LaplaceNoiseSchedule(NoiseSchedule):
         alpha_bar_max = alpha_bar_min + delta_alpha  # Guaranteed to be in [alpha_bar_min, 0.999]
         
         # Clamp t to slightly above 0 and below 1 for numerical stability
-        t_clamped = clip(t, 1e-7, 1.0 - 1e-7)
+        t_clamped = jnp.clip(t, 1e-7, 1.0 - 1e-7)
         # Optimized: cache 1/scale and compute normalized efficiently
         scale_inv = 1.0 / scale  # Cache 1/scale
         normalized = (t_clamped - loc) * scale_inv  # More efficient than (t - loc) / scale
@@ -892,7 +890,7 @@ class LaplaceNoiseSchedule(NoiseSchedule):
         exp_neg_abs = jnp.exp(-abs_val)  # Cache exp(-abs_val)
         cdf_val = 0.5 + 0.5 * sign * (1.0 - exp_neg_abs)  # Cache CDF value
         alpha_bar_t = alpha_bar_min + delta_alpha * cdf_val
-        return clip(alpha_bar_t, 0.001, 0.999)
+        return jnp.clip(alpha_bar_t, 0.001, 0.999)
     
     @nn.compact
     def _get_alpha_bar_gamma_prime(
@@ -909,13 +907,13 @@ class LaplaceNoiseSchedule(NoiseSchedule):
             scale_logit_val = jnp.log1p(jnp.expm1(self.scale)) if self.scale > 0 else -10.0
             alpha_bar_min_logit_val = jax.scipy.special.logit((self.alpha_bar_min - 0.001) / 0.998)
             # delta_fraction = sigmoid(delta_fraction_logit) where delta_fraction = (alpha_bar_max - alpha_bar_min) / (0.999 - alpha_bar_min)
-            alpha_bar_min_clamped = clip(self.alpha_bar_min, 0.001, 0.998)
-            alpha_bar_max_clamped = clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
+            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 0.001, 0.998)
+            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
             delta_max_init = 0.999 - alpha_bar_min_clamped
             delta_actual_init = alpha_bar_max_clamped - alpha_bar_min_clamped
             # Use jnp.where for JIT compatibility
             delta_fraction_init = jnp.where(delta_max_init > 0, delta_actual_init / delta_max_init, 0.0)
-            delta_fraction_logit_val = jax.scipy.special.logit(clip(delta_fraction_init, 0.001, 0.999))
+            delta_fraction_logit_val = jax.scipy.special.logit(jnp.clip(delta_fraction_init, 0.001, 0.999))
             
             loc = self.param('loc', nn.initializers.constant(self.loc), ())
             scale_logit = self.param('scale_logit', nn.initializers.constant(scale_logit_val), ())
@@ -932,7 +930,7 @@ class LaplaceNoiseSchedule(NoiseSchedule):
         alpha_bar_max = alpha_bar_min + delta_alpha  # Guaranteed to be in [alpha_bar_min, 0.999]
         
         # Clamp t to slightly above 0 and below 1 for numerical stability
-        t_clamped = clip(t, 1e-7, 1.0 - 1e-7)
+        t_clamped = jnp.clip(t, 1e-7, 1.0 - 1e-7)
         # Optimized: cache 1/scale and compute normalized efficiently
         scale_inv = 1.0 / scale  # Cache 1/scale
         normalized = (t_clamped - loc) * scale_inv  # More efficient than (t - loc) / scale
@@ -941,7 +939,7 @@ class LaplaceNoiseSchedule(NoiseSchedule):
         exp_neg_abs = jnp.exp(-abs_val)  # Cache exp(-abs_val)
         cdf_val = 0.5 + 0.5 * sign * (1.0 - exp_neg_abs)  # Cache CDF value
         alpha_bar_t = alpha_bar_min + delta_alpha * cdf_val
-        alpha_bar_t = clip(alpha_bar_t, 0.001, 0.999)
+        alpha_bar_t = jnp.clip(alpha_bar_t, 0.001, 0.999)
         
         # Laplace PDF: (1/(2*scale)) * exp(-|(t - loc)/scale|)
         pdf_val = 0.5 * scale_inv * exp_neg_abs  # Cache PDF value
@@ -993,13 +991,13 @@ class QuadraticNoiseSchedule(NoiseSchedule):
             # Compute initial logit values from initial alpha_bar values
             alpha_bar_min_logit_val = jax.scipy.special.logit((self.alpha_bar_min - 0.001) / 0.998)
             # delta_fraction = sigmoid(delta_fraction_logit) where delta_fraction = (alpha_bar_max - alpha_bar_min) / (0.999 - alpha_bar_min)
-            alpha_bar_min_clamped = clip(self.alpha_bar_min, 0.001, 0.998)
-            alpha_bar_max_clamped = clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
+            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 0.001, 0.998)
+            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
             delta_max_init = 0.999 - alpha_bar_min_clamped
             delta_actual_init = alpha_bar_max_clamped - alpha_bar_min_clamped
             # Use jnp.where for JIT compatibility
             delta_fraction_init = jnp.where(delta_max_init > 0, delta_actual_init / delta_max_init, 0.0)
-            delta_fraction_logit_val = jax.scipy.special.logit(clip(delta_fraction_init, 0.001, 0.999))
+            delta_fraction_logit_val = jax.scipy.special.logit(jnp.clip(delta_fraction_init, 0.001, 0.999))
             
             alpha_bar_min_logit = self.param('alpha_bar_min_logit', 
                                             nn.initializers.constant(alpha_bar_min_logit_val), ())
@@ -1015,7 +1013,7 @@ class QuadraticNoiseSchedule(NoiseSchedule):
         
         # Quadratic: alpha_bar(t) = alpha_bar_min + (alpha_bar_max - alpha_bar_min) * t^2
         # Clamp t to slightly above 0 and below 1 for numerical stability
-        t_clamped = clip(t, 0.0, 1.0)
+        t_clamped = jnp.clip(t, 0.0, 1.0)
         t_squared = t_clamped * t_clamped  # t^2 in [0, 1]
         alpha_bar_t = alpha_bar_min + (alpha_bar_max - alpha_bar_min) * t_squared
 
@@ -1033,13 +1031,13 @@ class QuadraticNoiseSchedule(NoiseSchedule):
             # Compute initial logit values from initial alpha_bar values
             alpha_bar_min_logit_val = jax.scipy.special.logit((self.alpha_bar_min - 0.001) / 0.998)
             # delta_fraction = sigmoid(delta_fraction_logit) where delta_fraction = (alpha_bar_max - alpha_bar_min) / (0.999 - alpha_bar_min)
-            alpha_bar_min_clamped = clip(self.alpha_bar_min, 0.001, 0.998)
-            alpha_bar_max_clamped = clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
+            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 0.001, 0.998)
+            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
             delta_max_init = 0.999 - alpha_bar_min_clamped
             delta_actual_init = alpha_bar_max_clamped - alpha_bar_min_clamped
             # Use jnp.where for JIT compatibility
             delta_fraction_init = jnp.where(delta_max_init > 0, delta_actual_init / delta_max_init, 0.0)
-            delta_fraction_logit_val = jax.scipy.special.logit(clip(delta_fraction_init, 0.001, 0.999))
+            delta_fraction_logit_val = jax.scipy.special.logit(jnp.clip(delta_fraction_init, 0.001, 0.999))
             
             alpha_bar_min_logit = self.param('alpha_bar_min_logit', 
                                             nn.initializers.constant(alpha_bar_min_logit_val), ())
@@ -1055,7 +1053,7 @@ class QuadraticNoiseSchedule(NoiseSchedule):
         
         # Quadratic: alpha_bar(t) = alpha_bar_min + delta_alpha * t^2
         # Clamp t to [0, 1] to ensure t^2 is in [0, 1]
-        t_clamped = clip(t, 0, 1.0)
+        t_clamped = jnp.clip(t, 0, 1.0)
         t_squared = t_clamped * t_clamped  # t^2 in [0, 1]
         alpha_bar_t = alpha_bar_min + delta_alpha * t_squared
         
@@ -1117,13 +1115,13 @@ class PolynomialNoiseSchedule(NoiseSchedule):
             power_logit_val = jnp.log1p(jnp.expm1(self.power - 1.0)) if self.power > 1.0 else -10.0
             alpha_bar_min_logit_val = jax.scipy.special.logit((self.alpha_bar_min - 0.001) / 0.998)
             # delta_fraction = sigmoid(delta_fraction_logit) where delta_fraction = (alpha_bar_max - alpha_bar_min) / (0.999 - alpha_bar_min)
-            alpha_bar_min_clamped = clip(self.alpha_bar_min, 0.001, 0.998)
-            alpha_bar_max_clamped = clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
+            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 0.001, 0.998)
+            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
             delta_max_init = 0.999 - alpha_bar_min_clamped
             delta_actual_init = alpha_bar_max_clamped - alpha_bar_min_clamped
             # Use jnp.where for JIT compatibility
             delta_fraction_init = jnp.where(delta_max_init > 0, delta_actual_init / delta_max_init, 0.0)
-            delta_fraction_logit_val = jax.scipy.special.logit(clip(delta_fraction_init, 0.001, 0.999))
+            delta_fraction_logit_val = jax.scipy.special.logit(jnp.clip(delta_fraction_init, 0.001, 0.999))
             
             power_logit = self.param('power_logit', nn.initializers.constant(power_logit_val), ())
             alpha_bar_min_logit = self.param('alpha_bar_min_logit', 
@@ -1141,11 +1139,11 @@ class PolynomialNoiseSchedule(NoiseSchedule):
         
         # Polynomial: alpha_bar(t) = alpha_bar_min + delta_alpha * t^power
         # Clamp t to slightly above 0 and below 1 for numerical stability
-        t_clamped = clip(t, 1e-7, 1.0 - 1e-7)
+        t_clamped = jnp.clip(t, 1e-7, 1.0 - 1e-7)
         t_power = t_clamped ** power  # t^power in [0, 1] when t in [0, 1] and power >= 1
         alpha_bar_t = alpha_bar_min + delta_alpha * t_power
         # Final clipping ensures alpha_bar_t in [0.001, 0.999] for numerical stability
-        return clip(alpha_bar_t, 0.001, 0.999)
+        return jnp.clip(alpha_bar_t, 0.001, 0.999)
 
     @nn.compact
     def _get_alpha_bar_gamma_prime(
@@ -1160,13 +1158,13 @@ class PolynomialNoiseSchedule(NoiseSchedule):
             power_logit_val = jnp.log(jnp.exp(self.power - 1.0) - 1.0) if self.power > 1.0 else -10.0
             alpha_bar_min_logit_val = jax.scipy.special.logit((self.alpha_bar_min - 0.001) / 0.998)
             # delta_fraction = sigmoid(delta_fraction_logit) where delta_fraction = (alpha_bar_max - alpha_bar_min) / (0.999 - alpha_bar_min)
-            alpha_bar_min_clamped = clip(self.alpha_bar_min, 0.001, 0.998)
-            alpha_bar_max_clamped = clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
+            alpha_bar_min_clamped = jnp.clip(self.alpha_bar_min, 0.001, 0.998)
+            alpha_bar_max_clamped = jnp.clip(self.alpha_bar_max, alpha_bar_min_clamped, 0.999)
             delta_max_init = 0.999 - alpha_bar_min_clamped
             delta_actual_init = alpha_bar_max_clamped - alpha_bar_min_clamped
             # Use jnp.where for JIT compatibility
             delta_fraction_init = jnp.where(delta_max_init > 0, delta_actual_init / delta_max_init, 0.0)
-            delta_fraction_logit_val = jax.scipy.special.logit(clip(delta_fraction_init, 0.001, 0.999))
+            delta_fraction_logit_val = jax.scipy.special.logit(jnp.clip(delta_fraction_init, 0.001, 0.999))
             
             power_logit = self.param('power_logit', nn.initializers.constant(power_logit_val), ())
             alpha_bar_min_logit = self.param('alpha_bar_min_logit', 
@@ -1184,11 +1182,11 @@ class PolynomialNoiseSchedule(NoiseSchedule):
         
         # Polynomial: alpha_bar(t) = alpha_bar_min + delta_alpha * t^power
         # Clamp t to slightly above 0 and below 1 for numerical stability
-        t_clamped = clip(t, 1e-7, 1.0 - 1e-7)
+        t_clamped = jnp.clip(t, 1e-7, 1.0 - 1e-7)
         t_power = t_clamped ** power  # t^power in [0, 1] when t in [0, 1] and power >= 1
         alpha_bar_t = alpha_bar_min + delta_alpha * t_power
         # Final clipping ensures alpha_bar_t in [0.001, 0.999] for numerical stability
-        alpha_bar_t = clip(alpha_bar_t, 0.001, 0.999)
+        alpha_bar_t = jnp.clip(alpha_bar_t, 0.001, 0.999)
         
         # Derivative: d/dt [t^power] = power * t^(power-1)
         # Use clamped t for derivative as well
@@ -1375,7 +1373,7 @@ class NoiseScheduleNetwork(NoiseSchedule):
             f_t = network(t_input)
             g0 = network(jnp.zeros_like(t_input))
             g1 = network(jnp.ones_like(t_input))
-            gt = clip((f_t - g0) / (g1 - g0 + 1e-8), 0.0, 1.0)
+            gt = jnp.clip((f_t - g0) / (g1 - g0 + 1e-8), 0.0, 1.0)
             # f_t = t_input + (1 - t_input) * t_input * nn.sigmoid(scale_logit) * nn.sigmoid(f_t)
             gamma_t = gamma_min + (gamma_max - gamma_min) * ( 1 - gt)
             return gamma_t

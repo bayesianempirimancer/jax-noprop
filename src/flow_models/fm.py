@@ -5,6 +5,7 @@ import flax.linen as nn
 from flax.core import FrozenDict
 import optax
 from typing import Tuple, Dict, Optional
+import inspect
 
 from functools import partial, cached_property
 
@@ -138,8 +139,13 @@ class VAE_flow(nn.Module):
         if self.config.main.get("encode_x", False) and x is not None:
             x = self.encode(x, training)[0]
         
-        # Pass x_mask to CRN if provided (for sequence models with masking)
-        dz_dt = self.crn_model(z, x, t, x_mask=x_mask, training=training)            
+        # Pass x_mask to CRN only if the model supports it (sequence/point cloud models)
+        # Check if the __call__ method accepts x_mask parameter
+        call_sig = inspect.signature(self.crn_model.__call__)
+        if 'x_mask' in call_sig.parameters:
+            dz_dt = self.crn_model(z, x, t, x_mask=x_mask, training=training)
+        else:
+            dz_dt = self.crn_model(z, x, t, training=training)            
         return dz_dt
 
     def lazy_flow(self, z_t, z_target, alpha_t, gamma_prime_t):

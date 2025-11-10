@@ -6,6 +6,10 @@ optax>=0.1.0
 numpy>=1.21.0
 scipy>=1.9.0
 
+# TensorFlow and TensorFlow Probability (JAX-compatible)
+tensorflow>=2.15.0  # Required for tensorflow-probability JAX substrate
+tfp-nightly[jax]  # JAX-compatible TensorFlow Probability (nightly build)
+
 # Configuration
 pyyaml>=6.0
 omegaconf>=2.3.0

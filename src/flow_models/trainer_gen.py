@@ -11,7 +11,6 @@ import jax.random as jr
 import optax
 from typing import Dict, Any, Tuple, Optional
 from functools import partial
-import jax_dataloader as jdl
 from src.flow_models.fm import VAE_flow as FlowMatchingModel
 from src.flow_models.df import VAE_flow as DiffusionModel
 from src.flow_models.ct import VAE_flow as CTModel
@@ -98,6 +97,9 @@ class GenerationTrainer:
         use_dropout: bool = True
     ) -> Dict[str, float]:
         """Train for one epoch using jax-dataloader."""
+        # Lazy import to avoid JAX initialization conflicts
+        import jax_dataloader as jdl
+        
         if self.params is None or self.opt_state is None:
             raise ValueError("Model not initialized. Call initialize() first.")
         
@@ -234,6 +236,9 @@ class GenerationTrainer:
         batch_size: int = 256
     ) -> Dict[str, float]:
         """Evaluate the model using jax-dataloader."""
+        # Lazy import to avoid JAX initialization conflicts
+        import jax_dataloader as jdl
+        
         if self.params is None:
             raise ValueError("Model not initialized.")
         

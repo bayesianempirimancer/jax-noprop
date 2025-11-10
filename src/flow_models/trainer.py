@@ -12,11 +12,11 @@ import jax.tree as jt
 import optax
 from typing import Dict, Any, Tuple, Optional
 from functools import partial
-import jax_dataloader as jdl
+from flax import traverse_util
 from src.flow_models.fm import VAE_flow as FlowMatchingModel
 from src.flow_models.df import VAE_flow as DiffusionModel
 from src.flow_models.ct import VAE_flow as CTModel
-from src.flow_models.config import Config as Config, Config as DiffusionConfig, Config as CTConfig
+from src.flow_models.config import Config as Config
 
 
 class Trainer:
@@ -112,6 +112,38 @@ class Trainer:
         if self.params is None or self.opt_state is None:
             raise ValueError("Model not initialized. Call initialize() first.")
         
+        x_batch = jnp.asarray(x_batch)
+        y_batch = jnp.asarray(y_batch)
+        
+        # Run single training step
+        self.rng, step_rng = jr.split(self.rng)
+        self.params, self.opt_state, loss, metrics = self.model.train_step(
+            self.params, x_batch, y_batch, self.opt_state, self.optimizer, step_rng, training=use_dropout
+        )
+        
+        return {
+            'loss': float(loss),
+            'flow_loss': float(metrics.get('flow_loss', 0.0)),
+            'recon_loss': float(metrics.get('recon_loss', 0.0)),
+            'reg_loss': float(metrics.get('reg_loss', 0.0)),
+            'vae_loss': float(metrics.get('vae_loss', 0.0)),
+            'kl_z0_loss': float(metrics.get('kl_z0_loss', 0.0)),
+        }
+    
+    def train_epoch(
+        self,
+        x_data: jnp.ndarray,
+        y_data: jnp.ndarray,
+        batch_size: int = 256,
+        use_dropout: bool = True
+    ) -> Dict[str, float]:
+        """Train for one epoch using jax-dataloader."""
+        # Lazy import to avoid JAX initialization conflicts
+        import jax_dataloader as jdl
+        
+        if self.params is None or self.opt_state is None:
+            raise ValueError("Model not initialized.")
+        
         x_data = jnp.asarray(x_data)
         y_data = jnp.asarray(y_data)
         
@@ -127,7 +159,6 @@ class Trainer:
             rng_key=shuffle_rng
         )
         
-        # Train over batches
         total_losses = []
         flow_losses = []
         recon_losses = []
@@ -136,17 +167,14 @@ class Trainer:
         kl_z0_losses = []
         
         for x_batch, y_batch in dataloader:
-            self.rng, step_rng = jr.split(self.rng)
-            self.params, self.opt_state, loss, metrics = self.model.train_step(
-                self.params, x_batch, y_batch, self.opt_state, self.optimizer, step_rng, training=use_dropout
-            )
+            metrics = self.train_step(x_batch, y_batch, use_dropout=use_dropout)
             
-            total_losses.append(float(loss))
-            flow_losses.append(float(metrics.get('flow_loss', 0.0)))
-            recon_losses.append(float(metrics.get('recon_loss', 0.0)))
-            reg_losses.append(float(metrics.get('reg_loss', 0.0)))
-            vae_losses.append(float(metrics.get('vae_loss', 0.0)))
-            kl_z0_losses.append(float(metrics.get('kl_z0_loss', 0.0)))
+            total_losses.append(metrics['loss'])
+            flow_losses.append(metrics['flow_loss'])
+            recon_losses.append(metrics['recon_loss'])
+            reg_losses.append(metrics.get('reg_loss', 0.0))
+            vae_losses.append(metrics.get('vae_loss', 0.0))
+            kl_z0_losses.append(metrics.get('kl_z0_loss', 0.0))
         
         num_batches = len(total_losses)
         return {
@@ -230,6 +258,9 @@ class Trainer:
         batch_size: int = 256
     ) -> Dict[str, float]:
         """Evaluate the model using jax-dataloader."""
+        # Lazy import to avoid JAX initialization conflicts
+        import jax_dataloader as jdl
+        
         if self.params is None:
             raise ValueError("Model not initialized.")
         

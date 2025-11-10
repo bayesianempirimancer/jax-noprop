@@ -131,6 +131,11 @@ class VAE_flow(nn.Module):
         return alpha_bar_t, gamma_prime_t
     
     @nn.compact
+    def get_alpha_bar(self, t: jnp.ndarray):
+        """Get alpha_bar(t) from noise schedule using @nn.compact method."""
+        return self.noise_schedule.get_alpha_bar(t)
+    
+    @nn.compact
     def pred_noise(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         """Flow model that computes dz/dt using CRN."""
         # Optimized: minimize broadcasting and avoid redundant operations
