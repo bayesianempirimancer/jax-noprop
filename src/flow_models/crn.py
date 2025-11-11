@@ -62,6 +62,7 @@ def get_crn_class(crn_type: str):
         'mlp': ConditionalResnet_MLP,
         'bilinear': BilinearConditionalResnet,
         'convex': ConvexConditionalResnet,
+        'cnn': CNNConditionalResnet,
         'transformer_seq2seq': TransformerSeq2SeqConditionalResnet,
     }
 
@@ -200,10 +201,12 @@ def create_conditional_resnet(config_dict: Union[Dict[str, Any], FrozenDict], la
         base_resnet = ConvexConditionalResnet(**crn_config)
     elif network_type == "bilinear":
         base_resnet = BilinearConditionalResnet(**crn_config)
+    elif network_type == "cnn":
+        base_resnet = CNNConditionalResnet(**crn_config)
     elif network_type == "transformer_seq2seq":
         base_resnet = TransformerSeq2SeqConditionalResnet(**crn_config)
     else:
-        raise ValueError(f"Unknown network_type: {network_type}. Supported types: mlp, bilinear, convex, transformer_seq2seq")
+        raise ValueError(f"Unknown network_type: {network_type}. Supported types: mlp, bilinear, convex, cnn, transformer_seq2seq")
     
     # Apply wrapper if specified
     if model_type == "vanilla":
@@ -632,3 +635,178 @@ class ConvexConditionalResnet(nn.Module):
         output = nn.Dense(self.output_dim, kernel_init=jax.nn.initializers.xavier_normal())(z)
         return output.reshape(batch_shape + self.output_shape)
 
+
+class CNNConditionalResnet(nn.Module):
+    """
+    CNN-based Conditional ResNet that first embeds x using a fixed 2-layer CNN before processing.
+    
+    This architecture uses a fixed CNN structure:
+    - Conv1: input_channels → 32 channels, kernel=3, padding=1
+    - MaxPool 2x2, stride 2
+    - ReLU
+    - Conv2: 32 → 64 channels, kernel=3, padding=1
+    - MaxPool 2x2, stride 2  
+    - ReLU
+    - Flatten → Linear projection to feature_dim
+    
+    Args:
+        latent_shape: Latent shape tuple (e.g., (8,))
+        output_shape: Output shape tuple (e.g., (8,))
+        input_shape: Conditional input shape tuple (e.g., (28, 28, 1) for MNIST or (32, 32, 3) for CIFAR)
+        feature_dim: Dimension of CNN output features (default: 128)
+        hidden_dims: Tuple of hidden layer dimensions for final MLP processing
+        time_embed_dim: Dimension of time embedding
+        time_embed_method: Method for time embedding
+        activation_fn: Activation function to use for MLP layers (string)
+        use_batch_norm: Whether to use batch normalization in MLP layers
+        dropout_rate: Dropout rate for regularization in MLP layers
+    """
+    latent_shape: Tuple[int, ...]
+    input_shape: Tuple[int, ...]
+    output_shape: Tuple[int, ...]
+    feature_dim: int = 128
+    hidden_dims: Tuple[int, ...] = (128, 128, 128)
+    time_embed_dim: int = 64
+    time_embed_method: str = "sinusoidal"
+    activation_fn: str = "swish"
+    use_batch_norm: bool = False
+    dropout_rate: float = 0.1
+    
+    @cached_property
+    def latent_dim(self) -> int:
+        """Latent dimension of the conditional ResNet."""
+        dim = 1
+        for shape in self.latent_shape:
+            dim *= shape
+        return dim
+
+    @cached_property
+    def output_dim(self) -> int:
+        """Output dimension of the conditional ResNet."""
+        dim = 1
+        for shape in self.output_shape:
+            dim *= shape
+        return dim
+    
+    @nn.compact
+    def __call__(self, z: jnp.ndarray, x: Optional[jnp.ndarray] = None, t: Optional[jnp.ndarray] = None, training: bool = True) -> jnp.ndarray:
+        """Forward pass through CNN conditional ResNet.
+        
+        Args:
+            z: Current state [batch_size, latent_shape[0]]
+            x: Conditional input [batch_size, H, W, C] (image-like input, optional)
+            t: Time values [batch_size] or scalar (optional)
+            training: Whether in training mode
+            
+        Returns:
+            Updated state [batch_shape, output_shape[0]]
+        """
+        # Convert string activation function to callable (for MLP layers)
+        activation_fn = get_activation_function(self.activation_fn)
+        
+        # Handle broadcasting and flattening for z
+        batch_shape_z = z.shape[:-len(self.latent_shape)]
+        
+        # Determine batch shape based on available inputs
+        if x is not None:
+            batch_shape_x = x.shape[:-len(self.input_shape)]
+            batch_shape = jnp.broadcast_shapes(batch_shape_z, batch_shape_x)
+        else:
+            batch_shape = batch_shape_z
+            
+        if t is not None:
+            t = jnp.asarray(t)
+            batch_shape = jnp.broadcast_shapes(batch_shape, t.shape)
+
+        z = jnp.broadcast_to(z, batch_shape + z.shape[-len(self.latent_shape):])
+        z_flat = z.reshape(-1, self.latent_dim)
+        
+        # 1. x preprocessing with fixed 2-layer CNN (only if x is provided)
+        x_processed = None
+        if x is not None:
+            x = jnp.broadcast_to(x, batch_shape + x.shape[-len(self.input_shape):])
+            # Reshape to (batch*..., H, W, C) for CNN processing
+            x_reshaped = x.reshape(-1, *self.input_shape)
+            
+            # Conv1: input_channels → 32, kernel=3, padding=1
+            x_out = nn.Conv(
+                features=32,
+                kernel_size=(3, 3),
+                strides=(1, 1),
+                padding=1,  # padding=1 in Flax means adding 1 pixel on each side
+                kernel_init=jax.nn.initializers.xavier_normal()
+            )(x_reshaped)
+            x_out = jax.nn.relu(x_out)
+            
+            # MaxPool 2x2, stride 2
+            x_out = jax.lax.reduce_window(
+                x_out, 
+                -jnp.inf, 
+                jax.lax.max, 
+                (1, 2, 2, 1),  # window shape: (batch, height, width, channels)
+                (1, 2, 2, 1),  # strides
+                'VALID'
+            )
+            
+            # Conv2: 32 → 64, kernel=3, padding=1
+            x_out = nn.Conv(
+                features=64,
+                kernel_size=(3, 3),
+                strides=(1, 1),
+                padding=1,
+                kernel_init=jax.nn.initializers.xavier_normal()
+            )(x_out)
+            x_out = jax.nn.relu(x_out)
+            
+            # MaxPool 2x2, stride 2
+            x_out = jax.lax.reduce_window(
+                x_out,
+                -jnp.inf,
+                jax.lax.max,
+                (1, 2, 2, 1),
+                (1, 2, 2, 1),
+                'VALID'
+            )
+            
+            # Flatten CNN output
+            B = x_out.shape[0]
+            x_flat = x_out.reshape(B, -1)
+            
+            # Project to feature_dim
+            x_flat = nn.Dense(self.feature_dim, kernel_init=jax.nn.initializers.xavier_normal())(x_flat)
+            
+            x_processed = x_flat
+        
+        # 2. t preprocessing (only if t is provided)
+        t_processed = None
+        if t is not None:
+            t = jnp.broadcast_to(t, batch_shape)
+            t_flat = t.reshape(-1)
+            t_processed = create_time_embedding(embed_dim=self.time_embed_dim, method=self.time_embed_method)(t_flat)
+        
+        # 3. ConcatSquash with available preprocessed inputs
+        if x_processed is not None and t_processed is not None:
+            combined = ConcatSquash(self.hidden_dims[0])(z_flat, x_processed, t_processed)
+        elif x_processed is not None:
+            combined = ConcatSquash(self.hidden_dims[0])(z_flat, x_processed)
+        elif t_processed is not None:
+            combined = ConcatSquash(self.hidden_dims[0])(z_flat, t_processed)
+        else:
+            # Neither x nor t provided - just use z
+            combined = ConcatSquash(self.hidden_dims[0])(z_flat)
+        
+        # 4. Standard resnet processing layers
+        for hidden_dim in self.hidden_dims[1:]:
+            combined = nn.Dense(hidden_dim, kernel_init=jax.nn.initializers.xavier_normal())(combined)
+            if self.use_batch_norm:
+                combined = nn.BatchNorm(use_running_average=not training)(combined)
+            else:
+                combined = nn.LayerNorm()(combined)
+            combined = activation_fn(combined)
+            if self.dropout_rate > 0:
+                combined = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(combined)
+        
+        # 5. Output projection to match desired output dimension
+        output = nn.Dense(self.output_dim, kernel_init=jax.nn.initializers.xavier_normal())(combined)
+        
+        return output.reshape(batch_shape + self.output_shape)
