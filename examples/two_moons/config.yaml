@@ -10,7 +10,7 @@ main:
   recon_weight: 0.0
   reg_weight: 0.0
   vae_weight: 1.0
-  normalize_snr_weight: True
+  normalize_snr_weight: False
   integration_method: midpoint
   encode_x: false
 noise_schedule:
