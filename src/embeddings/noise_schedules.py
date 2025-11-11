@@ -87,6 +87,7 @@ All schedules implement:
 
 from typing import Any, Dict, Optional, Tuple
 
+import math
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
@@ -279,14 +280,30 @@ class NoiseSchedule(nn.Module):
 class ConstantNoiseSchedule(NoiseSchedule):
     """Constant noise schedule.
     
-    Returns fixed values of alpha_bar = 1/2, and gamma_prime = 1
+    Returns fixed values of alpha_bar, gamma_prime.
     """
+
+    logit_alpha_bar: float = 0.0
+    log_gamma_prime: float = math.log(4.0)
+
+    @staticmethod
+    def default_params() -> Dict[str, Any]:
+        """Return default parameter dictionary for this schedule.
+        
+        Returns:
+            Dictionary with default initial parameter values
+        """
+        return {
+            "logit_alpha_bar": 0.0,
+            "log_gamma_prime": math.log(4.0),
+        }
+    
     
     @nn.compact
     def _get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
         """Get alpha_bar(t) for constant schedule."""
 
-        return jnp.ones_like(t) / 2
+        return jnp.full_like(t, jax.nn.sigmoid(self.logit_alpha_bar))
     
     @nn.compact
     def _get_alpha_bar_gamma_prime(
@@ -294,7 +311,7 @@ class ConstantNoiseSchedule(NoiseSchedule):
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """Get alpha_bar(t) and gamma_prime(t) for constant schedule."""
         
-        return jnp.ones_like(t) / 2, jnp.ones_like(t)
+        return jnp.full_like(t, jax.nn.sigmoid(self.logit_alpha_bar)), jnp.full_like(t, jnp.exp(self.log_gamma_prime))
 
 
 class LinearNoiseSchedule(NoiseSchedule):
