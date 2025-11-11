@@ -276,6 +276,27 @@ class NoiseSchedule(nn.Module):
         return alpha_bar_t * (1.0 - alpha_bar_t) * gamma_prime_t
 
 
+class ConstantNoiseSchedule(NoiseSchedule):
+    """Constant noise schedule.
+    
+    Returns fixed values of alpha_bar = 1/2, and gamma_prime = 1
+    """
+    
+    @nn.compact
+    def _get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
+        """Get alpha_bar(t) for constant schedule."""
+
+        return jnp.ones_like(t) / 2
+    
+    @nn.compact
+    def _get_alpha_bar_gamma_prime(
+        self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """Get alpha_bar(t) and gamma_prime(t) for constant schedule."""
+        
+        return jnp.ones_like(t) / 2, jnp.ones_like(t)
+
+
 class LinearNoiseSchedule(NoiseSchedule):
     """Linear noise schedule with learnable parameters.
     
@@ -379,8 +400,7 @@ class LinearNoiseSchedule(NoiseSchedule):
         alpha_bar_t_one_minus = alpha_bar_t * (1.0 - alpha_bar_t)
         gamma_prime_t = delta_alpha / alpha_bar_t_one_minus
         
-        # Apply stop_gradient if learnable=False
-        return self._apply_stop_gradient(alpha_bar_t, gamma_prime_t)
+        return alpha_bar_t, gamma_prime_t
 
 
 class CosineNoiseSchedule(NoiseSchedule):
@@ -411,7 +431,7 @@ class CosineNoiseSchedule(NoiseSchedule):
         }
     
     @nn.compact
-    def get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
+    def _get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
         """Get alpha_bar(t) for cosine schedule."""
         if params is not None:
             s_logit = params['s_logit']
@@ -494,7 +514,7 @@ class SigmoidNoiseSchedule(NoiseSchedule):
         }
     
     @nn.compact
-    def get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
+    def _get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
         """Get alpha_bar(t) for sigmoid schedule."""
         if params is not None:
             k_logit = params['k_logit']
@@ -568,7 +588,7 @@ class ExponentialNoiseSchedule(NoiseSchedule):
         }
     
     @nn.compact
-    def get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
+    def _get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
         """Get alpha_bar(t) for exponential schedule."""
         if params is not None:
             beta_logit = params['beta_logit']
@@ -700,7 +720,7 @@ class CauchyNoiseSchedule(NoiseSchedule):
         }
     
     @nn.compact
-    def get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
+    def _get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
         """Get alpha_bar(t) for Cauchy schedule."""
         if params is not None:
             loc = params['loc']
@@ -982,7 +1002,7 @@ class QuadraticNoiseSchedule(NoiseSchedule):
         }
     
     @nn.compact
-    def get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
+    def _get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
         """Get alpha_bar(t) for quadratic schedule."""
         if params is not None:
             alpha_bar_min_logit = params['alpha_bar_min_logit']
@@ -1101,7 +1121,7 @@ class PolynomialNoiseSchedule(NoiseSchedule):
         }
 
     @nn.compact
-    def get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
+    def _get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
         """Get alpha_bar(t) for polynomial schedule."""
         if params is not None:
             power_logit = params['power_logit']
@@ -1235,7 +1255,7 @@ class LogisticNoiseSchedule(NoiseSchedule):
         }
 
     @nn.compact
-    def get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
+    def _get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
         """Get alpha_bar(t) for logistic schedule."""
         if params is not None:
             k_logit = params['k_logit']
@@ -1374,7 +1394,6 @@ class NoiseScheduleNetwork(NoiseSchedule):
             g0 = network(jnp.zeros_like(t_input))
             g1 = network(jnp.ones_like(t_input))
             gt = jnp.clip((f_t - g0) / (g1 - g0 + 1e-8), 0.0, 1.0)
-            # f_t = t_input + (1 - t_input) * t_input * nn.sigmoid(scale_logit) * nn.sigmoid(f_t)
             gamma_t = gamma_min + (gamma_max - gamma_min) * ( 1 - gt)
             return gamma_t
         
@@ -1416,8 +1435,10 @@ def create_noise_schedule(
         NoiseSchedule instance
     """
     schedule_type = schedule_type.lower()
-    
-    if schedule_type == "linear":
+
+    if schedule_type == 'constant':
+        return ConstantNoiseSchedule(**kwargs)
+    elif schedule_type == "linear":
         return LinearNoiseSchedule(**kwargs)
     elif schedule_type == "cosine":
         return CosineNoiseSchedule(**kwargs)
@@ -1440,6 +1461,6 @@ def create_noise_schedule(
     else:
         raise ValueError(
             f"Unknown schedule type: {schedule_type}. "
-            f"Options: linear, cosine, sigmoid, exponential, "
+            f"Options: constant, linear, cosine, sigmoid, exponential, "
             f"cauchy, laplace, logistic, quadratic, polynomial, monotonic_nn/learnable/network"
         )
