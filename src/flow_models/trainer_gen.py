@@ -221,7 +221,10 @@ class GenerationTrainer:
                         x_gen = self.unconditional_generate((num_eval,), 20, gen_rng)
                     else:
                         cond = vx[:num_eval] if vx is not None else None
-                        x_gen = self.conditional_generate(cond, 20, gen_rng) if cond is not None else self.unconditional_generate((num_eval,), 20, gen_rng)
+                        if cond is not None:
+                            x_gen = self.conditional_generate(cond, num_steps=20, prng_key=gen_rng)
+                        else: 
+                            x_gen = self.unconditional_generate((num_eval,), num_steps=20, prng_key=gen_rng)
                     
                     from src.utils.metrics import chamfer_distance
                     chamfer_dist = chamfer_distance(x_gen, vy[:num_eval])

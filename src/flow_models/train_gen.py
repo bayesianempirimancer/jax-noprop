@@ -122,7 +122,7 @@ def main():
     
     # Noise schedule arguments (can override config)
     parser.add_argument('--noise_schedule', type=str, default=None,
-                       choices=['linear', 'cosine', 'sigmoid', 'exponential', 'cauchy', 'laplace', 
+                       choices=['constant', 'linear', 'cosine', 'sigmoid', 'exponential', 'cauchy', 'laplace',
                                'logistic', 'quadratic', 'polynomial', 'monotonic_nn', 'learnable', 'network'],
                        help='Noise schedule type (overrides config)')
     parser.add_argument('--noise_schedule_learnable', action='store_const', const=True, default=None,
