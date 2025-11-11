@@ -1,0 +1,75 @@
+model_name: mnist_vae_flow
+main:
+  input_shape: 
+  - 28
+  - 28
+  - 1
+  output_shape:
+  - 10
+  latent_shape:
+  - 10
+  recon_loss_type: cross_entropy
+  recon_weight: 0.0
+  reg_weight: 0.0
+  vae_weight: 1.0
+  normalize_snr_weight: False
+  integration_method: midpoint
+  encode_x: false
+noise_schedule:
+  schedule_type: linear
+  learnable: false
+  hidden_dims:
+  - 64
+  - 64
+  default_params:
+    alpha_bar_min: 0.05
+    alpha_bar_max: 0.95
+    s: 0.008
+    k: 10.0
+    t_mid: 0.5
+    beta: 2.0
+    loc: 0.5
+    scale: 0.1
+    power: 2.0
+    gamma_range:
+    - -4.0
+    - 4.0
+encoder:
+  model_type: identity
+  encoder_type: deterministic
+  input_shape:
+  - 10
+  latent_shape:
+  - 10
+  hidden_dims:
+  - 16
+  - 32
+  - 16
+  activation: swish
+  dropout_rate: 0.0
+decoder:
+  model_type: identity
+  decoder_type: none
+  latent_shape:
+  - 10
+  output_shape:
+  - 10
+  hidden_dims:
+  - 16
+  - 32
+  - 16
+  activation: swish
+  dropout_rate: 0.0
+crn:
+  model_type: vanilla
+  network_type: cnn
+  feature_dim: 128
+  hidden_dims:
+  - 128
+  - 128
+  - 128
+  time_embed_dim: 64
+  time_embed_method: sinusoidal
+  activation_fn: swish
+  use_batch_norm: false
+  dropout_rate: 0.0
