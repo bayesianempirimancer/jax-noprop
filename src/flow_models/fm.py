@@ -230,9 +230,6 @@ class VAE_flow(nn.Module):
         key, t_key, z_0_key, z_t_noise_key, z_target_key, vae_noise_key = jr.split(key, 6)
         batch_shape = y.shape[:-self.y_ndims]
 
-        # Get alpha_bar values at boundaries
-        alpha_0 = self.apply(params, jnp.asarray(1e-6), method='get_alpha_bar')
-        alpha_1 = self.apply(params, jnp.array(1.0-1e-6), method='get_alpha_bar')
         # Encode Target (noisy latent)
         mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})
         z_target = mu_z_target + jr.normal(z_target_key, mu_z_target.shape) * jnp.exp(0.5 * logvar_z_target)
@@ -258,8 +255,10 @@ class VAE_flow(nn.Module):
 
         # Compute Predictions
         y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})
-        z_target_vae = z_target*jnp.sqrt(alpha_1) + jr.normal(vae_noise_key, z_target.shape) * jnp.sqrt(1.0 - alpha_1)
-        y_vae = self.apply(params, z_target_vae, method='decode', training=training, rngs={'dropout': key})
+        if vae_weight > 0.0:
+            alpha_1 = self.apply(params, jnp.array(1.0-1e-6), method='get_alpha_bar')
+            z_target_vae = z_target*jnp.sqrt(alpha_1) + jr.normal(vae_noise_key, z_target.shape) * jnp.sqrt(1.0 - alpha_1)
+            y_vae = self.apply(params, z_target_vae, method='decode', training=training, rngs={'dropout': key})
 
         # Compute Losses
         snr_weight = self.lazy_flow_snr(alpha_t_squeezed, gamma_prime_t_squeezed)
@@ -271,32 +270,29 @@ class VAE_flow(nn.Module):
         squared_error = jnp.mean((dz_dt - diff_z)**2, axis=tuple(range(-self.z_ndims, 0)))
         flow_loss = jnp.mean(snr_weight * squared_error)
         reg_loss = jnp.mean(dz_dt**2)
-
+        
+        vae_loss = 0.0
+        recon_loss = 0.0
         if recon_loss_type == "cross_entropy":
             recon_loss = jnp.sum(-y * jnp.log(y_pred + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
-            vae_loss   = jnp.sum(-y * jnp.log(y_vae + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
+            if vae_weight > 0.0:
+                vae_loss   = jnp.sum(-y * jnp.log(y_vae + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
         elif recon_loss_type == "mse":
             recon_loss = jnp.sum((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
-            vae_loss   = jnp.sum((y - y_vae)**2, axis=tuple(range(-self.y_ndims, 0)))
-        else:
-            recon_loss = 0.0
-            vae_loss = 0.0
+            if vae_weight > 0.0:
+                vae_loss   = jnp.sum((y - y_vae)**2, axis=tuple(range(-self.y_ndims, 0)))
         
-        recon_snr = self.lazy_target_snr(alpha_t_squeezed, gamma_prime_t_squeezed)
-        # Normalize recon SNR weights by their mean if normalize_snr_weight is True
-        if normalize_snr_weight:
-            recon_snr_mean = jnp.mean(recon_snr)
-            recon_snr = recon_snr / (recon_snr_mean + 1e-8)
-        
-        recon_loss = jnp.mean(recon_snr * recon_loss)  # Average over batch dimension if needed      
+        recon_loss = jnp.mean(snr_weight * recon_loss)  # Average over batch dimension if needed      
         vae_loss = jnp.mean(vae_loss)
 
         # KL regularization term: KL(q(z_0|z_target), p(z_0))
         # alpha_0 is guaranteed to be in (0, 1) by noise schedule clipping
+        # Get alpha_bar values at boundaries
+        # alpha_0 = self.apply(params, jnp.asarray(1e-6), method='get_alpha_bar')
+        # alpha_1 = self.apply(params, jnp.array(1.0-1e-6), method='get_alpha_bar')
         # q_sigma_sq = 1.0 - alpha_0
         # mean_q_mu_sq_over_sigma_sq = alpha_0/q_sigma_sq*jnp.mean(jnp.sum(z_target**2, axis=tuple(range(-self.z_ndims, 0))))
         # kl_z0_loss = 0.5 * (mean_q_mu_sq_over_sigma_sq + self.z_dim*(jnp.log(q_sigma_sq) - 1.0))
-
 
         total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss # + kl_z0_loss  
         
@@ -309,8 +305,7 @@ class VAE_flow(nn.Module):
             'total_loss': total_loss
         }
 
-
-    @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, num_steps, integration_method, output_type are static arguments
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5))
     def predict(self, params: dict, x: jnp.ndarray, num_steps: int = 20, integration_method: str = "euler", output_type: str = "end_point", prng_key: jr.PRNGKey = None) -> jnp.ndarray:
         """
         Make predictions using ODE solver integration.        
