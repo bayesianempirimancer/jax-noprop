@@ -302,6 +302,10 @@ def main():
         x_real = np.array(val_y[:num_gen])
         y_labels = np.array(cond_y)
     
+    # Store generation results in history for plotting (percent variance explained)
+    history['x_gen'] = x_gen
+    history['x_real'] = x_real
+    
     # Compute Chamfer Distance
     from src.utils.metrics import chamfer_distance
     chamfer_dist = chamfer_distance(jnp.array(x_gen), jnp.array(x_real))

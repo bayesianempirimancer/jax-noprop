@@ -307,10 +307,10 @@ def main():
                        help='Number of trajectories to generate (default: 320)')
     parser.add_argument('--trajectory_length', type=int, default=1024,
                        help='Length of each trajectory (default: 1024)')
-    parser.add_argument('--input_seq_len', type=int, default=20,
-                       help='Length of input sequences (default: 20)')
-    parser.add_argument('--output_seq_len', type=int, default=20,
-                       help='Length of output sequences (default: 20)')
+    parser.add_argument('--input_seq_len', type=int, default=6,
+                       help='Length of input sequences (default: 6)')
+    parser.add_argument('--output_seq_len', type=int, default=6,
+                       help='Length of output sequences (default: 6)')
     parser.add_argument('--stride', type=int, default=1,
                        help='Stride for sliding window (default: 1)')
     parser.add_argument('--sigma', type=float, default=10.0,
@@ -366,26 +366,58 @@ def main():
     print(f"  Centered data range: [{trajectories.min():.4f}, {trajectories.max():.4f}]")
     print(f"  Centered data mean: {trajectories.mean(axis=(0, 1))}")
     
-    # Save lorenz.pkl: 320 trajectories of shape (1024, 3)
-    print("\nSaving lorenz.pkl (320 trajectories of shape (1024, 3))...")
-    output_path = Path(args.output_dir) / 'lorenz.pkl'
+    # Create regression dataset: predict next N time points from previous N
+    print(f"\nCreating regression dataset (predict next {args.output_seq_len} from previous {args.input_seq_len})...")
+    x_sequences, y_sequences = split_sequences(
+        trajectories,
+        input_seq_len=args.input_seq_len,
+        output_seq_len=args.output_seq_len,
+        stride=args.stride
+    )
+    
+    print(f"  x_sequences shape: {x_sequences.shape}  # (num_batches, {args.input_seq_len}, 3)")
+    print(f"  y_sequences shape: {y_sequences.shape}  # (num_batches, {args.output_seq_len}, 3)")
+    print(f"  Total number of samples: {len(x_sequences)}")
+    
+    # Split into train/val if train_ratio < 1.0
+    if args.train_ratio < 1.0:
+        n_train = int(len(x_sequences) * args.train_ratio)
+        x_train = x_sequences[:n_train]
+        y_train = y_sequences[:n_train]
+        x_val = x_sequences[n_train:]
+        y_val = y_sequences[n_train:]
+        print(f"  Train samples: {len(x_train)}")
+        print(f"  Val samples: {len(x_val)}")
+    else:
+        x_train = x_sequences
+        y_train = y_sequences
+        x_val = None
+        y_val = None
+    
+    # Save regression dataset
+    print("\nSaving regression dataset...")
+    output_path = Path(args.output_dir) / args.filename
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     data = {
         'train': {
-            'x': None,
-            'y': trajectories  # (320, 1024, 3)
+            'x': x_train,  # (num_batches, 6, 3)
+            'y': y_train   # (num_batches, 6, 3)
         },
         'val': {
-            'x': None,
-            'y': None  # No split for this dataset
+            'x': x_val,    # (num_val_batches, 6, 3) or None
+            'y': y_val     # (num_val_batches, 6, 3) or None
         }
     }
     
     with open(output_path, 'wb') as f:
         pickle.dump(data, f)
     print(f"Saved data to {output_path}")
-    print(f"  Shape: {trajectories.shape}")
+    print(f"  Train x shape: {x_train.shape}")
+    print(f"  Train y shape: {y_train.shape}")
+    if x_val is not None:
+        print(f"  Val x shape: {x_val.shape}")
+        print(f"  Val y shape: {y_val.shape}")
     
     # Create patched trajectories: 320 trajectories of shape (256, 12)
     # Each window of length 4 from (1024, 3) gets flattened to (12,)

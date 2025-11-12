@@ -154,10 +154,8 @@ def create_conditional_resnet(config_dict: Union[Dict[str, Any], FrozenDict], la
             transformer_params["mlp_ratio"] = transformer_config["mlp_ratio"]
         if "qkv_bias" in transformer_config:
             transformer_params["qkv_bias"] = transformer_config["qkv_bias"]
-        if "rope_base" in transformer_config:
-            transformer_params["rope_base"] = transformer_config["rope_base"]
-        if "lora_rank" in transformer_config:
-            transformer_params["lora_rank"] = transformer_config["lora_rank"]
+        # Note: rope_base is no longer used by DitAttentionBlock, so we skip it
+        # Note: lora_rank is not used by TransformerSeq2SeqConditionalResnet (uses DitAttentionBlock, not TwistedAttentionBlock)
         if "x_static_dim" in transformer_config:
             transformer_params["x_static_dim"] = transformer_config["x_static_dim"]
         if "projection_seed" in transformer_config:
@@ -184,10 +182,9 @@ def create_conditional_resnet(config_dict: Union[Dict[str, Any], FrozenDict], la
             "z_embed_method",  # Not used by TransformerSeq2SeqConditionalResnet
             "hidden_dims",  # Not used by TransformerSeq2SeqConditionalResnet (uses embed_dim instead)
             "use_batch_norm",  # Not used by TransformerSeq2SeqConditionalResnet
+            "lora_rank",  # Not used by TransformerSeq2SeqConditionalResnet (uses DitAttentionBlock, not TwistedAttentionBlock)
         }
         crn_config = {k: v for k, v in crn_config.items() if k not in excluded_params}
-        
-        # Note: lora_rank is now accepted by TransformerSeq2SeqConditionalResnet and passed to TwistedAttentionBlock
     else:
         # For non-transformer network types, remove transformer_config if present
         if "transformer_config" in crn_config:

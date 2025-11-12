@@ -133,20 +133,56 @@ def create_loss_trends_plot(history: Dict[str, Any], model_type: str, output_dir
     ax.legend()
     ax.grid(True, alpha=0.3)
     
-    # KL z0 Loss
+    # Chamfer Distance
     ax = axes[1, 1]
-    if history.get('train_kl_z0_losses') and len(history['train_kl_z0_losses']) > 0:
-        ax.plot(epochs, history['train_kl_z0_losses'], label='Train KL z0', color='darkorange', linewidth=2)
-        if history.get('val_kl_z0_losses') and len(history['val_kl_z0_losses']) > 0:
-            ax.plot(epochs, history['val_kl_z0_losses'], label='Val KL z0', color='darkred', linewidth=2, linestyle='--')
-        ax.set_title('KL z0 Loss', fontsize=12, fontweight='bold')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Loss')
+    train_chamfer = []
+    val_chamfer = []
+    val_chamfer_epochs = []
+    
+    # Compute train chamfer distance from final generation results
+    if 'x_gen' in history and 'x_real' in history:
+        from src.utils.metrics import chamfer_distance
+        x_gen = np.array(history['x_gen'])
+        x_real = np.array(history['x_real'])
+        
+        # Reshape to (num_samples, feature_dim) if needed
+        if x_gen.ndim > 2:
+            x_gen = x_gen.reshape(-1, x_gen.shape[-1])
+        if x_real.ndim > 2:
+            x_real = x_real.reshape(-1, x_real.shape[-1])
+        
+        # Convert to JAX arrays for chamfer_distance
+        chamfer_dist = chamfer_distance(jnp.array(x_gen), jnp.array(x_real))
+        if np.isfinite(chamfer_dist):
+            train_chamfer = [chamfer_dist] * len(epochs)  # Same value for all epochs (final generation)
+    
+    # Get validation chamfer distances (computed every 10 epochs)
+    if 'val_chamfer_distances' in history and len(history['val_chamfer_distances']) > 0:
+        val_chamfer = history['val_chamfer_distances']
+        # Chamfer distance is computed every 10 epochs, so map to actual epoch numbers
+        val_chamfer_epochs = [i * 10 for i in range(len(val_chamfer))]
+        # Make sure the last epoch is included
+        if len(val_chamfer_epochs) > 0 and val_chamfer_epochs[-1] != epochs[-1]:
+            val_chamfer_epochs[-1] = epochs[-1]
+    
+    if len(train_chamfer) > 0:
+        ax.plot(epochs, train_chamfer, label='Train Chamfer Distance', color='darkgreen', linewidth=2)
+    if len(val_chamfer) > 0:
+        ax.plot(val_chamfer_epochs, val_chamfer, label='Val Chamfer Distance', color='darkred', linewidth=2, linestyle='--', marker='o', markersize=4)
+    
+    ax.set_title('Chamfer Distance', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Chamfer Distance', color='darkgreen')
+    ax.tick_params(axis='y', labelcolor='darkgreen')
+    if len(train_chamfer) > 0 or len(val_chamfer) > 0:
         ax.legend()
-        ax.grid(True, alpha=0.3)
-    else:
-        ax.axis('off')
-        ax.text(0.5, 0.5, 'KL z0 Loss\n(Not Available)', ha='center', va='center', fontsize=12, alpha=0.5)
+    ax.grid(True, alpha=0.3)
+    # Set y-axis to start from 0, but allow upper limit to be determined by data
+    if len(train_chamfer) > 0 or len(val_chamfer) > 0:
+        all_values = [v for v in train_chamfer if np.isfinite(v)] + [v for v in val_chamfer if np.isfinite(v)]
+        if len(all_values) > 0:
+            max_val = max(all_values)
+            ax.set_ylim([0, max_val * 1.1])  # Add 10% padding at top
     
     # VAE Loss
     ax = axes[1, 2]
