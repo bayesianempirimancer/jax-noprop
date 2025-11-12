@@ -55,7 +55,7 @@ class Config(BaseConfig):
         "num_heads": 8,
         "mlp_ratio": 4.0,
         "qkv_bias": True,
-        "time_conditioning_method": "film",  # Options: "adaln", "film", "none"
+        "time_conditioning_method": "adaln",  # Options: "adaln", "film", "none"
         # "adaln": Adaptive LayerNorm Zero - modulate LayerNorm with time (DiT approach)
         # "film": FiLM (Feature-wise Linear Modulation) - modulate features with time
         # "none": No time conditioning
