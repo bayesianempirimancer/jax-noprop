@@ -167,22 +167,22 @@ class RegressionConfig(BaseConfig):
     
     noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
         # Noise schedule configuration (for diffusion and CT models)
-        "schedule_type": "exponential",  # Schedule type: "linear", "exponential", "cosine", etc.
+        "schedule_type": "linear",  # Schedule type: "linear", "exponential", "cosine", etc.
                                          # (can override with --noise_schedule)
-        "learnable": False,  # Whether noise schedule parameters are learnable
+        "learnable": True,  # Whether noise schedule parameters are learnable
                            # (can override with --noise_schedule_learnable)
         "hidden_dims": (64, 64),  # Hidden dimensions for learnable noise schedule network
         
         # Default parameters for different schedule types
         "default_params": FrozenDict({
-            "alpha_bar_min": 0.05,  # Minimum value for alpha_bar (not applied to Laplace shedule)
-            "alpha_bar_max": 0.95,  # Maximum value for alpha_bar (not applied to Laplace schedule)
+            "alpha_bar_min": 0.02,  # Minimum value for alpha_bar (not applied to Laplace shedule)
+            "alpha_bar_max": 0.98,  # Maximum value for alpha_bar (not applied to Laplace schedule)
             "beta": 0.3,  # Beta parameter for exponential schedule
             "loc": 0.5,  # Location parameter for Laplace schedule only
             "log_scale": 0.0,  # Scale parameter for Cauchy, Laplace schedules only
             "log_power": 0.0,  # Power parameter for polynomial schedules
             "gamma_range": (-4.0, 4.0),  # Range for gamma parameter for neural network
-            "gamma_prime_max": 100.0,  # Maximum value for clipping gamma_prime_t (not applied to neural network schedule)
+            "gamma_prime_max": 500.0,  # Maximum value for clipping gamma_prime_t (not applied to neural network schedule)
         }),
     }))
 

@@ -47,16 +47,16 @@ class Config(BaseConfig):
         # Flow model settings
         "normalize_snr_weight": False,  # Apply signal-to-noise ratio weighting to loss
                                   # False for flow_matching, True for diffusion/ct
-        "integration_method": "euler",  # ODE integration method: "euler" or "midpoint"
+        "integration_method": "midpoint",  # ODE integration method: "euler" or "midpoint"
                                         # "euler" for flow_matching, "midpoint" for diffusion/ct
         "encode_x": False,  # Whether to encode x (False for MLP regression)
     }))
     
     noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
         # Noise schedule configuration (for diffusion and CT models)
-        "schedule_type": "exponential",  # Schedule type: "linear", "exponential", "cosine", etc.
+        "schedule_type": "linear",  # Schedule type: "linear", "exponential", "cosine", etc.
                                          # (can override with --noise_schedule)
-        "learnable": False,  # Whether noise schedule parameters are learnable
+        "learnable": True,  # Whether noise schedule parameters are learnable
                            # (can override with --noise_schedule_learnable)
         "hidden_dims": (64, 64),  # Hidden dimensions for learnable noise schedule network
         

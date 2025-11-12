@@ -296,7 +296,7 @@ class GenerationTrainer:
             'kl_z0_loss': sum(kl_z0_losses) / num_batches if num_batches > 0 else 0.0
         }
     
-    def conditional_generate(self, cond_y: jnp.ndarray, num_steps: int = 20, prng_key: Optional[jr.PRNGKey] = None) -> jnp.ndarray:
+    def conditional_generate(self, cond_y: jnp.ndarray, num_steps: int = 20, integration_method: str = "midpoint", prng_key: Optional[jr.PRNGKey] = None) -> jnp.ndarray:
         """Generate samples conditioned on y."""
         if self.params is None:
             raise ValueError("Model not initialized.")
@@ -304,7 +304,7 @@ class GenerationTrainer:
             raise ValueError("Use unconditional_generate() for unconditional generation")
         if prng_key is None:
             self.rng, prng_key = jr.split(self.rng)
-        return self.model.predict(self.params, cond_y, num_steps, "midpoint", "end_point", prng_key=prng_key)
+        return self.model.predict(self.params, cond_y, num_steps, integration_method, "end_point", prng_key=prng_key)
     
     def unconditional_generate(self, batch_shape: Tuple[int, ...], num_steps: int = 20, prng_key: Optional[jr.PRNGKey] = None) -> jnp.ndarray:
         """Generate samples unconditionally."""
