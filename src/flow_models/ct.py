@@ -276,17 +276,18 @@ class VAE_flow(nn.Module):
         flow_loss = jnp.mean(snr_weight * squared_error)
         reg_loss = jnp.mean(dz_dt**2)
 
+        recon_loss = 0.0
+        vae_loss = 0.0
         if recon_loss_type == "cross_entropy":
-            recon_loss = optax.losses.safe_softmax_cross_entropy(y_pred, labels)
-            vae_loss   = optax.losses.safe_softmax_cross_entropy(y_vae, labels)
+            if recon_weight > 0.0:
+                recon_loss = optax.losses.safe_softmax_cross_entropy(y_pred, y)
+            vae_loss   = optax.losses.safe_softmax_cross_entropy(y_vae, y)
         
         elif recon_loss_type == "mse":
-            recon_loss = jnp.sum((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
+            if recon_weight > 0.0:
+                recon_loss = jnp.sum((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
             vae_loss   = jnp.sum((y - y_vae)**2, axis=tuple(range(-self.y_ndims, 0)))
-        else:
-            recon_loss = 0.0
-            vae_loss = 0.0
-        
+            
         recon_loss = jnp.mean(snr_weight * recon_loss) 
         vae_loss = jnp.mean(vae_loss)
 
