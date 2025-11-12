@@ -21,6 +21,7 @@ class Config(BaseConfig):
     model_name: str = "vae_flow_network"
 
     main: FrozenDict = field(default_factory=lambda: FrozenDict({
+        "mix_shape": "NA",  # Must be set by user
         "input_shape": "NA",  # Will be set based on z_dim
         "output_shape": "NA",  # Will be set based on z_dim or z_dim**2
         "latent_shape": "NA",  # Will be set based on x_dim
@@ -185,20 +186,18 @@ class Config(BaseConfig):
         })
         
         # Build updates for encoder config (encoder encodes coordinates x)
-        # Command-line arguments always override config values
         encoder_updates = BaseConfig.filter_none({
             'model_type': args.encoder_model_type,
-            'input_shape': output_shape,  # Encoder encodes x (coordinates) - always override from main config
-            'latent_shape': latent_shape,  # Must match main config - always override
+            'input_shape': output_shape,  # Encoder encodes x (coordinates)
+            'latent_shape': latent_shape,  # Must match main config
         })
         
         # Build updates for decoder config
-        # Command-line arguments always override config values
         decoder_updates = BaseConfig.filter_none({
             'model_type': args.decoder_model_type,
             'decoder_type': args.decoder_type,
-            'output_shape': output_shape,  # Always override from main config
-            'latent_shape': latent_shape,  # Must match main config - always override
+            'output_shape': output_shape,
+            'latent_shape': latent_shape,  # Must match main config
         })
         
         # Build updates for noise schedule config
@@ -233,59 +232,28 @@ class Config(BaseConfig):
         
         For regression: inputs are x, outputs are y (no shape reversal needed).
         
-        Rules:
-        - "NA" values in main config must be provided via command-line arguments (error if not)
-        - "NA" values in encoder/decoder config will use values from main config
-        - No fallback defaults - strict validation
-        
         Args:
             args: Parsed command-line arguments
             model_type: Model type
             
         Returns:
             Updated config instance with overrides applied, configured for regression
-            
-        Raises:
-            ValueError: If main config has "NA" values but args are not provided
         """
         main_dict = dict(self.main)
         
         # Determine shapes for regression (x -> y):
         # - If args provided, use them directly
-        # - If config has "NA", require args (throw error)
         # - Otherwise, use config file values (no reversal needed for regression)
-        input_shape_val = main_dict.get('input_shape')
-        if args.input_shape is not None:
-            input_shape = tuple(args.input_shape)
-        elif isinstance(input_shape_val, str) and input_shape_val == "NA":
-            raise ValueError(
-                "main.input_shape is 'NA' but --input_shape or --input_dim was not provided. "
-                "You must specify input shape via command-line arguments."
-            )
+        if args.input_shape is not None or args.output_shape is not None:
+            # Args provided: use them directly
+            input_shape = tuple(args.input_shape) if args.input_shape is not None else tuple(main_dict.get('input_shape', (2,)))
+            output_shape = tuple(args.output_shape) if args.output_shape is not None else tuple(main_dict.get('output_shape', (2,)))
         else:
-            input_shape = tuple(input_shape_val) if not isinstance(input_shape_val, tuple) else input_shape_val
+            # No args: use config file values as-is (no reversal for regression)
+            input_shape = tuple(main_dict.get('input_shape', (2,)))
+            output_shape = tuple(main_dict.get('output_shape', (2,)))
         
-        output_shape_val = main_dict.get('output_shape')
-        if args.output_shape is not None:
-            output_shape = tuple(args.output_shape)
-        elif isinstance(output_shape_val, str) and output_shape_val == "NA":
-            raise ValueError(
-                "main.output_shape is 'NA' but --output_shape or --output_dim was not provided. "
-                "You must specify output shape via command-line arguments."
-            )
-        else:
-            output_shape = tuple(output_shape_val) if not isinstance(output_shape_val, tuple) else output_shape_val
-        
-        latent_shape_val = main_dict.get('latent_shape')
-        if args.latent_shape is not None:
-            latent_shape = tuple(args.latent_shape)
-        elif isinstance(latent_shape_val, str) and latent_shape_val == "NA":
-            raise ValueError(
-                "main.latent_shape is 'NA' but --latent_shape or --latent_dim was not provided. "
-                "You must specify latent shape via command-line arguments."
-            )
-        else:
-            latent_shape = tuple(latent_shape_val) if not isinstance(latent_shape_val, tuple) else latent_shape_val
+        latent_shape = tuple(args.latent_shape) if args.latent_shape is not None else tuple(main_dict.get('latent_shape', (2,)))
         
         # Build updates for main config (filter None values)
         # Check if vae_weight is in args (for sequences)
@@ -311,32 +279,26 @@ class Config(BaseConfig):
             'hidden_dims': tuple(args.hidden_dims) if args.hidden_dims is not None else None,
         })
         
-        # Build updates for encoder config (encoder encodes y for regression)
-        # Preserve existing encoder shapes if they are not "NA" or None
+        # Build updates for encoder config (encoder encodes x)
+        # For sequences: encoder/decoder shapes should NOT be overridden - they operate on terminal dimension only
+        # Only override if explicitly provided in args, otherwise keep config values
         encoder_dict = dict(self.encoder)
-        encoder_updates_dict = {
+        encoder_updates = BaseConfig.filter_none({
             'model_type': args.encoder_model_type,
-        }
-        # Only override shapes if they are "NA" or None in the config
-        if encoder_dict.get('input_shape') in ("NA", None):
-            encoder_updates_dict['input_shape'] = output_shape  # Encoder encodes y (output) for regression
-        if encoder_dict.get('latent_shape') in ("NA", None):
-            encoder_updates_dict['latent_shape'] = latent_shape
-        encoder_updates = BaseConfig.filter_none(encoder_updates_dict)
+            # Only override input_shape/latent_shape if not already set in config (for sequences, config has correct values)
+            'input_shape': input_shape if encoder_dict.get('input_shape') == "NA" or encoder_dict.get('input_shape') is None else None,
+            'latent_shape': latent_shape if encoder_dict.get('latent_shape') == "NA" or encoder_dict.get('latent_shape') is None else None,
+        })
         
         # Build updates for decoder config
-        # Preserve existing decoder shapes if they are not "NA" or None
         decoder_dict = dict(self.decoder)
-        decoder_updates_dict = {
+        decoder_updates = BaseConfig.filter_none({
             'model_type': args.decoder_model_type,
             'decoder_type': args.decoder_type,
-        }
-        # Only override shapes if they are "NA" or None in the config
-        if decoder_dict.get('output_shape') in ("NA", None):
-            decoder_updates_dict['output_shape'] = output_shape
-        if decoder_dict.get('latent_shape') in ("NA", None):
-            decoder_updates_dict['latent_shape'] = latent_shape
-        decoder_updates = BaseConfig.filter_none(decoder_updates_dict)
+            # Only override output_shape/latent_shape if not already set in config (for sequences, config has correct values)
+            'output_shape': output_shape if decoder_dict.get('output_shape') == "NA" or decoder_dict.get('output_shape') is None else None,
+            'latent_shape': latent_shape if decoder_dict.get('latent_shape') == "NA" or decoder_dict.get('latent_shape') is None else None,
+        })
         
         # Build updates for noise schedule config
         noise_schedule_updates = BaseConfig.filter_none({

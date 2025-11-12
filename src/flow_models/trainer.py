@@ -67,19 +67,32 @@ class Trainer:
         """Initialize model parameters.
         
         Args:
-            x_sample: Sample input [input_dim] or [batch_size, input_dim]
-            y_sample: Sample target [output_dim] or [batch_size, output_dim]
+            x_sample: Sample input matching input_shape or [batch_size, *input_shape]
+            y_sample: Sample target matching output_shape or [batch_size, *output_shape]
         """
-        # Ensure we have batches with batch_size=1
-        if x_sample.ndim == 1:
-            x_sample = x_sample[None, :]
-        elif x_sample.shape[0] > 1:
-            x_sample = x_sample[0:1]  # Use only first sample
+        # Get expected shapes from config
+        input_shape = self.config.main["input_shape"]
+        output_shape = self.config.main["output_shape"]
         
-        if y_sample.ndim == 1:
-            y_sample = y_sample[None, :]
-        elif y_sample.shape[0] > 1:
-            y_sample = y_sample[0:1]  # Use only first sample
+        # Check if samples match expected shapes exactly (no batch dimension)
+        # If so, add batch dimension
+        if x_sample.shape == input_shape:
+            x_sample = x_sample[None, ...]
+        elif len(x_sample.shape) == len(input_shape) + 1 and x_sample.shape[1:] == input_shape:
+            # Already has batch dimension, use first sample
+            x_sample = x_sample[0:1]
+        elif x_sample.shape != (1,) + input_shape:
+            # Try to reshape or use first sample if shape doesn't match
+            x_sample = x_sample[None, ...] if x_sample.shape == input_shape else x_sample[0:1]
+        
+        if y_sample.shape == output_shape:
+            y_sample = y_sample[None, ...]
+        elif len(y_sample.shape) == len(output_shape) + 1 and y_sample.shape[1:] == output_shape:
+            # Already has batch dimension, use first sample
+            y_sample = y_sample[0:1]
+        elif y_sample.shape != (1,) + output_shape:
+            # Try to reshape or use first sample if shape doesn't match
+            y_sample = y_sample[None, ...] if y_sample.shape == output_shape else y_sample[0:1]
         
         self.rng, init_rng = jr.split(self.rng)
         self.params = self.model.init(init_rng, x_sample, y_sample, init_rng)
@@ -213,7 +226,9 @@ class Trainer:
             'val_vae_losses': [],
             'val_kl_z0_losses': [],
             'train_accuracies': [],
-            'val_accuracies': []
+            'val_accuracies': [],
+            'train_pve': [],  # Percent variance explained per epoch
+            'val_pve': []  # Percent variance explained per epoch
         }
         
         for epoch in range(num_epochs):
@@ -235,8 +250,37 @@ class Trainer:
                 history['val_reg_losses'].append(val_metrics.get('reg_loss', 0.0))
                 history['val_vae_losses'].append(val_metrics.get('vae_loss', 0.0))
                 history['val_kl_z0_losses'].append(val_metrics.get('kl_z0_loss', 0.0))
+            
+            # Compute PVE for this epoch (using a small subset for efficiency)
+            import numpy as np
+            num_viz = min(2000, x_data.shape[0])
+            train_pred = np.array(self.predict(x_data[:num_viz]))
+            train_y_subset = np.array(y_data[:num_viz])
+            
+            # Calculate R² = 1 - (SS_res / SS_tot)
+            ss_res = np.sum((train_y_subset - train_pred) ** 2)
+            ss_tot = np.sum((train_y_subset - np.mean(train_y_subset, axis=0, keepdims=True)) ** 2)
+            if ss_tot > 0:
+                r2_train = 1 - (ss_res / ss_tot)
+                history['train_pve'].append(r2_train * 100)
+            else:
+                history['train_pve'].append(0.0)
+            
+            if validation_data is not None:
+                num_val_viz = min(1000, validation_data[0].shape[0])
+                val_pred = np.array(self.predict(validation_data[0][:num_val_viz]))
+                val_y_subset = np.array(validation_data[1][:num_val_viz])
+                
+                # Calculate R²
+                ss_res = np.sum((val_y_subset - val_pred) ** 2)
+                ss_tot = np.sum((val_y_subset - np.mean(val_y_subset, axis=0, keepdims=True)) ** 2)
+                if ss_tot > 0:
+                    r2_val = 1 - (ss_res / ss_tot)
+                    history['val_pve'].append(r2_val * 100)
+                else:
+                    history['val_pve'].append(0.0)
         
-        # Store predictions and data for plotting
+        # Store final predictions and data for plotting (backward compatibility)
         import numpy as np
         num_viz = min(2000, x_data.shape[0])
         history['train_pred'] = np.array(self.predict(x_data[:num_viz]))

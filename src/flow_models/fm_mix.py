@@ -18,7 +18,7 @@ from src.embeddings.noise_schedules import create_noise_schedule
 from src.utils.ode_integration import integrate_ode
 
 
-class VAE_flow(nn.Module):
+class VAE_flow_mix(nn.Module):
     """Variational Autoencoder with flow model using @nn.compact methods."""
     config: Config
     

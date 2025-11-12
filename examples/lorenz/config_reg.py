@@ -1,13 +1,13 @@
 """
-Configuration for flow models on two moons dataset.
+Configuration for flow models on Lorenz system dataset.
 
 This config works with all flow models: flow_matching, diffusion, and ct.
 
-Two moons data structure:
-- x: (N, 2) - 2D coordinates
-- y: (N,) - 1D labels (0 or 1)
+Lorenz system data structure:
+- x: (N, input_seq_len, 3) - Input sequences (past states)
+- y: (N, output_seq_len, 3) - Output sequences (future states)
 
-Config class tailored to two moons dataset.
+Config class tailored to Lorenz system sequence modeling.
 
 USAGE:
 You can use this config file in two ways:
@@ -19,11 +19,10 @@ Note: Command line arguments take precedence over config file values.
 
 from dataclasses import dataclass, field
 from flax.core import FrozenDict
-from src.flow_models.config import Config 
-
+from src.flow_models.config import Config as BaseConfig 
 
 @dataclass(frozen=True)
-class Config(Config):
+class Config(BaseConfig):
     """
     Configuration for VAE with flow model on two moons dataset.
     
@@ -32,13 +31,13 @@ class Config(Config):
     gives you access to all configuration options.
     """
     # BaseConfig fields
-    model_name: str = "two_moons_vae_flow"  # Name identifier for the model
+    model_name: str = "lorenz_regression"  # Name identifier for the model
 
     main: FrozenDict = field(default_factory=lambda: FrozenDict({
         # Data shapes
-        "input_shape": (2,),  # Input dimension: 2D coordinates (x)
-        "output_shape": (2,),  # Output dimension: one-hot encoded labels (y) [n_samples, 2]
-        "latent_shape": (2,),  # Latent space dimension (2D for two moons)
+        "input_shape": (6, 3),  # Input dimension: sequence of 6 time steps with 3 features (x)
+        "output_shape": (6, 3),  # Output dimension: sequence of 6 time steps with 3 features (y)
+        "latent_shape": (18,),  # Latent space shape: sequence of 6 time steps with 3 features
         
         # Loss configuration
         "recon_loss_type": "mse",  # Reconstruction loss type: "mse", "cross_entropy", or "none"
@@ -46,11 +45,11 @@ class Config(Config):
         "vae_weight": 0.0,  # Weight for VAE loss (can override with --vae_weight)
         "reg_weight": 0.0,  # Weight for regularization loss (can override with --reg_weight)
         # Flow model settings
-        "normalize_snr_weight": True,  # Apply signal-to-noise ratio weighting to loss
+        "normalize_snr_weight": False,  # Apply signal-to-noise ratio weighting to loss
                                   # False for flow_matching, True for diffusion/ct
-        "integration_method": "midpoint",  # ODE integration method: "euler" or "midpoint"
-                                           # "euler" for flow_matching, "midpoint" for diffusion/ct
-        "encode_x": False,  # Whether to use sequence encoding (False for two moons dataset)
+        "integration_method": "euler",  # ODE integration method: "euler" or "midpoint"
+                                        # "euler" for flow_matching, "midpoint" for diffusion/ct
+        "encode_x": False,  # Whether to encode x (False for MLP regression)
     }))
     
     noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
@@ -79,9 +78,8 @@ class Config(Config):
         "model_type": "vanilla",  # CRN type: "vanilla", "geometric", "potential", "natural", "hamiltonian"
                                   # (can override with --crn_type)
         "network_type": "mlp",  # Network backbone: "mlp", "bilinear", or "convex"
-                                # (can override with --network_type)
-        "hidden_dims": (32, 32, 32, 32, 32, 32),  # Hidden layer dimensions for the network
-                                                   # (can override with --hidden_dims)
+                                # Use "mlp" for regression (sequences will be flattened)
+        "hidden_dims": (64, 64, 64, 64),  # Hidden layer dimensions for the network
         "time_embed_dim": 32,  # Dimension of time embedding
         "time_embed_method": "sinusoidal",  # Time embedding method: "sinusoidal" or other
         "activation_fn": "swish",  # Activation function: "swish", "relu", "tanh", etc.
@@ -92,12 +90,11 @@ class Config(Config):
     encoder: FrozenDict = field(default_factory=lambda: FrozenDict({
         # Encoder configuration (maps input y to latent z)
         "model_type": "identity",  # Encoder type: "identity", "linear", or "mlp"
-                                   # Identity for latent_dim=2, linear/mlp for latent_dim>2
-                                   # (can override with --encoder_model_type)
+                                   # Identity for regression (no encoding needed)
         "encoder_type": "deterministic",  # Encoder type: "deterministic" or "stochastic"
-        "input_shape": (2,),  # Input shape: one-hot encoded labels (y) [n_samples, 2]   can be empty since its value is inherited from main
-        "latent_shape": (2,),  # Latent space shape: 2D for two moons
-        "hidden_dims": (16, 32, 16),  # Hidden dimensions for MLP encoder (not used for identity/linear)
+        "input_shape": "NA",  # Input shape: sequence of 6 time steps with 3 features (y)
+        "latent_shape": "NA",  # Latent space shape: 32-dimensional latent space
+        "hidden_dims": (64, 64),  # Hidden dimensions for MLP encoder (not used for identity)
         "activation": "swish",  # Activation function for encoder
         "dropout_rate": 0.0,  # Dropout rate for encoder
     }))
@@ -105,19 +102,11 @@ class Config(Config):
     decoder: FrozenDict = field(default_factory=lambda: FrozenDict({
         # Decoder configuration (maps latent z to output y)
         "model_type": "identity",  # Decoder model type: "identity", "linear", or "mlp"
-                              # (can override with --decoder_model_type)
+                                   # Identity for regression (no decoding needed)
         "decoder_type": "none",  # Decoder type: "linear", "softmax", "none", or "identity"
-                                     # "identity" is same as 'none')
-                                     # (can override with --decoder_type)
-        "latent_shape": (2,),  # Latent space shape: 2D for two moons.  can be empty since its value is inherited from main
-        "output_shape": (2,),  # Output shape: one-hot encoded labels [n_samples, 2]
-        "hidden_dims": (16, 32, 16),  # Hidden dimensions for MLP decoder (not used for identity/linear)
+        "latent_shape": "NA",  # Latent shape: 32-dimensional latent space
+        "output_shape": "NA",  # Output shape: sequence of 6 time steps with 3 features (y)
+        "hidden_dims": (64, 64),  # Hidden dimensions for MLP decoder (not used for identity)
         "activation": "swish",  # Activation function for decoder
         "dropout_rate": 0.0,  # Dropout rate for decoder
     }))
-
-
-def get_two_moons_config():
-    """Get default TwoMoonsFlowConfig instance."""
-    return Config()
-

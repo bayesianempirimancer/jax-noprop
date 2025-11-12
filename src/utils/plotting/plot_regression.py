@@ -383,20 +383,51 @@ def create_loss_trends_plot(history: Dict[str, Any], model_type: str, output_dir
     ax.legend()
     ax.grid(True, alpha=0.3)
     
-    # KL z0 Loss
+    # Percent Variance Explained (R²)
     ax = axes[1, 1]
-    if history.get('train_kl_z0_losses') and len(history['train_kl_z0_losses']) > 0:
-        ax.plot(epochs, history['train_kl_z0_losses'], label='Train KL z0', color='darkorange', linewidth=2)
-        if history.get('val_kl_z0_losses') and len(history['val_kl_z0_losses']) > 0:
-            ax.plot(epochs, history['val_kl_z0_losses'], label='Val KL z0', color='darkred', linewidth=2, linestyle='--')
-        ax.set_title('KL z0 Loss', fontsize=12, fontweight='bold')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Loss')
+    train_pve = []
+    val_pve = []
+    
+    # Use per-epoch PVE values if available
+    if 'train_pve' in history and len(history['train_pve']) > 0:
+        train_pve = history['train_pve']
+    # Fallback to computing from final predictions if per-epoch values not available
+    elif 'train_pred' in history and 'train_y' in history:
+        train_pred = np.array(history['train_pred'])
+        train_y = np.array(history['train_y'])
+                
+        # Calculate R² = 1 - (SS_res / SS_tot)
+        ss_res = np.sum((train_y - train_pred) ** 2)
+        ss_tot = np.sum((train_y - np.mean(train_y, axis=0, keepdims=True)) ** 2)
+        if ss_tot > 0:
+            r2_train = 1 - (ss_res / ss_tot)
+            train_pve = [r2_train * 100] * len(epochs)  # Same value for all epochs (final predictions)
+    
+    if 'val_pve' in history and len(history['val_pve']) > 0:
+        val_pve = history['val_pve']
+    # Fallback to computing from final predictions if per-epoch values not available
+    elif 'val_pred' in history and 'val_y' in history and len(history.get('val_pred', [])) > 0:
+        val_pred = np.array(history['val_pred'])
+        val_y = np.array(history['val_y'])
+        # Calculate R²
+        ss_res = np.sum((val_y - val_pred) ** 2)
+        ss_tot = np.sum((val_y - np.mean(val_y, axis=0, keepdims=True)) ** 2)
+        if ss_tot > 0:
+            r2_val = 1 - (ss_res / ss_tot)
+            val_pve = [r2_val * 100] * len(epochs)  # Same value for all epochs (final predictions)
+    
+    if len(train_pve) > 0:
+        ax.plot(epochs[:len(train_pve)], train_pve, label='Train % Variance Explained', color='darkgreen', linewidth=2)
+    if len(val_pve) > 0:
+        ax.plot(epochs[:len(val_pve)], val_pve, label='Val % Variance Explained', color='darkred', linewidth=2, linestyle='--')
+    
+    ax.set_title('% Variance Explained (R²)', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('% Variance Explained', color='darkgreen')
+    ax.tick_params(axis='y', labelcolor='darkgreen')
+    if len(train_pve) > 0 or len(val_pve) > 0:
         ax.legend()
-        ax.grid(True, alpha=0.3)
-    else:
-        ax.axis('off')
-        ax.text(0.5, 0.5, 'KL z0 Loss\n(Not Available)', ha='center', va='center', fontsize=12, alpha=0.5)
+    ax.grid(True, alpha=0.3)
     
     # VAE Loss
     ax = axes[1, 2]
