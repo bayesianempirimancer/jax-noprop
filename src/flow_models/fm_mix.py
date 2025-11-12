@@ -18,6 +18,18 @@ from src.embeddings.noise_schedules import create_noise_schedule
 from src.utils.ode_integration import integrate_ode
 
 
+class MixtureComponents(nn.Module):
+    num_components: int
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray, key: jr.PRNGKey) -> jnp.ndarray:
+
+        logits = nn.Dense(self.num_components, kernel_init=jax.nn.initializers.xavier_normal())(x)
+
+        z = jr.gumbel(key, shape=logits.shape)
+
+        return jax.nn.one_hot((logits + z).argmax(-1), self.num_components)
+
 class VAE_flow_mix(nn.Module):
     """Variational Autoencoder with flow model using @nn.compact methods."""
     config: Config
@@ -55,10 +67,12 @@ class VAE_flow_mix(nn.Module):
         # Create schedule using factory - pass learnable flag to schedule
         # The schedule will handle stop_gradient internally if learnable=False
         # Schedule classes use their own defaults for parameters
-        self.noise_schedule = create_noise_schedule(
-            schedule_type, 
-            learnable=self.noise_schedule_learnable
-        )
+        self.no_noise_shedule = bool(self.config.main.get('no_noise_schedule', False))
+        if not self.no_noise_shedule:
+            self.noise_schedule = create_noise_schedule(
+                schedule_type, 
+                learnable=self.noise_schedule_learnable
+            )
         
         # Initialize encoder and decoder
         # Use shapes directly from encoder/decoder configs
@@ -75,6 +89,9 @@ class VAE_flow_mix(nn.Module):
             latent_shape=self.config.decoder["latent_shape"],
             output_shape=self.config.decoder["output_shape"]
         )
+
+        num_components = int(self.config.main.get('num_components', 10))
+        self.mixture = MixtureComponents(num_components)
     
 
     @property
@@ -166,7 +183,10 @@ class VAE_flow_mix(nn.Module):
     def lazy_score(self, z_t, z_target, alpha_t):     return (jnp.sqrt(alpha_t)*z_target - z_t) / (1.0 - alpha_t)
     def lazy_error(self, z_t, z_target, alpha_t):     return z_t - jnp.sqrt(alpha_t)* z_target
     def lazy_noise(self, z_t, z_target, alpha_t):     return self.lazy_error(z_t, z_target, alpha_t) / jnp.sqrt(1.0 - alpha_t)
-
+    
+    @nn.compact
+    def get_component(self, x: jnp.ndarray, key: jr.PRNGKey):
+        return self.mixture(x, key)
 
     @nn.compact
     def get_noise_params(self, t: jnp.ndarray):
@@ -178,7 +198,6 @@ class VAE_flow_mix(nn.Module):
     def get_alpha_bar(self, t: jnp.ndarray):
         """Get alpha_bar(t) from noise schedule using @nn.compact method."""
         return self.noise_schedule.get_alpha_bar(t)
-    
     
     @nn.compact
     def encode(self, x: jnp.ndarray, training: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -204,10 +223,14 @@ class VAE_flow_mix(nn.Module):
         dummy_t = jnp.zeros(batch_shape)
         
         # Call get_noise_params to initialize noise schedule parameters
-        self.get_noise_params(dummy_t)
-        self.get_alpha_bar(dummy_t)
+        if not self.no_noise_shedule:
+            self.get_noise_params(dummy_t)
+            self.get_alpha_bar(dummy_t)
+
+        dummy_c = self.mixture(x, key)
+        
         # initialize model components
-        flow_output = self.dz_dt(dummy_z, x, dummy_t, training)
+        flow_output = self.dz_dt(dummy_z, dummy_c, dummy_t, training)
         encoder_output = self.encode(y, training)
         decoder_output = self.decode(dummy_z, training)
         
@@ -225,14 +248,16 @@ class VAE_flow_mix(nn.Module):
         recon_weight = float(self.config.main.get("recon_weight", 0.0))
         reg_weight = float(self.config.main.get("reg_weight", 0.0))
         vae_weight = float(self.config.main.get("vae_weight", 1.0))
+        use_noise_shedule = not bool(self.config.main.get('no_noise_schedule', False))
         
         # Split keys for random sampling operations (not dropout)
-        key, t_key, z_0_key, z_t_noise_key, z_target_key, vae_noise_key = jr.split(key, 6)
+        key, t_key, z_0_key, z_t_noise_key, z_target_key, vae_noise_key, mixture_key = jr.split(key, 7)
         batch_shape = y.shape[:-self.y_ndims]
 
         # Get alpha_bar values at boundaries
         alpha_0 = self.apply(params, jnp.asarray(1e-6), method='get_alpha_bar')
         alpha_1 = self.apply(params, jnp.array(1.0-1e-6), method='get_alpha_bar')
+
         # Encode Target (noisy latent)
         mu_z_target, logvar_z_target = self.apply(params, y, method='encode', training=training, rngs={'dropout': key})
         z_target = mu_z_target + jr.normal(z_target_key, mu_z_target.shape) * jnp.exp(0.5 * logvar_z_target)
@@ -246,14 +271,17 @@ class VAE_flow_mix(nn.Module):
         diff_z = z_target - z_0
         z_t = z_0 + t_expanded * diff_z
 
-        # Get noise schedule parameters (use squeezed t)
-        alpha_t, gamma_prime_t = self.apply(params, t, method='get_noise_params')
-        # Squeeze alpha_t and gamma_prime_t for use in SNR weight computation
-        alpha_t_squeezed = jnp.squeeze(alpha_t, axis=tuple(range(-self.z_ndims, 0))) if alpha_t.ndim > len(batch_shape) else alpha_t
-        gamma_prime_t_squeezed = jnp.squeeze(gamma_prime_t, axis=tuple(range(-self.z_ndims, 0))) if gamma_prime_t.ndim > len(batch_shape) else gamma_prime_t
+        if use_noise_shedule:
+            # Get noise schedule parameters (use squeezed t)
+            alpha_t, gamma_prime_t = self.apply(params, t, method='get_noise_params')
+            # Squeeze alpha_t and gamma_prime_t for use in SNR weight computation
+            alpha_t_squeezed = jnp.squeeze(alpha_t, axis=tuple(range(-self.z_ndims, 0))) if alpha_t.ndim > len(batch_shape) else alpha_t
+            gamma_prime_t_squeezed = jnp.squeeze(gamma_prime_t, axis=tuple(range(-self.z_ndims, 0))) if gamma_prime_t.ndim > len(batch_shape) else gamma_prime_t
+        
+        c = self.apply(params, x, mixture_key, method='get_component')
 
         # Compute Flow Field and Target Estimate
-        dz_dt = self.apply(params, z_t, x, t, x_mask, method='dz_dt', training=training, rngs={'dropout': key})    
+        dz_dt = self.apply(params, z_t, c, t, x_mask, method='dz_dt', training=training, rngs={'dropout': key})    
         z_target_est = dz_dt * (1.0-t_expanded) + z_t
 
         # Compute Predictions
@@ -262,31 +290,40 @@ class VAE_flow_mix(nn.Module):
         y_vae = self.apply(params, z_target_vae, method='decode', training=training, rngs={'dropout': key})
 
         # Compute Losses
-        snr_weight = self.lazy_flow_snr(alpha_t_squeezed, gamma_prime_t_squeezed)
-        # Normalize SNR weights by their mean if normalize_snr_weight is True
-        if normalize_snr_weight:
-            snr_weight_mean = jnp.mean(snr_weight)
-            snr_weight = snr_weight / (snr_weight_mean + 1e-8)
+        if use_noise_shedule:
+            snr_weight = self.lazy_flow_snr(alpha_t_squeezed, gamma_prime_t_squeezed)
+            # Normalize SNR weights by their mean if normalize_snr_weight is True
+            if normalize_snr_weight:
+                snr_weight_mean = jnp.mean(snr_weight)
+                snr_weight = snr_weight / (snr_weight_mean + 1e-8)
+        else:
+            snr_weight = 1.0
 
         squared_error = jnp.mean((dz_dt - diff_z)**2, axis=tuple(range(-self.z_ndims, 0)))
         flow_loss = jnp.mean(snr_weight * squared_error)
         reg_loss = jnp.mean(dz_dt**2)
 
+        vae_loss = 0.0
+        recon_loss = 0.0
         if recon_loss_type == "cross_entropy":
-            recon_loss = jnp.sum(-y * jnp.log(y_pred + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
-            vae_loss   = jnp.sum(-y * jnp.log(y_vae + 1e-8), axis = tuple(range(-self.y_ndims, 0)))
+            if recon_weight > 0.0:
+                recon_loss = optax.losses.safe_softmax_cross_entropy(y_pred, y)
+            if vae_weight > 0.0:
+                vae_loss   = optax.losses.safe_softmax_cross_entropy(y_vae, y)
         elif recon_loss_type == "mse":
-            recon_loss = jnp.sum((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
-            vae_loss   = jnp.sum((y - y_vae)**2, axis=tuple(range(-self.y_ndims, 0)))
+            if recon_weight > 0.0:
+                recon_loss = jnp.sum((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
+            if vae_weight > 0.0:
+                vae_loss   = jnp.sum((y - y_vae)**2, axis=tuple(range(-self.y_ndims, 0)))
+
+        if use_noise_shedule and recon_weight > 0.0:
+            recon_snr = self.lazy_target_snr(alpha_t_squeezed, gamma_prime_t_squeezed)
+            # Normalize recon SNR weights by their mean if normalize_snr_weight is True
+            if normalize_snr_weight:
+                recon_snr_mean = jnp.mean(recon_snr)
+                recon_snr = recon_snr / (recon_snr_mean + 1e-8)
         else:
-            recon_loss = 0.0
-            vae_loss = 0.0
-        
-        recon_snr = self.lazy_target_snr(alpha_t_squeezed, gamma_prime_t_squeezed)
-        # Normalize recon SNR weights by their mean if normalize_snr_weight is True
-        if normalize_snr_weight:
-            recon_snr_mean = jnp.mean(recon_snr)
-            recon_snr = recon_snr / (recon_snr_mean + 1e-8)
+            recon_snr = 1.0
         
         recon_loss = jnp.mean(recon_snr * recon_loss)  # Average over batch dimension if needed      
         vae_loss = jnp.mean(vae_loss)
@@ -321,10 +358,13 @@ class VAE_flow_mix(nn.Module):
         
         if prng_key is not None:
             # Generative mode: sample from unit normal distribution
-            z_0 = jr.normal(prng_key, batch_shape + (self.z_dim,))
+            key1, key2 = jr.split(prng_key)
+            z_0 = jr.normal(key1, batch_shape + (self.z_dim,))
+            c = self.apply(params, x, key2, method='get_component')
         else:
             # Regression mode: start from zero
             z_0 = jnp.zeros(batch_shape + (self.z_dim,))  # ode expects vectorized z
+            c = self.apply(params, x, jr.PRNGKey(0), method='get_component')
         
         def vector_field(params, z, x, t):
             z = self._unflatten_z(z)  # crn expects unflattened z
@@ -336,7 +376,7 @@ class VAE_flow_mix(nn.Module):
             vector_field=vector_field,
             params=params_no_grad,
             z0=z_0,
-            x=x,
+            x=c,
             time_span=(0.0, 1.0),
             num_steps=num_steps,
             method=integration_method,
@@ -355,7 +395,10 @@ class VAE_flow_mix(nn.Module):
             If output_type="trajectory": Full trajectory [num_steps, batch_shape + y_shape]
         """
         params_no_grad = jax.lax.stop_gradient(params)
-        z_0 = jr.normal(prng_key, batch_shape + (self.z_dim,))
+        key1, key2 = jr.split(prng_key)
+        z_0 = jr.normal(key1, batch_shape + (self.z_dim,))
+        c = self.apply(params, None, key2, method='get_component', training=False)
+
         # Define the vector field for ODE integration using flow_model method with x=None
         def vector_field(params, z, x, t):
             z = self._unflatten_z(z)
@@ -367,12 +410,13 @@ class VAE_flow_mix(nn.Module):
             vector_field=vector_field,
             params=params_no_grad,
             z0=z_0,
-            x=None,  # No conditional input
+            x=c,  # No conditional input
             time_span=(0.0, 1.0),
             num_steps=num_steps,
             method=integration_method,
             output_type=output_type
         )
+
         return self.apply(params, z_trajectory, method='decode', training=False)
     
 

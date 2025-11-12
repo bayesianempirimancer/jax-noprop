@@ -14,6 +14,7 @@ from functools import partial
 from src.flow_models.fm import VAE_flow as FlowMatchingModel
 from src.flow_models.df import VAE_flow as DiffusionModel
 from src.flow_models.ct import VAE_flow as CTModel
+from src.flow_models.fm_mix import VAE_flow_mix as FMMixModel
 from src.flow_models.config import Config
 
 
@@ -43,6 +44,8 @@ class GenerationTrainer:
             self.model = FlowMatchingModel(config=config)
         elif model_type == "ct":
             self.model = CTModel(config=config)
+        elif model_type == "fm_mix":
+            self.model = FMMixModel(config=config)
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
         

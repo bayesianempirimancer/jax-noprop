@@ -284,15 +284,26 @@ class VAE_flow(nn.Module):
         vae_loss = 0.0
         recon_loss = 0.0
         if recon_loss_type == "cross_entropy":
-            recon_loss = optax.losses.safe_softmax_cross_entropy(y_pred, y)
+            if recon_weight > 0.0:
+                recon_loss = optax.losses.safe_softmax_cross_entropy(y_pred, y)
             if vae_weight > 0.0:
                 vae_loss   = optax.losses.safe_softmax_cross_entropy(y_vae, y)
         elif recon_loss_type == "mse":
-            recon_loss = jnp.sum((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
+            if recon_weight > 0.0:
+                recon_loss = jnp.sum((y - y_pred)**2, axis=tuple(range(-self.y_ndims, 0)))
             if vae_weight > 0.0:
                 vae_loss   = jnp.sum((y - y_vae)**2, axis=tuple(range(-self.y_ndims, 0)))
+
+        if use_noise_shedule and recon_weight > 0.0:
+            recon_snr = self.lazy_target_snr(alpha_t_squeezed, gamma_prime_t_squeezed)
+            # Normalize recon SNR weights by their mean if normalize_snr_weight is True
+            if normalize_snr_weight:
+                recon_snr_mean = jnp.mean(recon_snr)
+                recon_snr = recon_snr / (recon_snr_mean + 1e-8)
+        else:
+            recon_snr = 1.0
         
-        recon_loss = jnp.mean(snr_weight * recon_loss)  # Average over batch dimension if needed      
+        recon_loss = jnp.mean(recon_snr * recon_loss)  # Average over batch dimension if needed      
         vae_loss = jnp.mean(vae_loss)
 
         # KL regularization term: KL(q(z_0|z_target), p(z_0))
