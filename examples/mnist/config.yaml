@@ -1,12 +1,14 @@
-model_name: two_moons_vae_flow
+model_name: mnist_vae_flow
 main:
   input_shape: 
-  - 2
+  - 28
+  - 28
+  - 1
   output_shape:
-  - 2
+  - 10
   latent_shape:
-  - 2
-  recon_loss_type: mse
+  - 10
+  recon_loss_type: cross_entropy
   recon_weight: 0.0
   reg_weight: 0.0
   vae_weight: 1.0
@@ -36,9 +38,9 @@ encoder:
   model_type: identity
   encoder_type: deterministic
   input_shape:
-  - 2
+  - 10
   latent_shape:
-  - 2
+  - 10
   hidden_dims:
   - 16
   - 32
@@ -49,9 +51,9 @@ decoder:
   model_type: identity
   decoder_type: none
   latent_shape:
-  - 2
+  - 10
   output_shape:
-  - 2
+  - 10
   hidden_dims:
   - 16
   - 32
@@ -60,16 +62,14 @@ decoder:
   dropout_rate: 0.0
 crn:
   model_type: vanilla
-  network_type: mlp
+  network_type: cnn
+  feature_dim: 128
   hidden_dims:
-  - 32
-  - 32
-  - 32
-  - 32
-  - 32
-  - 32
-  time_embed_dim: 32
+  - 128
+  - 128
+  - 128
+  time_embed_dim: 64
   time_embed_method: sinusoidal
   activation_fn: swish
   use_batch_norm: false
-  dropout_rate: 0.1
+  dropout_rate: 0.0

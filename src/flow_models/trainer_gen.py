@@ -221,7 +221,10 @@ class GenerationTrainer:
                         x_gen = self.unconditional_generate((num_eval,), 20, gen_rng)
                     else:
                         cond = vx[:num_eval] if vx is not None else None
-                        x_gen = self.conditional_generate(cond, 20, gen_rng) if cond is not None else self.unconditional_generate((num_eval,), 20, gen_rng)
+                        if cond is not None:
+                            x_gen = self.conditional_generate(cond, num_steps=20, prng_key=gen_rng)
+                        else: 
+                            x_gen = self.unconditional_generate((num_eval,), num_steps=20, prng_key=gen_rng)
                     
                     from src.utils.metrics import chamfer_distance
                     chamfer_dist = chamfer_distance(x_gen, vy[:num_eval])
@@ -296,7 +299,7 @@ class GenerationTrainer:
             'kl_z0_loss': sum(kl_z0_losses) / num_batches if num_batches > 0 else 0.0
         }
     
-    def conditional_generate(self, cond_y: jnp.ndarray, num_steps: int = 20, integration_method: str = "midpoint", prng_key: Optional[jr.PRNGKey] = None) -> jnp.ndarray:
+    def conditional_generate(self, cond_y: jnp.ndarray, num_steps: int = 20, integration_method: str = 'midpoint', prng_key: Optional[jr.PRNGKey] = None) -> jnp.ndarray:
         """Generate samples conditioned on y."""
         if self.params is None:
             raise ValueError("Model not initialized.")

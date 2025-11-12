@@ -87,9 +87,13 @@ All schedules implement:
 
 from typing import Any, Dict, Optional, Tuple
 
+import math
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
+from tensorflow_probability.substrates.jax import math as tfpmath
+
+clip = tfpmath.clip_by_value_preserve_gradient
 
 class NoiseSchedule(nn.Module):
     """Abstract base class for noise schedules.
@@ -879,8 +883,7 @@ class NoiseScheduleNetwork(NoiseSchedule):
             f_t = network(t_input)
             g0 = network(jnp.zeros_like(t_input))
             g1 = network(jnp.ones_like(t_input))
-            gt = jnp.clip((f_t - g0) / (g1 - g0 + 1e-8), 0.0, 1.0)
-            # f_t = t_input + (1 - t_input) * t_input * nn.sigmoid(scale_logit) * nn.sigmoid(f_t)
+            gt = clip((f_t - g0) / (g1 - g0 + 1e-8), 0.0, 1.0)
             gamma_t = gamma_min + (gamma_max - gamma_min) * ( 1 - gt)
             return gamma_t
         
@@ -889,7 +892,7 @@ class NoiseScheduleNetwork(NoiseSchedule):
         vals, grads = jax.vmap(jax.value_and_grad(gamma_fn_scalar))(t_flat)
         gamma_t = vals.reshape(t.shape) 
         gamma_prime_t = grads.reshape(t.shape)
-        gamma_prime_t = jnp.clip(gamma_prime_t, 0.0, self.gamma_prime_max)
+        gamma_prime_t = clip(gamma_prime_t, - self.gamma_prime_max, 0.0)
         
         # Compute alpha_bar from gamma
         alpha_bar_t = jax.nn.sigmoid(- gamma_t)
@@ -922,8 +925,10 @@ def create_noise_schedule(
         NoiseSchedule instance
     """
     schedule_type = schedule_type.lower()
-    
-    if schedule_type == "linear":
+
+    if schedule_type == 'constant':
+        return ConstantNoiseSchedule(**kwargs)
+    elif schedule_type == "linear":
         return LinearNoiseSchedule(**kwargs)
     elif schedule_type == "cosine":
         return CosineNoiseSchedule(**kwargs)
