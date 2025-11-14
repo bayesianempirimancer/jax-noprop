@@ -28,6 +28,12 @@ def chamfer_distance(
     Returns:
         Chamfer Distance (scalar), or float('inf') if generation failed (NaN/Inf present)
     """
+    if generated_samples.ndim > 2:
+        generated_samples = generated_samples.reshape(-1, generated_samples.shape[-1])
+
+    if real_samples.ndim > 2:
+        real_samples = real_samples.reshape(-1, real_samples.shape[-1])
+    
     # Check for NaN or Inf in generated samples - indicates generation failure
     gen_has_invalid = jnp.any(~jnp.isfinite(generated_samples))
     real_has_invalid = jnp.any(~jnp.isfinite(real_samples))
