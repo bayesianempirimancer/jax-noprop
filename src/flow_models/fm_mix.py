@@ -17,7 +17,7 @@ from src.vae.decoders import create_decoder
 from src.flow_models.crn import create_conditional_resnet
 from src.embeddings.noise_schedules import create_noise_schedule
 from src.utils.ode_integration import integrate_ode
-from src.layers.settrans import ISAB, ISAB, PMA
+from src.layers.settrans import SAB, ISAB, PMA
 
 from jax.scipy.special import logsumexp
 
@@ -34,6 +34,7 @@ class SetTransfromer(nn.Module):
         x = ISAB(N_head=self.num_heads, N_dim=self.embed_dim, N_induced=self.induced_dim, ln=True)(x)
         x = ISAB(N_head=self.num_heads, N_dim=self.embed_dim, N_induced=self.induced_dim, ln=True)(x)
         x = PMA(N_head=self.num_heads, N_dim=self.embed_dim, N_seed=self.seed_dim, ln=True)(x)
+        x = SAB(N_head=self.num_heads, N_dim=self.embed_dim, ln=True)(x)
         return nn.DenseGeneral(self.output_dim, axis=(-2,-1),
                             kernel_init =  nn.initializers.variance_scaling(scale = 1/3,
                                                                             mode = "fan_in",
@@ -55,8 +56,8 @@ class MixtureComponents(nn.Module):
                 output_dim=self.num_components,
                 num_heads=4,
                 embed_dim=64,
-                induced_dim=4,
-                seed_dim=2
+                induced_dim=16,
+                seed_dim=4
             )(y)
             log_prob_post = logits_posterior - logsumexp(logits_posterior, axis=-1, keepdims=True)
             log_prob_prior = logits_prior - logsumexp(logits_prior, axis=-1, keepdims=True)
@@ -378,7 +379,7 @@ class VAE_flow_mix(nn.Module):
         # kl_z0_loss = 0.5 * (mean_q_mu_sq_over_sigma_sq + self.z_dim*(jnp.log(q_sigma_sq) - 1.0))
 
 
-        total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss # + kl_z0_loss  
+        total_loss = flow_loss + recon_weight * recon_loss + reg_weight * reg_loss + vae_weight * vae_loss + kl_div_comp # + kl_z0_loss  
         
         return total_loss, {
             'flow_loss': flow_loss,
@@ -396,7 +397,7 @@ class VAE_flow_mix(nn.Module):
         Make predictions using ODE solver integration.        
         Requires x is not None... use sample method for unconditional generation.
         """
-        num_samples = 32
+        num_samples = 64
         params_no_grad = jax.lax.stop_gradient(params)
         x_batch_shape = x.shape[:-self.x_ndims]
         batch_shape = (math.prod(x_batch_shape + (num_samples,)), )
