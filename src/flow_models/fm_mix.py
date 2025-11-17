@@ -16,6 +16,7 @@ from src.vae.decoders import create_decoder
 from src.flow_models.crn import create_conditional_resnet
 from src.embeddings.noise_schedules import create_noise_schedule
 from src.utils.ode_integration import integrate_ode
+from src.flow_models.flow_planner import create_flow_planner
 
 
 class VAE_flow_mix(nn.Module):
@@ -36,6 +37,16 @@ class VAE_flow_mix(nn.Module):
             input_shape=input_shape,
             output_shape=self.z_shape
         )
+        
+        self.flow_planner = create_flow_planner(
+            self.config.flow_planner,
+            latent_shape=self.z_shape,
+            input_shape=input_shape,
+            output_shape=self.z_shape
+        )
+
+        
+
         
         # Initialize noise schedule using factory function
         # Get schedule type from noise_schedule config or fallback to main config

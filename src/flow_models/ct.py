@@ -171,9 +171,14 @@ class VAE_flow(nn.Module):
         # Get alpha_t and gamma_prime directly from noise schedule
         t_expanded = jnp.expand_dims(jnp.asarray(t), axis=tuple(range(-self.z_ndims, 0)))
         alpha_t, gamma_prime_t = self.get_noise_params(t_expanded)
-        return self.lazy_flow(z, crn_output, alpha_t, gamma_prime_t)
+        return self.lazy_flow_from_target(z, crn_output, alpha_t, gamma_prime_t)
     
-    def lazy_flow(self, z_t, z_target, alpha_t, gamma_prime_t):
+    # def lazy_flow_from_noise(self, z_t, predicted_noise, alpha_t, gamma_prime_t):
+    #     return 0.5 * gamma_prime_t * (1.0 - alpha_t) * (z_t - predicted_noise/jnp.sqrt(alpha_t))
+    # def lazy_flow_from_target(self, z_t, z_target, alpha_t, gamma_prime_t):
+    #     return 0.5 * gamma_prime_t * (jnp.sqrt(alpha_t)*z_target - alpha_t*z_t)
+
+    def lazy_flow_from_target(self, z_t, z_target, alpha_t, gamma_prime_t):
         return gamma_prime_t * (jnp.sqrt(alpha_t)*z_target - 0.5*(1+alpha_t)*z_t)
 
     # KL divergence with SNR weighting: SNR_noise_weight = gamma_prime
@@ -253,7 +258,7 @@ class VAE_flow(nn.Module):
         
         # Compute Target estimate and flow prediction
         z_target_est = self.apply(params, z_t, x, t, method='crn_output', training=training, rngs={'dropout': key})
-        dz_dt = self.lazy_flow(z_t, z_target_est, alpha_t, gamma_prime_t)
+        dz_dt = self.lazy_flow_from_target(z_t, z_target_est, alpha_t, gamma_prime_t)
 
         # Compute Predictions
         y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})

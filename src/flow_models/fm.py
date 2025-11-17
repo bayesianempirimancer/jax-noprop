@@ -244,16 +244,16 @@ class VAE_flow(nn.Module):
         t_expanded = jnp.expand_dims(t, axis=tuple(range(-self.z_ndims, 0)))
         z_0 = jr.normal(z_0_key, batch_shape + self.z_shape)
         
-        # Sample latent state at time t
+        # Sample latent state at time t using linear noise schedule
         diff_z = z_target - z_0
         z_t = z_0 + t_expanded * diff_z
 
-        # Get noise schedule parameters (use squeezed t)
-        if use_noise_shedule:
-            alpha_t, gamma_prime_t = self.apply(params, t, method='get_noise_params')
-            # Squeeze alpha_t and gamma_prime_t for use in SNR weight computation
-            alpha_t_squeezed = jnp.squeeze(alpha_t, axis=tuple(range(-self.z_ndims, 0))) if alpha_t.ndim > len(batch_shape) else alpha_t
-            gamma_prime_t_squeezed = jnp.squeeze(gamma_prime_t, axis=tuple(range(-self.z_ndims, 0))) if gamma_prime_t.ndim > len(batch_shape) else gamma_prime_t
+        # # Get noise schedule parameters (use squeezed t)
+        # if use_noise_shedule:   #FIX HERE
+        #     alpha_t, gamma_prime_t = self.apply(params, t, method='get_noise_params')
+        #     # Squeeze alpha_t and gamma_prime_t for use in SNR weight computation
+        #     alpha_t_squeezed = jnp.squeeze(alpha_t, axis=tuple(range(-self.z_ndims, 0))) if alpha_t.ndim > len(batch_shape) else alpha_t
+        #     gamma_prime_t_squeezed = jnp.squeeze(gamma_prime_t, axis=tuple(range(-self.z_ndims, 0))) if gamma_prime_t.ndim > len(batch_shape) else gamma_prime_t
 
         # Compute Flow Field and Target Estimate
         dz_dt = self.apply(params, z_t, x, t, x_mask, method='dz_dt', training=training, rngs={'dropout': key})    
@@ -262,16 +262,15 @@ class VAE_flow(nn.Module):
         # Compute Predictions
         y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})
         if vae_weight > 0.0:
-            assert use_noise_shedule
-            alpha_1 = self.apply(params, jnp.array(1.0-1e-6), method='get_alpha_bar')
+            alpha_1 = 1.0  # HACK ALERT 
             z_target_vae = z_target*jnp.sqrt(alpha_1) + jr.normal(vae_noise_key, z_target.shape) * jnp.sqrt(1.0 - alpha_1)
             y_vae = self.apply(params, z_target_vae, method='decode', training=training, rngs={'dropout': key})
 
         # Compute Losses
         if use_noise_shedule:
-            snr_weight = 1.0
+            snr_weight = self.lazy_flow_snr(t, 1.0/(t*(1.0-t)))
         else:
-            snr_weight = self.lazy_flow_snr(alpha_t_squeezed, gamma_prime_t_squeezed)
+            snr_weight = 1.0
             # Normalize SNR weights by their mean if normalize_snr_weight is True
             if normalize_snr_weight:
                 snr_weight_mean = jnp.mean(snr_weight)

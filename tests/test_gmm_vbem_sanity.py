@@ -18,7 +18,7 @@ matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import time
 
-from src.models.vae.vb_gmm import GMMVBEM
+from src.vae.vb_gmm import GMMVBEM
 
 
 def generate_uniform_data(
@@ -86,17 +86,17 @@ def test_single_gaussian_overclustering():
     dummy_params = gmm_vbem.init(init_key, z_e_sample)
     gmm_params = unfreeze(dummy_params['params'])
     
-    # Initialize cluster means from random data points
-    key, init_subset_key = jr.split(key)
-    # Must have at least num_clusters samples
-    n_init_samples = max(num_clusters, min(num_clusters * 2, n_samples))
-    init_indices = jr.permutation(init_subset_key, n_samples)[:n_init_samples]
-    z_e_init = z_e_data[init_indices]
-    gmm_params = gmm_vbem.initialize_cluster_means(
-        params=gmm_params,
-        z_e=z_e_init,
-        key=init_subset_key
+    # Initialize cluster means from the data
+    # get_initial_cluster_means handles random sampling internally
+    key, init_key = jr.split(key)
+    mu_n = GMMVBEM.get_initial_cluster_means(
+        num_clusters=num_clusters,
+        latent_dim=latent_dim,
+        x=z_e_data,
+        key=init_key
     )
+    # Update params with initialized cluster means
+    gmm_params['mu_n'] = mu_n
     
     print("Initialized GMM parameters")
     print(f"  mu_n shape: {gmm_params['mu_n'].shape}")

@@ -90,34 +90,24 @@ class VBVAETrainer:
         # Extract GMM params and initialize cluster means
         _, gmm_params = self._separate_gmm_params(self.params)
         
-        # Create GMMVBEM instance to call initialize_cluster_means
+        # Get configuration values
         num_clusters = self.config.main["num_clusters"]
         latent_dim = self.config.main["latent_dim"]
-        prior_mu = self.config.main.get("prior_mu", 0.0)
-        prior_alpha = self.config.main.get("prior_alpha", 0.5)
-        prior_beta = self.config.main.get("prior_beta", 0.5)
-        prior_alpha_mix = self.config.main.get("prior_alpha_mix", 0.5)
         
-        gmm_vbem = GMMVBEM(
+        # Initialize cluster means from data using class method
+        mu_n = GMMVBEM.get_initial_cluster_means(
             num_clusters=num_clusters,
             latent_dim=latent_dim,
-            prior_mu=prior_mu,
-            prior_alpha=prior_alpha,
-            prior_beta=prior_beta,
-            prior_alpha_mix=prior_alpha_mix,
-            beta_mix=self.config.main.get("beta_mix", 0.0)
-        )
-        
-        # Initialize cluster means from data
-        gmm_params_initialized = gmm_vbem.initialize_cluster_means(
-            params=gmm_params,
-            z_e=z_e,
+            x=z_e,
             key=init_key
         )
         
+        # Update gmm_params with initialized cluster means
+        gmm_params['mu_n'] = mu_n
+        
         # Update self.params with initialized GMM params
         params_unfrozen = unfreeze(self.params)
-        params_unfrozen['params']['gmm_vbem'] = gmm_params_initialized
+        params_unfrozen['params']['gmm_vbem'] = gmm_params
         self.params = freeze(params_unfrozen)
         
         # Initialize optimizer state with only encoder/decoder params (not GMM params)

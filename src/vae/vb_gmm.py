@@ -11,13 +11,32 @@ import jax.random as jr
 from jax import lax
 import flax.linen as nn
 from flax.core import FrozenDict
-from dataclasses import dataclass, field
-from typing import Tuple, Union, Optional
+from dataclasses import dataclass, field, MISSING
+from typing import Tuple, Union, Optional, Dict, Any
 
 from src.utils.math_utils import logsumexp, stable_softmax
 from src.utils.kl_divergence import gamma_kl, dirichlet_kl, normal_gamma_kl
 from jax.scipy.special import digamma, gammaln
 from flax.core import freeze
+from src.configs.base_config import BaseConfig
+
+
+@dataclass(frozen=True)
+class GMMVBEMConfig(BaseConfig):
+    """Configuration for GMMVBEM model."""
+    num_clusters: int
+    latent_dim: int
+    model_name: str = field(default="gmm_vbem", init=False)  # Exclude from __init__ to avoid ordering issues
+    prior_mu: float = 0.0
+    prior_alpha: float = 1.0
+    prior_beta: float = 1.0
+    prior_alpha_mix: float = 0.5
+    beta_mix: float = 0.1
+    tie_precisions: bool = False
+    
+    def __post_init__(self):
+        # Set model_name after initialization
+        object.__setattr__(self, 'model_name', "gmm_vbem")
 
 
 class GMMVBEM(nn.Module):
@@ -71,56 +90,77 @@ class GMMVBEM(nn.Module):
         )
 
 
-    def initialize_cluster_means(self, params: dict, z_e: jnp.ndarray, key: jr.PRNGKey) -> dict:
+    @classmethod
+    def get_initial_cluster_means(cls, num_clusters: int, latent_dim: int, x: jnp.ndarray, key: jr.PRNGKey) -> jnp.ndarray:
         """
         Initialize cluster means by randomly sampling data points.
         
         Args:
-            params: Current GMM parameters dictionary
-            z_e: Encoder outputs [N, latent_dim] - flattened to 2D
+            num_clusters: Number of clusters
+            latent_dim: Dimension of latent space
+            x: Input data [N, latent_dim] - flattened to 2D
             key: Random key for sampling
             
         Returns:
-            Updated params dictionary with initialized cluster means
+            Initialized cluster means [num_clusters, latent_dim]
         """
-        # Flatten z_e to 2D if needed
-        z_e_flat = z_e.reshape(-1, self.latent_dim)  # [N, latent_dim]
-        N = z_e_flat.shape[0]
+        # Flatten x to 2D if needed
+        x_flat = x.reshape(-1, latent_dim)  # [N, latent_dim]
+        N = x_flat.shape[0]
         
         # Randomly sample num_clusters data points (without replacement)
         # If we have fewer data points than clusters, add noise
-
+        # Use permutation for efficiency when N is large (more efficient than jr.choice with replace=False)
         
-        if N >= self.num_clusters:
-            idx = jr.choice(key, jnp.arange(N), (self.num_clusters,), replace=False)
-            mu_n = z_e_flat[idx]  # [num_clusters, latent_dim]
+        if N >= num_clusters:
+            # Shuffle indices and take first num_clusters (more efficient for large N)
+            permuted_indices = jr.permutation(key, jnp.arange(N))
+            idx = permuted_indices[:num_clusters]
+            mu_n = x_flat[idx]  # [num_clusters, latent_dim]
         else:
-            mu_n = z_e_flat
-            M = self.num_clusters - N
-            mu_n = jnp.concatenate([mu_n, z_e_flat.mean(0, keepdims=True) + jr.normal(key, (M, self.latent_dim))], axis=0)
-      
-        # Set cluster means to selected data points
-        # z_e_flat[idx] has shape [num_clusters, latent_dim]
+            mu_n = x_flat
+            M = num_clusters - N
+            mu_n_opt_rand = x_flat.mean(0, keepdims=True) + x_flat.std(0, keepdims=True)*N**(-latent_dim/2) * jr.normal(key, (M, latent_dim))
+            mu_n = jnp.concatenate([mu_n, mu_n_opt_rand], axis=0)
         
-        # Update params
-        params['mu_n'] = mu_n
-        return params
+        return mu_n
 
+    def extract_params(self) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """
+        Extract GMM parameters with gradients stopped.
+        
+        This method returns all GMM parameters with stop_gradient applied,
+        ensuring that gradients never flow through these parameters (since they
+        are updated via VBEM, not gradient descent).
+        
+        Returns:
+            Tuple of (mu_n, alpha_n, beta_n, alpha_mix):
+                - mu_n: [num_clusters, latent_dim]
+                - alpha_n: [num_clusters, 1]
+                - beta_n: [num_clusters, latent_dim]
+                - alpha_mix: [num_clusters]
+        """
+        return (
+            jax.lax.stop_gradient(self.mu_n),
+            jax.lax.stop_gradient(self.alpha_n),
+            jax.lax.stop_gradient(self.beta_n),
+            jax.lax.stop_gradient(self.alpha_mix),
+        )
 
     @nn.compact
-    def fill_unused(self, z_e: jnp.ndarray, training: bool = True) -> dict:
+    def fill_unused(self, x: jnp.ndarray, training: bool = False) -> dict:
         """
         Fill unused clusters by reinitializing their means to worst-fit data points
         and resetting alpha_n and beta_n to prior values.
         
         Args:
-            z_e: Encoder outputs [batch, ..., latent_dim]
+            x: Input data [batch, ..., latent_dim]
             
         Returns:
             Updated GMM parameters
         """
         # Compute log_p_tilde using current params (accessed via self.*)
-        log_p_tilde = self.log_p_tilde(z_e, training=training)
+        log_p_tilde = self.log_p_tilde(x, training=training)
         
         # Compute logZ for finding worst-fit points
         logZ = logsumexp(log_p_tilde, axis=-1)  # [batch, ...]
@@ -141,9 +181,9 @@ class GMMVBEM(nn.Module):
                 'alpha_mix': self.alpha_mix
             }
         
-        z_e_flat = z_e.reshape(-1, self.latent_dim)  # [N, latent_dim]
+        x_flat = x.reshape(-1, self.latent_dim)  # [N, latent_dim]
         logZ_flat = logZ.reshape(-1)  # [N]
-        N = z_e_flat.shape[0]
+        N = x_flat.shape[0]
         
         # Get unused indices - simple approach without JIT constraints
         # Sort by unused_mask (True=1, False=0) descending, then take first ns
@@ -159,10 +199,10 @@ class GMMVBEM(nn.Module):
         sorted_logZ = jnp.argsort(logZ_flat)  # [N] sorted indices
         # Simple indexing - take first ns_actual worst-fit indices
         worst_fit_indices = sorted_logZ[:ns_actual]  # [ns_actual]
-        worst_fit_z_e = z_e_flat[worst_fit_indices]  # [ns_actual, latent_dim]
+        worst_fit_x = x_flat[worst_fit_indices]  # [ns_actual, latent_dim]
         
-        # Update params: set mu_n for unused clusters to worst-fit z_e values
-        mu_n = self.mu_n.at[unused_indices, :].set(worst_fit_z_e)
+        # Update params: set mu_n for unused clusters to worst-fit x values
+        mu_n = self.mu_n.at[unused_indices, :].set(worst_fit_x)
         
         # Reset alpha_n and beta_n for unused clusters to prior values
 
@@ -181,7 +221,7 @@ class GMMVBEM(nn.Module):
 
 
     @nn.compact
-    def nat_to_stats(self, training: bool = True) -> dict:
+    def nat_to_stats(self, training: bool = False) -> dict:
         """
         Convert natural parameters to expected sufficient statistics.
         
@@ -209,11 +249,8 @@ class GMMVBEM(nn.Module):
                 - 'E_pi': [num_clusters] - E[π]
                 - 'E_log_pi': [num_clusters] - E[log(π)]
         """
-        
-        mu_n = self.mu_n  # [num_clusters, latent_dim]
-        alpha_n = self.alpha_n  # [num_clusters, 1]
-        beta_n = self.beta_n  # [num_clusters, latent_dim]
-        alpha_mix = self.alpha_mix  # [num_clusters]
+        # Extract parameters with gradients stopped (updated via VBEM, not gradient descent)
+        mu_n, alpha_n, beta_n, alpha_mix = self.extract_params()
         
         # Compute κₙ from αₙ: κₙ = 2 * αₙ (keep shape [num_clusters, 1] for broadcasting)
         kappa_n = 2.0 * alpha_n  # [num_clusters, 1]
@@ -261,16 +298,16 @@ class GMMVBEM(nn.Module):
     
     
     @nn.compact
-    def log_p_tilde(self, z_e: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+    def log_p_tilde(self, x: jnp.ndarray, training: bool = False) -> jnp.ndarray:
         """
         Compute unnormalized log probability of cluster assignments.
         
         Uses bound parameters from self (via nat_to_stats).
         
-        log p̃(z_e, k) = E[log p(z_e | k)] + E[log π_k]
+        log p̃(x, k) = E[log p(x | k)] + E[log π_k]
         
         Where:
-        - E[log p(z_e | k)] is the expected Gaussian log-likelihood using E[μ_k], E[γ_k], and E[log(γ_k)]
+        - E[log p(x | k)] is the expected Gaussian log-likelihood using E[μ_k], E[γ_k], and E[log(γ_k)]
         - E[log π_k] is the expected log mixing weight (NOT log(E[π_k]))
         
         The expectation is computed by averaging log_p(natparam * stats), so we only use:
@@ -278,7 +315,7 @@ class GMMVBEM(nn.Module):
         - E[log(π)] for the mixing weights
         
         Args:
-            z_e: Observations [batch, ..., latent_dim] or [N, latent_dim]
+            x: Observations [batch, ..., latent_dim] or [N, latent_dim]
                 
         Returns:
             Unnormalized expected log probabilities [batch, ..., num_clusters] or [N, num_clusters]
@@ -296,13 +333,13 @@ class GMMVBEM(nn.Module):
         num_clusters = E_mu.shape[-2]
         latent_dim = E_mu.shape[-1]
         
-        original_shape = z_e.shape
-        z_e_flat = z_e.reshape(-1, latent_dim)  # [N, latent_dim]
+        original_shape = x.shape
+        x_flat = x.reshape(-1, latent_dim)  # [N, latent_dim]
         
         # Ensure all terms have shape [num_clusters] for consistent broadcasting
         log_probs = E_log_pi - 0.5*latent_dim*E_gamma_var_mu.squeeze(-1) + 0.5*jnp.sum(E_log_gamma, axis=-1)  # [num_clusters]
 
-        diff = z_e_flat[:, None, :] - E_mu[None, :, :]  # [N, num_clusters, latent_dim]
+        diff = x_flat[:, None, :] - E_mu[None, :, :]  # [N, num_clusters, latent_dim]
         # Clip E_gamma to prevent extreme precision values that cause numerical overflow
         # Very high precision (low variance) can cause log_probs to become extremely negative
         E_gamma_clipped = jnp.clip(E_gamma, 0.0, 1e6)  # Cap precision at reasonable maximum
@@ -317,7 +354,7 @@ class GMMVBEM(nn.Module):
         return log_probs
     
     @nn.compact
-    def quantize(self, z_e: jnp.ndarray, training: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    def quantize(self, x: jnp.ndarray, training: bool = False) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """
         Compute cluster assignments and get discrete representation.
         
@@ -325,21 +362,22 @@ class GMMVBEM(nn.Module):
         During inference: uses the most probable cluster (argmax) deterministically.
         
         Args:
-            z_e: Encoder output [batch, ..., latent_dim]
+            x: Input data [batch, ..., latent_dim]
             training: Whether in training mode (if True, samples; if False, uses argmax)
             
         Returns:
             Tuple of:
-            - z_q: Quantized representation (cluster mean of selected/sampled cluster) [batch, ..., latent_dim]
+            - x_q: Quantized representation (cluster mean of selected/sampled cluster) [batch, ..., latent_dim]
             - log_p_tilde: Unnormalized log probabilities [batch, ..., num_clusters]
         """
         # Compute unnormalized log probabilities
         # When called via apply, Flax automatically binds parameters, so self.mu_n etc will use the bound params
         # log_p_tilde uses bound parameters from self (via nat_to_stats)
-        log_p_tilde = self.log_p_tilde(z_e, training=training)  # [batch, ..., num_clusters]     
+        log_p_tilde = self.log_p_tilde(x, training=training)  # [batch, ..., num_clusters]     
 
-        mu_n = self.mu_n
-        original_shape = z_e.shape
+        # Extract parameters with gradients stopped (updated via VBEM, not gradient descent)
+        mu_n, _, _, _ = self.extract_params()
+        original_shape = x.shape
         
         if training:
             # Sample cluster assignments from categorical distribution during training
@@ -362,12 +400,12 @@ class GMMVBEM(nn.Module):
             selected_clusters_flat = selected_clusters.flatten()  # [N]
         
         # Get quantized representation (cluster mean of selected/sampled cluster)
-        z_q_flat = mu_n[selected_clusters_flat]  # [N, latent_dim]
-        z_q = z_q_flat.reshape(original_shape)  # [batch, ..., latent_dim]
+        x_q_flat = mu_n[selected_clusters_flat]  # [N, latent_dim]
+        x_q = x_q_flat.reshape(original_shape)  # [batch, ..., latent_dim]
         
-        return z_q, log_p_tilde
+        return x_q, log_p_tilde
     
-    def __call__(self, z_e: jnp.ndarray, training: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    def __call__(self, x: jnp.ndarray, training: bool = False) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """
         Initialize all @nn.compact methods by calling them.
         
@@ -375,20 +413,20 @@ class GMMVBEM(nn.Module):
         when the module is first set up. It delegates to quantize for the forward pass.
         
         Args:
-            z_e: Encoder output [batch, ..., latent_dim]
+            x: Input data [batch, ..., latent_dim]
             training: Whether in training mode
             
         Returns:
             Tuple of:
-            - z_q: Quantized representation (cluster mean of selected/sampled cluster) [batch, ..., latent_dim]
+            - x_q: Quantized representation (cluster mean of selected/sampled cluster) [batch, ..., latent_dim]
             - log_p_tilde: Unnormalized log probabilities [batch, ..., num_clusters]
         """
         # Delegate to quantize for the actual forward pass
         # When called via init(), this will initialize quantize and all methods it calls
-        return self.quantize(z_e, training=training)
+        return self.quantize(x, training=training)
 
     @nn.compact
-    def kl_prior(self, training: bool = True) -> jnp.ndarray:
+    def kl_prior(self, training: bool = False) -> jnp.ndarray:
         """
         Compute KL divergence between posterior and prior distributions.
         
@@ -399,11 +437,8 @@ class GMMVBEM(nn.Module):
         Returns:
             Total KL divergence (scalar)
         """
-        # Access parameters via self.* (bound by @nn.compact)
-        mu_n = self.mu_n  # [num_clusters, latent_dim]
-        alpha_n = self.alpha_n  # [num_clusters, 1]
-        beta_n = self.beta_n  # [num_clusters, latent_dim]
-        alpha_mix = self.alpha_mix  # [num_clusters]
+        # Extract parameters with gradients stopped (updated via VBEM, not gradient descent)
+        mu_n, alpha_n, beta_n, alpha_mix = self.extract_params()
         
         # Prior parameters
         prior_mu = self.prior_mu
@@ -447,22 +482,22 @@ class GMMVBEM(nn.Module):
         return kl_normal_gamma + kl_dirichlet
     
     @nn.compact
-    def loss(self, z_e: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+    def loss(self, x: jnp.ndarray, training: bool = False) -> jnp.ndarray:
         """
         Compute GMM loss including negative log-likelihood and KL divergence.
         
-        Loss = -E[log p(z_e)] + KL(q(θ) || p(θ))
+        Loss = -E[log p(x)] + KL(q(θ) || p(θ))
         where:
-        - E[log p(z_e)] is the expected log-likelihood (negative logZ)
+        - E[log p(x)] is the expected log-likelihood (negative logZ)
         - KL(q(θ) || p(θ)) is the KL divergence between posterior and prior
         
         Args:
-            z_e: Encoder outputs [batch, ..., latent_dim]
+            x: Input data [batch, ..., latent_dim]
             
         Returns:
             Total GMM loss (scalar)
         """
-        log_p_tilde = self.log_p_tilde(z_e, training=training)
+        log_p_tilde = self.log_p_tilde(x, training=training)
         logZ = logsumexp(log_p_tilde, axis=-1)
         logZ = jnp.sum(logZ)
         
@@ -471,38 +506,183 @@ class GMMVBEM(nn.Module):
         
         return -logZ + kl
 
+    @nn.compact
+    def sample(
+        self,
+        key: jr.PRNGKey,
+        batch_shape: Tuple[int, ...],
+        training: bool = False
+    ) -> jnp.ndarray:
+        """
+        Sample from GMM.
+        
+        Samples from the GMM by first sampling cluster assignments from the mixing weights,
+        then sampling from the selected clusters. If top_k is provided, only considers the
+        top-k clusters with highest mixing weights.
+        
+        Args:
+            key: Random key for sampling
+            batch_shape: Shape of batch dimensions (e.g., (batch_size,) or (batch_size, height, width))
+            top_k: Number of top clusters to consider (if None, uses all clusters)
+            training: Whether in training mode
+            
+        Returns:
+            Samples from GMM [*batch_shape, latent_dim]
+        """
+        # Compute total number of samples
+        N = int(jnp.prod(jnp.array(batch_shape)))
+        
+        # Get expected statistics for mixing weights and cluster parameters
+        expectations = self.nat_to_stats(training=training)
+        E_log_pi = expectations['E_log_pi']  # [num_clusters] - expected log mixing weights
+        E_mu = expectations['E_mu']  # [num_clusters, latent_dim]
+        E_gamma = expectations['E_gamma']  # [num_clusters, latent_dim] (precision)
+
+        
+        # Sample cluster assignments from categorical distribution
+        key, cluster_key = jr.split(key)
+        cluster_indices = jr.categorical(
+            cluster_key,
+            logits=E_log_pi,
+            axis=-1,
+            shape=(N,)
+        )  # [N] - indices into cluster_indices_all
+        
+        # Get means and variances for selected clusters
+        variance = 1.0 / (E_gamma + 1e-8)  # [num_clusters, latent_dim]
+        
+        # Select means and variances for the sampled clusters
+        selected_means = E_mu[cluster_indices]  # [N, latent_dim]
+        selected_vars = variance[cluster_indices]  # [N, latent_dim]
+        
+        # Sample from Gaussian distributions
+        key, noise_key = jr.split(key)
+        noise = jr.normal(noise_key, (N, self.latent_dim))
+        samples_flat = selected_means + noise * jnp.sqrt(selected_vars + 1e-8)
+        
+        # Reshape to batch_shape + latent_dim
+        samples = samples_flat.reshape(batch_shape + (self.latent_dim,))
+        
+        return samples
+    
+
+    @nn.compact
+    def sample_conditional(
+        self,
+        x: jnp.ndarray,
+        key: jr.PRNGKey,
+        top_k: Optional[int] = None,
+        training: bool = False
+    ) -> jnp.ndarray:
+        """
+        Conditionally sample from GMM given input samples.
+        
+        For each input x, computes assignment probabilities p(k|x) and generates
+        a new sample by averaging samples from each cluster weighted by p(k|x).
+        If top_k is provided, only considers the top-k clusters for each x.
+        
+        Args:
+            x: Input samples [batch, ..., latent_dim]
+            key: Random key for sampling
+            top_k: Number of top clusters to consider for each x (if None, uses all clusters)
+            training: Whether in training mode
+            
+        Returns:
+            Conditionally sampled points [batch, ..., latent_dim] with same shape as x
+        """
+        original_shape = x.shape
+        x_flat = x.reshape(-1, self.latent_dim)  # [N, latent_dim]
+        N = x_flat.shape[0]
+        
+        # Get assignment probabilities for each input
+        log_p_tilde = self.log_p_tilde(x_flat, training=training)  # [N, num_clusters]
+        
+        # Get expected statistics for cluster parameters
+        expectations = self.nat_to_stats(training=training)
+        E_mu = expectations['E_mu']  # [num_clusters, latent_dim]
+        E_gamma = expectations['E_gamma']  # [num_clusters, latent_dim] (precision)
+        E_var = 1.0 / (E_gamma + 1e-8)  # [num_clusters, latent_dim]
+        
+        # Handle top_k filtering and sampling
+        if top_k is None:
+            # Use all clusters
+            cluster_probs = stable_softmax(log_p_tilde, axis=-1)  # [N, num_clusters]
+            
+            # Sample from all clusters
+            key, noise_key = jr.split(key)
+            noise = jr.normal(noise_key, (self.num_clusters, self.latent_dim))  # [num_clusters, latent_dim]
+            all_cluster_samples = E_mu + noise * jnp.sqrt(E_var + 1e-8)  # [num_clusters, latent_dim]
+            
+            # Weighted sum: sum_k p(k|x) * sample_from_cluster_k
+            weighted_samples = jnp.sum(
+                cluster_probs[:, :, None] * all_cluster_samples[None, :, :],
+                axis=1
+            )  # [N, latent_dim]
+        else:
+            top_k_actual = min(top_k, self.num_clusters)
+            # Get top-k clusters for each sample
+            top_k_indices = jnp.argsort(log_p_tilde, axis=-1)[:, -top_k_actual:]  # [N, top_k]
+            # Extract log probabilities for top-k clusters
+            log_p_tilde_topk = jnp.take_along_axis(log_p_tilde, top_k_indices, axis=-1)  # [N, top_k]
+            # Normalize to get probabilities over top-k clusters
+            cluster_probs = stable_softmax(log_p_tilde_topk, axis=-1)  # [N, top_k]
+            
+            # Extract top-k means and variances for each input (more efficient than sampling all clusters)
+            top_k_means = E_mu[top_k_indices]  # [N, top_k, latent_dim]
+            top_k_vars = E_var[top_k_indices]  # [N, top_k, latent_dim]
+            
+            # Sample noise only for top-k clusters per input
+            key, noise_key = jr.split(key)
+            noise = jr.normal(noise_key, (N, top_k_actual, self.latent_dim))  # [N, top_k, latent_dim]
+            
+            # Compute samples for top-k clusters
+            cluster_samples = top_k_means + noise * jnp.sqrt(top_k_vars + 1e-8)  # [N, top_k, latent_dim]
+            
+            # Weighted sum: sum_k p(k|x) * sample_from_cluster_k
+            weighted_samples = jnp.sum(
+                cluster_probs[:, :, None] * cluster_samples,
+                axis=1
+            )  # [N, latent_dim]
+        
+        # Reshape back to original shape
+        samples = weighted_samples.reshape(original_shape)
+        
+        return samples
+    
     @partial(nn.jit, static_argnames=('N_eff', 'lr', 'training'))
     @nn.compact
     def update(
         self,
-        z_e: jnp.ndarray,
+        x: jnp.ndarray,
         N_eff: float = 2000.0,
         lr: float = 0.2,
-        training: bool = True
+        training: bool = False
     ) -> dict:
         # Access parameters via self.* (bound by @nn.compact)
+        # Note: In update method, we DO want gradients for the update computation itself,
+        # but we stop gradients when these params are used elsewhere (via nat_to_stats)
         mu_n = self.mu_n
         alpha_n = self.alpha_n
         beta_n = self.beta_n
         alpha_mix = self.alpha_mix
 
         # Compute log_p_tilde using current params
-        log_p_tilde = self.log_p_tilde(z_e, training=training)
+        log_p_tilde = self.log_p_tilde(x, training=training)
         
         cluster_probs = stable_softmax(log_p_tilde, axis=-1)  # [batch, ..., num_clusters]
-        z_e_flat = z_e.reshape(-1, self.latent_dim)  # [N, latent_dim]
+        x_flat = x.reshape(-1, self.latent_dim)  # [N, latent_dim]
 
         r_nk = cluster_probs.reshape(-1, self.num_clusters)  # [M, num_clusters]
                 
         N_k = jnp.sum(r_nk, axis=0)  # [num_clusters] - effective number of points in each cluster
-        N_scale = N_eff / z_e_flat.shape[0]  # weights the contribution from the minibatch to N_eff
+        N_scale = N_eff / x_flat.shape[0]  # weights the contribution from the minibatch to N_eff
 
         alpha_mix = (1 - lr) * alpha_mix + lr * (N_scale * N_k + self.prior_alpha_mix)    
 
         # Compute current kappa_mu_n before updates
         kappa_mu_n = 2.0 * alpha_n * mu_n  # [num_clusters, latent_dim] - broadcasting: (3,1) * (3,2) -> (3,2)
         kappa_mu_prior = 2.0 * self.prior_alpha * self.prior_mu  # [num_clusters, latent_dim] - JAX broadcasts
-        kappa_mu_like = jnp.sum(r_nk[:, :, None] * z_e_flat[:, None, :], axis=0)  # [num_clusters, latent_dim]
+        kappa_mu_like = jnp.sum(r_nk[:, :, None] * x_flat[:, None, :], axis=0)  # [num_clusters, latent_dim]
 
         # Compute likelihood terms flr alpha and alpha_mix
         alpha_n_like = N_scale * 0.5 * N_k[:, None]
@@ -511,7 +691,7 @@ class GMMVBEM(nn.Module):
         kappa_mu_n = (1 - lr) * kappa_mu_n + lr * (N_scale * kappa_mu_like + kappa_mu_prior)
         mu_n = kappa_mu_n / (2.0 * alpha_n)  # because alpha_n was already updated, add epsilon for stability
         
-        diff = z_e_flat[:, None, :] - mu_n[None, :, :]  # [N, num_clusters, latent_dim]
+        diff = x_flat[:, None, :] - mu_n[None, :, :]  # [N, num_clusters, latent_dim]
         weighted_diff_sq = jnp.sum(r_nk[:, :, None] * (diff ** 2), axis=0)  # [num_clusters, latent_dim]
 
         prior_diff_sq =  self.prior_alpha/(alpha_n_like + self.prior_alpha)  * ((mu_n - self.prior_mu) ** 2)   # [num_clusters, latent_dim] - JAX broadcasts
@@ -539,5 +719,81 @@ class GMMVBEM(nn.Module):
             'alpha_mix': alpha_mix
         }
         
-        return updated_params        
+        return updated_params
+
+
+########  FACTORY FUNCTION   ###########
+
+def create_gmm_vbem(
+    config: Union[GMMVBEMConfig, Dict[str, Any]],
+    **kwargs
+) -> GMMVBEM:
+    """
+    Factory function to create a GMMVBEM instance from a config.
+    
+    Args:
+        config: Either a GMMVBEMConfig instance or a dictionary with configuration values.
+                If a dict, it should contain at minimum:
+                - num_clusters: int
+                - latent_dim: int
+                And optionally:
+                - prior_mu: float (default: 0.0)
+                - prior_alpha: float (default: 1.0)
+                - prior_beta: float (default: 1.0)
+                - prior_alpha_mix: float (default: 0.5)
+                - beta_mix: float (default: 0.1)
+                - tie_precisions: bool (default: False)
+        **kwargs: Additional keyword arguments that override config values
+        
+    Returns:
+        GMMVBEM instance
+    """
+    # Handle config as dict or GMMVBEMConfig instance
+    if isinstance(config, dict):
+        # Extract values from dict with defaults
+        num_clusters = config.get("num_clusters")
+        latent_dim = config.get("latent_dim")
+        
+        if num_clusters is None or latent_dim is None:
+            raise ValueError("config must contain 'num_clusters' and 'latent_dim'")
+        
+        prior_mu = config.get("prior_mu", 0.0)
+        prior_alpha = config.get("prior_alpha", 1.0)
+        prior_beta = config.get("prior_beta", 1.0)
+        prior_alpha_mix = config.get("prior_alpha_mix", 0.5)
+        beta_mix = config.get("beta_mix", 0.1)
+        tie_precisions = config.get("tie_precisions", False)
+    elif isinstance(config, GMMVBEMConfig):
+        # Extract values from config object
+        num_clusters = config.num_clusters
+        latent_dim = config.latent_dim
+        prior_mu = config.prior_mu
+        prior_alpha = config.prior_alpha
+        prior_beta = config.prior_beta
+        prior_alpha_mix = config.prior_alpha_mix
+        beta_mix = config.beta_mix
+        tie_precisions = config.tie_precisions
+    else:
+        raise TypeError(f"config must be a dict or GMMVBEMConfig, got {type(config)}")
+    
+    # Override with kwargs if provided
+    num_clusters = kwargs.get("num_clusters", num_clusters)
+    latent_dim = kwargs.get("latent_dim", latent_dim)
+    prior_mu = kwargs.get("prior_mu", prior_mu)
+    prior_alpha = kwargs.get("prior_alpha", prior_alpha)
+    prior_beta = kwargs.get("prior_beta", prior_beta)
+    prior_alpha_mix = kwargs.get("prior_alpha_mix", prior_alpha_mix)
+    beta_mix = kwargs.get("beta_mix", beta_mix)
+    tie_precisions = kwargs.get("tie_precisions", tie_precisions)
+    
+    return GMMVBEM(
+        num_clusters=num_clusters,
+        latent_dim=latent_dim,
+        prior_mu=prior_mu,
+        prior_alpha=prior_alpha,
+        prior_beta=prior_beta,
+        prior_alpha_mix=prior_alpha_mix,
+        beta_mix=beta_mix,
+        tie_precisions=tie_precisions
+    )
 

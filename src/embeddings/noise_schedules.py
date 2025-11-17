@@ -926,9 +926,7 @@ def create_noise_schedule(
     """
     schedule_type = schedule_type.lower()
 
-    if schedule_type == 'constant':
-        return ConstantNoiseSchedule(**kwargs)
-    elif schedule_type == "linear":
+    if schedule_type == "linear":
         return LinearNoiseSchedule(**kwargs)
     elif schedule_type == "cosine":
         return CosineNoiseSchedule(**kwargs)

@@ -64,8 +64,8 @@ def plot_noise_schedules(
     
     if default_params is None:
         default_params = {
-            "alpha_bar_min": 0.05,
-            "alpha_bar_max": 0.95,
+            "alpha_bar_min": 0.01,
+            "alpha_bar_max": 0.99,
             "s": 0.008,
             "k": 10.0,
             "t_mid": 0.5,

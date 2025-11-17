@@ -46,7 +46,7 @@ class Config(Config):
         "vae_weight": 0.0,  # Weight for VAE loss (can override with --vae_weight)
         "reg_weight": 0.0,  # Weight for regularization loss (can override with --reg_weight)
         # Flow model settings
-        "normalize_snr_weight": True,  # Apply signal-to-noise ratio weighting to loss
+        "normalize_snr_weight": False,  # Apply signal-to-noise ratio weighting to loss
                                   # False for flow_matching, True for diffusion/ct
         "integration_method": "midpoint",  # ODE integration method: "euler" or "midpoint"
                                            # "euler" for flow_matching, "midpoint" for diffusion/ct
@@ -55,7 +55,7 @@ class Config(Config):
     
     noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
         # Noise schedule configuration (for diffusion and CT models)
-        "schedule_type": "exponential",  # Schedule type: "linear", "exponential", "cosine", etc.
+        "schedule_type": "linear",  # Schedule type: "linear", "exponential", "cosine", etc.
                                          # (can override with --noise_schedule)
         "learnable": False,  # Whether noise schedule parameters are learnable
                            # (can override with --noise_schedule_learnable)
@@ -63,14 +63,14 @@ class Config(Config):
         
         # Default parameters for different schedule types
         "default_params": FrozenDict({
-            "alpha_bar_min": 0.05,  # Minimum value for alpha_bar (not applied to Laplace shedule)
-            "alpha_bar_max": 0.95,  # Maximum value for alpha_bar (not applied to Laplace schedule)
+            "alpha_bar_min": 0.01,  # Minimum value for alpha_bar (not applied to Laplace shedule)
+            "alpha_bar_max": 0.99,  # Maximum value for alpha_bar (not applied to Laplace schedule)
             "beta": 0.3,  # Beta parameter for exponential schedule
             "loc": 0.5,  # Location parameter for Laplace schedule only
             "log_scale": 0.0,  # Scale parameter for Cauchy, Laplace schedules only
             "log_power": 0.0,  # Power parameter for polynomial schedules
             "gamma_range": (-4.0, 4.0),  # Range for gamma parameter for neural network
-            "gamma_prime_max": 100.0,  # Maximum value for clipping gamma_prime_t (not applied to neural network schedule)
+            "gamma_prime_max": 1000.0,  # Maximum value for clipping gamma_prime_t (not applied to neural network schedule)
         }),
     }))
 

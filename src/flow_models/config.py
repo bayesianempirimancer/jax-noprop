@@ -28,6 +28,7 @@ class Config(BaseConfig):
         "recon_weight": 0.0,  # Weight for reconstruction loss in total loss
         "reg_weight": 0.0,  # Weight for regularization loss in total loss
         "vae_weight": 1.0,  # Weight for VAE loss in total loss
+        "use_snr_weight": True,
         "normalize_snr_weight": False,  # Normalize SNR weights by their mean (False for flow_matching, True for diffusion/ct)
         "integration_method": "midpoint",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
                                         # "euler" for flow_matching, "midpoint" for diffusion/ct

@@ -177,10 +177,20 @@ class VAE_flow(nn.Module):
         predicted_noise = self.pred_noise(z, x, t, training=training)
         t = jnp.expand_dims(jnp.asarray(t), axis=tuple(range(-self.z_ndims, 0)))
         alpha, gamma_prime = self.get_noise_params(t)
-        return self.lazy_flow(z, predicted_noise, alpha, gamma_prime)
+        # z_target = (z - predicted_noise*jnp.sqrt(1.0 - alpha))/jnp.sqrt(alpha)
+        # return self.lazy_flow_from_target(z, z_target, alpha, gamma_prime)
+        return self.lazy_flow_from_noise(z, predicted_noise, alpha, gamma_prime)
 
-    def lazy_flow(self, z_t, predicted_noise, alpha_t, gamma_prime_t):
+    def lazy_flow_from_noise(self, z_t, predicted_noise, alpha_t, gamma_prime_t):
         return gamma_prime_t * (0.5*(1-alpha_t)*z_t - jnp.sqrt(1-alpha_t)*predicted_noise)
+
+    # def lazy_flow_from_noise(self, z_t, predicted_noise, alpha_t, gamma_prime_t):
+    #     return 0.5 * gamma_prime_t * (1.0 - alpha_t) * (z_t - predicted_noise/jnp.sqrt(alpha_t))
+    # def lazy_flow_from_target(self, z_t, z_target, alpha_t, gamma_prime_t):
+    #     return 0.5 * gamma_prime_t * (jnp.sqrt(alpha_t)*z_target - alpha_t*z_t)
+
+    # def lazy_flow(self, z_t, z_target, alpha_t, gamma_prime_t):
+    #     return self.lazy_flow_from_target(z_t, z_target, alpha_t, gamma_prime_t)
 
     # KL divergence with SNR weighting: SNR_noise_weight = gamma_prime
     # Note:  0.5 is dropped and the proof is here: https://arxiv.org/html/2312.10393v1
@@ -266,7 +276,7 @@ class VAE_flow(nn.Module):
         # Compute Predicted Noise and Target Estimate and FLow Estimate
         predicted_noise = self.apply(params, z_t, x, t, method='pred_noise', training=training, rngs={'dropout': key})
         z_target_est = (z_t - predicted_noise * sqrt_1_minus_alpha_t)/(sqrt_alpha_t)
-        dz_dt = self.lazy_flow(z_t, predicted_noise, alpha_t, gamma_prime_t)
+        dz_dt = self.lazy_flow_from_noise(z_t, predicted_noise, alpha_t, gamma_prime_t)
 
         # Compute Predictions
         y_pred = self.apply(params, z_target_est, method='decode', training=training, rngs={'dropout': key})
