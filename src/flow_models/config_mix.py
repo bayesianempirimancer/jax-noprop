@@ -21,34 +21,35 @@ class Config(BaseConfig):
     model_name: str = "vae_flow_network"
 
     main: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "mix_shape": "NA",  # Must be set by user
         "input_shape": "NA",  # Will be set based on z_dim
         "output_shape": "NA",  # Will be set based on z_dim or z_dim**2
         "latent_shape": "NA",  # Will be set based on x_dim
         "recon_loss_type": "mse",  # Options: "cross_entropy", "mse", "none". Should be consistent with decoder type
         "recon_weight": 0.0,  # Weight for reconstruction loss in total loss
         "reg_weight": 0.0,  # Weight for regularization loss in total loss
-        "vae_weight": 1.0,  # Weight for VAE loss in total loss
+        "vae_weight": 0.0,  # Weight for VAE loss in total loss
         "normalize_snr_weight": True,  # Normalize SNR weights by their mean (False for flow_matching, True for diffusion/ct)
         "integration_method": "midpoint",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
                                         # "euler" for flow_matching, "midpoint" for diffusion/ct
         "encode_x": False,  # Whether to encode x before passing to CRN (True for sequences, False for backward compatibility)
     }))
     
-    noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "schedule_type": "linear",  # Type of schedule (linear, exponential, cosine, sigmoid, cauchy, laplace, logistic, quadratic, polynomial, monotonic_nn, learnable, network)
-        "learnable": True,  # Whether schedule parameters are learnable (False uses stop_gradient)
-        "hidden_dims": (64, 64),  # Hidden dimensions for NoiseScheduleNetwork schedule
-        # Comprehensive default parameters for all schedules (common naming convention)
-        "default_params": FrozenDict({
-            "alpha_bar_min": 0.05,  # Minimum value for alpha_bar (not applied to Laplace shedule)
-            "alpha_bar_max": 0.95,  # Maximum value for alpha_bar (not applied to Laplace schedule)
-            "beta": 0.3,  # Beta parameter for exponential schedule
-            "loc": 0.5,  # Location parameter for Laplace schedule only
-            "log_scale": 0.0,  # Scale parameter for Cauchy, Laplace schedules only
-            "log_power": 0.0,  # Power parameter for polynomial schedules
-            "gamma_range": (-4.0, 4.0),  # Range for gamma parameter for neural network
-            "gamma_prime_max": 100.0,  # Maximum value for clipping gamma_prime_t (not applied to neural network schedule)
+    flow_planner: FrozenDict = field(default_factory=lambda: FrozenDict({
+        "top_k": 3,  # Number of top clusters to sample from for each data point
+        "sample_method": "mixture",  # Sampling method: "mixture" (GMM) or "normal"
+        "sinkhorn_refinement": True,  # Whether to use sinkhorn refinement
+        "alpha_min": 0.05,  # Minimum alpha for flow schedule
+        "alpha_max": 0.95,  # Maximum alpha for flow schedule
+        "sigma_min": 0.05,  # Minimum sigma for flow schedule
+        "sigma_max": 0.95,  # Maximum sigma for flow schedule
+        "gmm": FrozenDict({
+            "num_clusters": 8,  # Number of GMM clusters
+            "shared_variances": False,  # Whether to tie precisions across clusters
+            "prior_mu": 0.0,  # Prior mean for GMM
+            "prior_alpha": 1.0,  # Prior alpha for GMM precision
+            "prior_beta": 1.0,  # Prior beta for GMM precision
+            "prior_alpha_mix": 0.5,  # Prior alpha for mixing weights
+            "beta_mix": 1.0,  # Beta inverse temperature parameter for mixing weights
         }),
     }))
 
@@ -200,11 +201,24 @@ class Config(BaseConfig):
             'latent_shape': latent_shape,  # Must match main config
         })
         
-        # Build updates for noise schedule config
-        noise_schedule_updates = BaseConfig.filter_none({
-            'schedule_type': args.noise_schedule,
-            'learnable': args.noise_schedule_learnable,
+        # Build updates for flow planner config
+        flow_planner_updates = BaseConfig.filter_none({
+            'top_k': getattr(args, 'top_k', None),
+            'sample_method': getattr(args, 'sample_method', None),
+            'sinkhorn_refinement': getattr(args, 'sinkhorn_refinement', None),
         })
+        # Build nested GMM updates if any GMM args provided
+        gmm_updates = BaseConfig.filter_none({
+            'num_clusters': getattr(args, 'num_clusters', None),
+            'shared_variances': getattr(args, 'shared_variances', None),
+            'prior_mu': getattr(args, 'prior_mu', None),
+            'prior_alpha': getattr(args, 'prior_alpha', None),
+            'prior_beta': getattr(args, 'prior_beta', None),
+            'prior_alpha_mix': getattr(args, 'prior_alpha_mix', None),
+            'beta_mix': getattr(args, 'beta_mix', None),
+        })
+        if gmm_updates:
+            flow_planner_updates['gmm'] = gmm_updates
         
         # Apply updates using merge_frozen_dict and replace
         updated_config = self
@@ -220,9 +234,9 @@ class Config(BaseConfig):
         if decoder_updates:
             updated_decoder = updated_config.merge_frozen_dict('decoder', decoder_updates)
             updated_config = replace(updated_config, decoder=updated_decoder)
-        if noise_schedule_updates:
-            updated_noise_schedule = updated_config.merge_frozen_dict('noise_schedule', noise_schedule_updates)
-            updated_config = replace(updated_config, noise_schedule=updated_noise_schedule)
+        if flow_planner_updates:
+            updated_flow_planner = updated_config.merge_frozen_dict('flow_planner', flow_planner_updates)
+            updated_config = replace(updated_config, flow_planner=updated_flow_planner)
         
         return updated_config
     
@@ -300,11 +314,24 @@ class Config(BaseConfig):
             'latent_shape': latent_shape if decoder_dict.get('latent_shape') == "NA" or decoder_dict.get('latent_shape') is None else None,
         })
         
-        # Build updates for noise schedule config
-        noise_schedule_updates = BaseConfig.filter_none({
-            'schedule_type': args.noise_schedule,
-            'learnable': args.noise_schedule_learnable,
+        # Build updates for flow planner config
+        flow_planner_updates = BaseConfig.filter_none({
+            'top_k': getattr(args, 'top_k', None),
+            'sample_method': getattr(args, 'sample_method', None),
+            'sinkhorn_refinement': getattr(args, 'sinkhorn_refinement', None),
         })
+        # Build nested GMM updates if any GMM args provided
+        gmm_updates = BaseConfig.filter_none({
+            'num_clusters': getattr(args, 'num_clusters', None),
+            'shared_variances': getattr(args, 'shared_variances', None),
+            'prior_mu': getattr(args, 'prior_mu', None),
+            'prior_alpha': getattr(args, 'prior_alpha', None),
+            'prior_beta': getattr(args, 'prior_beta', None),
+            'prior_alpha_mix': getattr(args, 'prior_alpha_mix', None),
+            'beta_mix': getattr(args, 'beta_mix', None),
+        })
+        if gmm_updates:
+            flow_planner_updates['gmm'] = gmm_updates
         
         # Apply updates using merge_frozen_dict and replace
         updated_config = self
@@ -320,9 +347,9 @@ class Config(BaseConfig):
         if decoder_updates:
             updated_decoder = updated_config.merge_frozen_dict('decoder', decoder_updates)
             updated_config = replace(updated_config, decoder=updated_decoder)
-        if noise_schedule_updates:
-            updated_noise_schedule = updated_config.merge_frozen_dict('noise_schedule', noise_schedule_updates)
-            updated_config = replace(updated_config, noise_schedule=updated_noise_schedule)
+        if flow_planner_updates:
+            updated_flow_planner = updated_config.merge_frozen_dict('flow_planner', flow_planner_updates)
+            updated_config = replace(updated_config, flow_planner=updated_flow_planner)
         
         return updated_config
 

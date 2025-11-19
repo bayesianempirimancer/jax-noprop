@@ -229,7 +229,7 @@ class VAE_flow(nn.Module):
         recon_weight = float(self.config.main.get("recon_weight", 0.0))
         reg_weight = float(self.config.main.get("reg_weight", 0.0))
         vae_weight = float(self.config.main.get("vae_weight", 1.0))
-        use_noise_shedule = not bool(self.config.main.get('no_noise_schedule', False))
+        use_snr_weight = not bool(self.config.main.get('use_snr_weight', False))
         
         # Split keys for random sampling operations (not dropout)
         key, t_key, z_0_key, z_t_noise_key, z_target_key, vae_noise_key = jr.split(key, 6)
@@ -267,14 +267,14 @@ class VAE_flow(nn.Module):
             y_vae = self.apply(params, z_target_vae, method='decode', training=training, rngs={'dropout': key})
 
         # Compute Losses
-        if use_noise_shedule:
+        if use_snr_weight:
             snr_weight = self.lazy_flow_snr(t, 1.0/(t*(1.0-t)))
-        else:
-            snr_weight = 1.0
-            # Normalize SNR weights by their mean if normalize_snr_weight is True
             if normalize_snr_weight:
                 snr_weight_mean = jnp.mean(snr_weight)
                 snr_weight = snr_weight / (snr_weight_mean + 1e-8)
+        else:
+            snr_weight = 1.0
+            # Normalize SNR weights by their mean if normalize_snr_weight is True
 
         squared_error = jnp.mean((dz_dt - diff_z)**2, axis=tuple(range(-self.z_ndims, 0)))
         flow_loss = jnp.mean(snr_weight * squared_error)

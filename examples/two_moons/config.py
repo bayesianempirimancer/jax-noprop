@@ -19,7 +19,7 @@ Note: Command line arguments take precedence over config file values.
 
 from dataclasses import dataclass, field
 from flax.core import FrozenDict
-from src.flow_models.config import Config 
+from src.flow_models.config_mix import Config 
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,7 @@ class Config(Config):
         "vae_weight": 0.0,  # Weight for VAE loss (can override with --vae_weight)
         "reg_weight": 0.0,  # Weight for regularization loss (can override with --reg_weight)
         # Flow model settings
+        "no_noise_schedule": True,  # Set to True to disable noise schedule (use_noise_schedule=False)
         "normalize_snr_weight": False,  # Apply signal-to-noise ratio weighting to loss
                                   # False for flow_matching, True for diffusion/ct
         "integration_method": "midpoint",  # ODE integration method: "euler" or "midpoint"

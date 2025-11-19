@@ -12,7 +12,7 @@ from jax import lax
 import flax.linen as nn
 from flax.core import FrozenDict
 from dataclasses import dataclass, field, MISSING
-from typing import Tuple, Union, Optional, Dict, Any
+from typing import Tuple, Union, Optional, Dict, Any, Callable
 
 from src.utils.math_utils import logsumexp, stable_softmax
 from src.utils.kl_divergence import gamma_kl, dirichlet_kl, normal_gamma_kl
@@ -530,7 +530,21 @@ class GMMVBEM(nn.Module):
             Samples from GMM [*batch_shape, latent_dim]
         """
         # Compute total number of samples
-        N = int(jnp.prod(jnp.array(batch_shape)))
+        # Handle both traced and concrete batch_shape
+        # For traced batch_shape (tuple of traced values), we need to use jnp.prod directly
+        # on the tuple elements without converting to array first
+        if isinstance(batch_shape, tuple) and len(batch_shape) == 1:
+            # Single element tuple - use directly
+            N = batch_shape[0]
+        elif isinstance(batch_shape, tuple):
+            # Multiple elements - compute product element by element
+            N = batch_shape[0]
+            for s in batch_shape[1:]:
+                N = N * s
+        else:
+            # Already an array or single value
+            batch_shape_array = jnp.asarray(batch_shape)
+            N = jnp.prod(batch_shape_array)
         
         # Get expected statistics for mixing weights and cluster parameters
         expectations = self.nat_to_stats(training=training)
@@ -541,6 +555,7 @@ class GMMVBEM(nn.Module):
         
         # Sample cluster assignments from categorical distribution
         key, cluster_key = jr.split(key)
+        # jr.categorical accepts traced shapes, so we can use N directly
         cluster_indices = jr.categorical(
             cluster_key,
             logits=E_log_pi,
@@ -574,12 +589,25 @@ class GMMVBEM(nn.Module):
         top_k: Optional[int] = None,
         training: bool = False
     ) -> jnp.ndarray:
+
+        samples, loss = self.sample_conditional_and_loss(x, key, top_k, training)
+
+        return samples
+    
+    @nn.compact
+    def sample_conditional_and_loss(
+        self,
+        x: jnp.ndarray,
+        key: jr.PRNGKey,
+        top_k: Optional[int] = None,
+        training: bool = False
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """
-        Conditionally sample from GMM given input samples.
+        Conditionally sample from GMM given input samples and return loss.
         
         For each input x, computes assignment probabilities p(k|x) and generates
         a new sample by averaging samples from each cluster weighted by p(k|x).
-        If top_k is provided, only considers the top-k clusters for each x.
+        Also returns the loss = -logZ + KL_prior, where logZ = logsumexp(log_p_tilde).
         
         Args:
             x: Input samples [batch, ..., latent_dim]
@@ -588,7 +616,9 @@ class GMMVBEM(nn.Module):
             training: Whether in training mode
             
         Returns:
-            Conditionally sampled points [batch, ..., latent_dim] with same shape as x
+            Tuple of:
+            - samples: Conditionally sampled points [batch, ..., latent_dim] with same shape as x
+            - loss: Loss value (negative log partition function + KL prior) [scalar]
         """
         original_shape = x.shape
         x_flat = x.reshape(-1, self.latent_dim)  # [N, latent_dim]
@@ -596,6 +626,11 @@ class GMMVBEM(nn.Module):
         
         # Get assignment probabilities for each input
         log_p_tilde = self.log_p_tilde(x_flat, training=training)  # [N, num_clusters]
+        
+        # Compute log partition function: logZ = logsumexp(log_p_tilde, axis=-1)
+        logZ_flat = logsumexp(log_p_tilde, axis=-1, keepdims=True)
+        log_p_tilde = log_p_tilde - logZ_flat 
+        logZ_flat = logZ_flat.squeeze(-1) # [N]
         
         # Get expected statistics for cluster parameters
         expectations = self.nat_to_stats(training=training)
@@ -647,7 +682,10 @@ class GMMVBEM(nn.Module):
         # Reshape back to original shape
         samples = weighted_samples.reshape(original_shape)
         
-        return samples
+        # Reshape logZ to match original shape (without last dimension)
+        logZ = logZ_flat.reshape(original_shape[:-1])  # [batch, ...] (removes latent_dim)
+        
+        return samples, -jnp.sum(logZ) + self.kl_prior(training=training)
     
     @partial(nn.jit, static_argnames=('N_eff', 'lr', 'training'))
     @nn.compact
@@ -720,6 +758,131 @@ class GMMVBEM(nn.Module):
         }
         
         return updated_params
+    
+    @classmethod
+    def fit(
+        cls,
+        config: 'GMMVBEMConfig',
+        params: dict,
+        x_data: jnp.ndarray,
+        apply_fn: Optional[Callable] = None,
+        initialize: bool = False,
+        num_epochs: int = 10,
+        batch_size: int = 256,
+        N_eff: Optional[float] = None,
+        lr: float = 0.2,
+        seed: int = 42
+    ) -> dict:
+        """
+        Fit GMM to data using VBEM updates over multiple epochs.
+        
+        This is a classmethod that can be called without an instance. It uses
+        either a provided apply function (e.g., from a parent module) or creates
+        a temporary GMM instance internally for apply calls.
+        
+        Args:
+            config: GMM configuration
+            params: Model parameters dictionary (from model.init())
+            x_data: Training data [N, latent_dim] or [batch, ..., latent_dim]
+            apply_fn: Optional apply function from a parent module (e.g., planner.apply).
+                     If None, will attempt to create a GMM instance (requires Flax scope).
+            initialize: If True, initialize cluster means from data before fitting
+            num_epochs: Number of training epochs
+            batch_size: Batch size for VBEM updates
+            N_eff: Effective number of data points (if None, uses x_data.shape[0])
+            lr: Learning rate for VBEM updates (mixing parameter between 0 and 1)
+            seed: Random seed for shuffling data and initialization
+            
+        Returns:
+            Updated params dictionary with fitted GMM parameters
+        """
+        from flax.core import unfreeze, freeze
+        
+        # Flatten data to [N, latent_dim]
+        x_flat = x_data.reshape(-1, config.latent_dim)
+        N = x_flat.shape[0]
+        
+        if N_eff is None:
+            N_eff = float(N)
+        
+        # Unfreeze params to allow updates
+        params_unfrozen = unfreeze(params)
+        gmm_params = params_unfrozen.get('params', {}).get('gmm', {})
+        
+        # Initialize cluster means from data if requested
+        if initialize:
+            if 'mu_n' not in gmm_params:
+                raise ValueError("GMM params not initialized. Please call model.init() first.")
+            
+            # Initialize cluster means from data
+            init_key = jr.PRNGKey(seed)
+            mu_n = cls.get_initial_cluster_means(
+                num_clusters=config.num_clusters,
+                latent_dim=config.latent_dim,
+                x=x_flat,
+                key=init_key
+            )
+            gmm_params['mu_n'] = mu_n
+            params_unfrozen['params']['gmm'] = gmm_params
+        
+        # Create batches
+        num_batches = (N + batch_size - 1) // batch_size
+        
+        # Fit GMM for multiple epochs
+        for epoch in range(num_epochs):
+            # Shuffle data
+            key = jr.PRNGKey(seed + epoch)
+            indices = jr.permutation(key, N)
+            x_shuffled = x_flat[indices]
+            
+            # Process in batches
+            for batch_idx in range(num_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, N)
+                x_batch = x_shuffled[start_idx:end_idx]
+                
+                # Create frozen params for apply call
+                gmm_params_frozen = freeze({'params': gmm_params})
+                
+                # Update GMM parameters using VBEM
+                # Use provided apply_fn if available, otherwise create GMM instance
+                if apply_fn is not None:
+                    # Use the provided apply function (e.g., from planner)
+                    updated_params_dict = apply_fn(
+                        freeze(params_unfrozen),
+                        x_batch,
+                        N_eff=N_eff,
+                        lr=lr,
+                        training=True,
+                        method=lambda mdl, x, **kwargs: mdl.gmm.update(x, **kwargs)
+                    )
+                else:
+                    # Create GMM instance for apply calls (requires Flax scope)
+                    gmm = create_gmm_vbem(config)
+                    updated_params_dict = gmm.apply(
+                        gmm_params_frozen,
+                        x_batch,
+                        N_eff=N_eff,
+                        lr=lr,
+                        training=True,
+                        method='update'
+                    )
+                
+                # Update gmm_params with the returned values
+                gmm_params = {
+                    'mu_n': updated_params_dict['mu_n'],
+                    'alpha_n': updated_params_dict['alpha_n'],
+                    'beta_n': updated_params_dict['beta_n'],
+                    'alpha_mix': updated_params_dict['alpha_mix']
+                }
+                
+                # Update the nested structure
+                params_unfrozen['params']['gmm'] = gmm_params
+        
+        # Freeze and return
+        return freeze(params_unfrozen)
+
+
 
 
 ########  FACTORY FUNCTION   ###########
