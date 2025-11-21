@@ -426,7 +426,7 @@ def main():
         x_0,
         x_target,
         refine_key,
-        method='sinkhorn_refinement',
+        method='apply_sinkhorn_refinement',
         training=False,
         epsilon=0.1,
         num_iterations=100
@@ -487,7 +487,7 @@ def main():
         x_0_gaussian,
         x_target,
         refine_key,
-        method='sinkhorn_refinement',
+        method='apply_sinkhorn_refinement',
         training=False,
         epsilon=0.1,
         num_iterations=100
