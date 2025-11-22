@@ -47,11 +47,12 @@ def match_random(z_0: jnp.ndarray, z_target: jnp.ndarray, key: jax.random.PRNGKe
 
 
 def match_sliced(z_0: jnp.ndarray, z_target: jnp.ndarray, key: jax.random.PRNGKey, num_slices: int = 10) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Sliced OT via sorting along random projections."""
+    """Sliced OT via sorting along random projections (Best of N)."""
     n_points, dim = z_0.shape
     
-    # Initialize permutation as identity
-    perm = jnp.arange(n_points)
+    best_cost = jnp.inf
+    best_z0_matched = z_0
+    best_indices = jnp.arange(n_points)
     
     for i in range(num_slices):
         key, subkey = jr.split(key)
@@ -63,22 +64,30 @@ def match_sliced(z_0: jnp.ndarray, z_target: jnp.ndarray, key: jax.random.PRNGKe
         proj_z0 = z_0 @ direction
         proj_zt = z_target @ direction
         
-        # Sort and match
+        # Sort indices
         sort_z0 = jnp.argsort(proj_z0)
         sort_zt = jnp.argsort(proj_zt)
         
-        # Create new permutation
-        inv_sort_zt = jnp.argsort(sort_zt)
-        perm = perm[sort_z0][inv_sort_zt]
+        # Proposed matching: z_0[sort_z0] <-> z_target[sort_zt]
+        curr_z0_matched = z_0[sort_z0]
+        curr_target_matched = z_target[sort_zt]
+        
+        # Compute cost using Euclidean distance
+        # Note: we use entire set to evaluate quality of this slice direction
+        # A direction is good if the points sorted by it are actually close in 2D
+        dists = jnp.sum((curr_z0_matched - curr_target_matched)**2, axis=1)
+        total_cost = jnp.sum(dists)
+        best_z0_matched = jnp.where(total_cost < best_cost, curr_z0_matched, best_z0_matched)
+        best_indices = jnp.where(total_cost < best_cost, sort_zt, best_indices)
+        best_cost = jnp.where(total_cost < best_cost, total_cost, best_cost)
     
-    z_0_matched = z_0[perm]
-    return z_0_matched, perm
+    return best_z0_matched, best_indices
 
 
 def match_minibatch(z_0: jnp.ndarray, z_target: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Minibatch OT using Hungarian algorithm (scipy)."""
     # Compute cost matrix (pairwise squared distances)
-    cost_matrix = jnp.sum((np.array(z_0)[:, None] - np.array(z_target)[None, :])**2, axis=-1)
+    cost_matrix = jnp.sum((z_0[:, None] - z_target[None, :])**2, axis=-1)
     
     # Solve linear assignment problem
     row_ind, col_ind = optax.assignment.hungarian_algorithm(cost_matrix)
@@ -92,14 +101,9 @@ def match_ott_linear(z_0: jnp.ndarray, z_target: jnp.ndarray) -> Tuple[jnp.ndarr
     if not OTT_AVAILABLE:
         raise ImportError("ott-jax not available")
     
-    # Create uniform weights
-    n = z_0.shape[0]
-    a = jnp.ones(n) / n
-    b = jnp.ones(n) / n
-    
     # Create geometry and solve with Sinkhorn
     geom = pointcloud.PointCloud(z_0, z_target)
-    out = linear.solve(geom, a, b)
+    out = linear.solve(geom)
     
     # Extract transport matrix and find hard assignment
     transport_matrix = out.matrix
@@ -111,41 +115,14 @@ def match_ott_linear(z_0: jnp.ndarray, z_target: jnp.ndarray) -> Tuple[jnp.ndarr
     return z_0_matched, indices
 
 
-def match_ott_sinkhorn(z_0: jnp.ndarray, z_target: jnp.ndarray, epsilon: float = 0.01) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """OTT-JAX Sinkhorn solver (regularized OT)."""
-    if not OTT_AVAILABLE:
-        raise ImportError("ott-jax not available")
-    
-    # Create uniform weights
-    n = z_0.shape[0]
-    a = jnp.ones(n) / n
-    b = jnp.ones(n) / n
-    
-    # Create geometry with entropic regularization
-    geom = pointcloud.PointCloud(z_0, z_target, epsilon=epsilon)
-    out = linear.solve(geom, a, b)
-    
-    # Extract transport matrix and find hard assignment
-    transport_matrix = out.matrix
-    indices = jnp.argmax(transport_matrix, axis=1)
-    z_0_matched = z_0
-    
-    return z_0_matched, indices
-
-
-def benchmark_function(func, *args, num_runs: int = 100, warmup: int = 10, **kwargs) -> Dict[str, float]:
+def benchmark_function(func, *args, num_runs: int = 100, **kwargs) -> Dict[str, float]:
     """Benchmark a function with proper JAX warmup."""
-    # Warmup runs for JIT compilation
-    for _ in range(warmup):
-        result = func(*args, **kwargs)
-        if isinstance(result, tuple) and any(isinstance(r, jnp.ndarray) for r in result):
-            jax.block_until_ready(result[0])
     
     # Actual timing runs
     times = []
+    jitted_func = jax.jit(func)
+    jitted_func(*args, **kwargs)
     for _ in range(num_runs):
-        jitted_func = jax.jit(func)
-        jitted_func(*args, **kwargs)
         start = time.perf_counter()
         result = jitted_func(*args, **kwargs)
         if isinstance(result, tuple) and any(isinstance(r, jnp.ndarray) for r in result):
@@ -225,7 +202,6 @@ def main():
     parser.add_argument('--noise', type=float, default=0.1, help='Noise level for two moons')
     parser.add_argument('--scale', type=float, default=8.0, help='Scale factor for two moons')
     parser.add_argument('--num_runs', type=int, default=100, help='Number of timing runs')
-    parser.add_argument('--warmup', type=int, default=10, help='Number of warmup runs')
     parser.add_argument('--max_lines', type=int, default=200, help='Maximum matching lines to draw')
     parser.add_argument('--output_dir', type=str, default='artifacts/ot_matching', help='Output directory')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
@@ -244,7 +220,7 @@ def main():
     print(f"  Number of points: {args.n_points}")
     print(f"  Two moons noise: {args.noise}")
     print(f"  Two moons scale: {args.scale}")
-    print(f"  Timing runs: {args.num_runs} (warmup: {args.warmup})")
+    print(f"  Timing runs: {args.num_runs}")
     print(f"  Random seed: {args.seed}")
     print(f"  OTT-JAX available: {OTT_AVAILABLE}")
     print("=" * 70)
@@ -270,7 +246,6 @@ def main():
     if OTT_AVAILABLE:
         methods.extend([
             ('OTT Linear (exact)', lambda: match_ott_linear(z_0, z_target)),
-            ('OTT Sinkhorn', lambda: match_ott_sinkhorn(z_0, z_target, epsilon=args.epsilon)),
         ])
     
     # Run benchmarks and collect results
@@ -282,7 +257,7 @@ def main():
         print(f"Testing {method_name}...", end=' ', flush=True)
         
         # Benchmark timing
-        timing_stats = benchmark_function(method_func, num_runs=args.num_runs, warmup=args.warmup)
+        timing_stats = benchmark_function(method_func, num_runs=args.num_runs)
         
         # Get matching results
         z_0_matched, indices = method_func()
