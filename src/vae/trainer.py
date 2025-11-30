@@ -457,58 +457,6 @@ class VAETrainer:
     
     def _create_training_progress_plot(self, results: Dict[str, Any], output_dir: str):
         """Create training progress plot."""
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('VAE Training Progress', fontsize=16, fontweight='bold')
-        
-        epochs = range(len(results['train_losses']))
-        
-        # Panel 1: Total loss
-        axes[0, 0].plot(epochs, results['train_losses'], label='Train', color='blue', linewidth=2)
-        if 'val_losses' in results and len(results['val_losses']) > 0:
-            val_epochs = range(len(results['val_losses']))
-            axes[0, 0].plot(val_epochs, results['val_losses'], label='Validation', color='red', linewidth=2)
-        axes[0, 0].set_title('Total Loss', fontsize=14, fontweight='bold')
-        axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_ylabel('Loss')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True, alpha=0.3)
-        
-        # Panel 2: Reconstruction loss
-        if 'train_recon_losses' in results and len(results['train_recon_losses']) > 0:
-            axes[0, 1].plot(epochs, results['train_recon_losses'], label='Train', color='blue', linewidth=2)
-            if 'val_recon_losses' in results and len(results['val_recon_losses']) > 0:
-                val_epochs = range(len(results['val_recon_losses']))
-                axes[0, 1].plot(val_epochs, results['val_recon_losses'], label='Validation', color='red', linewidth=2)
-        axes[0, 1].set_title('Reconstruction Loss', fontsize=14, fontweight='bold')
-        axes[0, 1].set_xlabel('Epoch')
-        axes[0, 1].set_ylabel('Loss')
-        axes[0, 1].legend()
-        axes[0, 1].grid(True, alpha=0.3)
-        
-        # Panel 3: KL loss
-        if 'train_kl_losses' in results and len(results['train_kl_losses']) > 0:
-            axes[1, 0].plot(epochs, results['train_kl_losses'], label='Train', color='blue', linewidth=2)
-            if 'val_kl_losses' in results and len(results['val_kl_losses']) > 0:
-                val_epochs = range(len(results['val_kl_losses']))
-                axes[1, 0].plot(val_epochs, results['val_kl_losses'], label='Validation', color='red', linewidth=2)
-        axes[1, 0].set_title('KL Divergence Loss', fontsize=14, fontweight='bold')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('Loss')
-        axes[1, 0].legend()
-        axes[1, 0].grid(True, alpha=0.3)
-        
-        # Panel 4: Loss components comparison
-        axes[1, 1].plot(epochs, results['train_recon_losses'], label='Recon', color='blue', linewidth=2)
-        axes[1, 1].plot(epochs, results['train_kl_losses'], label='KL', color='green', linewidth=2)
-        axes[1, 1].set_title('Loss Components', fontsize=14, fontweight='bold')
-        axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('Loss')
-        axes[1, 1].legend()
-        axes[1, 1].grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plot_file = Path(output_dir) / "training_progress.png"
-        plt.savefig(plot_file, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"Training progress plot saved to {plot_file}")
+        from src.utils.plotting.plot_vae_loss_trends import create_vae_loss_trends_plot
+        create_vae_loss_trends_plot(results, output_dir)
 

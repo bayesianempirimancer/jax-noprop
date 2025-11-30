@@ -18,10 +18,9 @@ if TYPE_CHECKING:
 class Config(BaseConfig):
     """Unified configuration for VAE with flow models (FM, DF, CT)."""
     # BaseConfig fields
-    model_name: str = "flow_net"
+    model_name: str = "vae_flow_network"
 
     main: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "loss_type": "flow_loss",  # Options: "flow", "target", "noise"
         "input_shape": "NA",  # Will be set based on z_dim
         "output_shape": "NA",  # Will be set based on z_dim or z_dim**2
         "latent_shape": "NA",  # Will be set based on x_dim
@@ -29,29 +28,28 @@ class Config(BaseConfig):
         "recon_weight": 0.0,  # Weight for reconstruction loss in total loss
         "reg_weight": 0.0,  # Weight for regularization loss in total loss
         "vae_weight": 1.0,  # Weight for VAE loss in total loss
-        "use_snr_weight": False,
-        "use_recon_snr_weight": False,
+        "use_snr_weight": True,
         "normalize_snr_weight": False,  # Normalize SNR weights by their mean (False for flow_matching, True for diffusion/ct)
         "integration_method": "midpoint",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
                                         # "euler" for flow_matching, "midpoint" for diffusion/ct
-        "num_steps": 20,  # Number of integration steps for generation
         "encode_x": False,  # Whether to encode x before passing to CRN (True for sequences, False for backward compatibility)
     }))
     
-    flow_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "schedule_type": "linear",  # Type of schedule: "linear", "cosine", "sigmoid", "exponential", "cauchy", "laplace", "polynomial", "network"
-        "learnable": False,  # Whether schedule parameters are learnable
-        "hidden_dims": (64, 64),  # Hidden dimensions for network schedule
-        "alpha_min": 0.025,
-        "alpha_max": 1.0,
-        "sigma_min": 0.025,
-        "sigma_max": 1.0,
-        "k": 10.0,  # For sigmoid schedule (steepness)
-        "beta": 2.0,  # For exponential schedule (rate)
-        "loc": 0.5,  # For cauchy/laplace schedules (location)
-        "log_scale": -1.0,  # For cauchy/laplace schedules (log scale)
-        "log_power": 0.69,  # For polynomial schedule (log power, default ~0.69)
-        "eps": 1e-4,  # Epsilon for numerical stability
+    noise_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
+        "schedule_type": "linear",  # Type of schedule (linear, exponential, cosine, sigmoid, cauchy, laplace, logistic, quadratic, polynomial, monotonic_nn, learnable, network)
+        "learnable": True,  # Whether schedule parameters are learnable (False uses stop_gradient)
+        "hidden_dims": (64, 64),  # Hidden dimensions for NoiseScheduleNetwork schedule
+        # Comprehensive default parameters for all schedules (common naming convention)
+        "default_params": FrozenDict({
+            "alpha_bar_min": 0.05,  # Minimum value for alpha_bar (not applied to Laplace shedule)
+            "alpha_bar_max": 0.95,  # Maximum value for alpha_bar (not applied to Laplace schedule)
+            "beta": 0.3,  # Beta parameter for exponential schedule
+            "loc": 0.5,  # Location parameter for Laplace schedule only
+            "log_scale": 0.0,  # Scale parameter for Cauchy, Laplace schedules only
+            "log_power": 0.0,  # Power parameter for polynomial schedules
+            "gamma_range": (-4.0, 4.0),  # Range for gamma parameter for neural network
+            "gamma_prime_max": 100.0,  # Maximum value for clipping gamma_prime_t (not applied to neural network schedule)
+        }),
     }))
 
     crn: FrozenDict = field(default_factory=lambda: FrozenDict({
@@ -92,7 +90,7 @@ class Config(BaseConfig):
     
     decoder: FrozenDict = field(default_factory=lambda: FrozenDict({
         "model_type": "identity",  # Options: "mlp", "resnet", "identity", "linear"
-        "decoder_type": "mse",  # Options: "linear", "softmax", "none"
+        "decoder_type": "none",  # Options: "linear", "softmax", "none"
         "latent_shape": "NA",  # Will be set from main config if not specified
         "output_shape": "NA",
         "hidden_dims": (16, 32, 16),
@@ -174,43 +172,64 @@ class Config(BaseConfig):
             'recon_weight': args.recon_weight,
             'reg_weight': args.reg_weight,
             'recon_loss_type': args.recon_loss_type,
-            'use_snr_weight': args.use_snr_weight if hasattr(args, 'use_snr_weight') and args.use_snr_weight is not None else main_dict.get('use_snr_weight', True),
-            'use_recon_snr_weight': args.use_recon_snr_weight if hasattr(args, 'use_recon_snr_weight') and args.use_recon_snr_weight is not None else main_dict.get('use_recon_snr_weight', False),
             'normalize_snr_weight': args.normalize_snr_weight if hasattr(args, 'normalize_snr_weight') and args.normalize_snr_weight is not None else main_dict.get('normalize_snr_weight', None),
             'integration_method': getattr(args, 'integration_method', None) if getattr(args, 'integration_method', None) is not None else main_dict.get('integration_method', None),
-            'num_steps': getattr(args, 'num_steps', None) if getattr(args, 'num_steps', None) is not None else main_dict.get('num_steps', 20),
         }
         # Add vae_weight if it exists in args (for sequences)
         if hasattr(args, 'vae_weight') and args.vae_weight is not None:
             main_updates_dict['vae_weight'] = args.vae_weight
         main_updates = BaseConfig.filter_none(main_updates_dict)
         
-        # Consolidate all updates
-        updates = {
-            'main': main_updates,
-            'crn': BaseConfig.filter_none({
-                'model_type': args.crn_type,
-                'network_type': args.network_type,
-                'hidden_dims': tuple(args.hidden_dims) if args.hidden_dims is not None else None,
-            }),
-            'encoder': BaseConfig.filter_none({
-                'model_type': args.encoder_model_type,
-                'input_shape': output_shape,  # Encoder encodes x (coordinates) - always override from main config
-                'latent_shape': latent_shape,  # Must match main config - always override
-            }),
-            'decoder': BaseConfig.filter_none({
-                'model_type': args.decoder_model_type,
-                'decoder_type': args.decoder_type,
-                'output_shape': output_shape,  # Always override from main config
-                'latent_shape': latent_shape,  # Must match main config - always override
-            }),
-            'flow_schedule': BaseConfig.filter_none({
-                'schedule_type': args.noise_schedule,
-                'learnable': args.noise_schedule_learnable,
-            }),
-        }
+        # Build updates for CRN config
+        crn_updates = BaseConfig.filter_none({
+            'model_type': args.crn_type,
+            'network_type': args.network_type,
+            'hidden_dims': tuple(args.hidden_dims) if args.hidden_dims is not None else None,
+        })
         
-        return self.merge_updates(updates)
+        # Build updates for encoder config (encoder encodes coordinates x)
+        # Command-line arguments always override config values
+        encoder_updates = BaseConfig.filter_none({
+            'model_type': args.encoder_model_type,
+            'input_shape': output_shape,  # Encoder encodes x (coordinates) - always override from main config
+            'latent_shape': latent_shape,  # Must match main config - always override
+        })
+        
+        # Build updates for decoder config
+        # Command-line arguments always override config values
+        decoder_updates = BaseConfig.filter_none({
+            'model_type': args.decoder_model_type,
+            'decoder_type': args.decoder_type,
+            'output_shape': output_shape,  # Always override from main config
+            'latent_shape': latent_shape,  # Must match main config - always override
+        })
+        
+        # Build updates for noise schedule config
+        noise_schedule_updates = BaseConfig.filter_none({
+            'schedule_type': args.noise_schedule,
+            'learnable': args.noise_schedule_learnable,
+            'latent_shape': latent_shape,  # Propagate latent_shape to noise schedule
+        })
+        
+        # Apply updates using merge_frozen_dict and replace
+        updated_config = self
+        if main_updates:
+            updated_main = updated_config.merge_frozen_dict('main', main_updates)
+            updated_config = replace(updated_config, main=updated_main)
+        if crn_updates:
+            updated_crn = updated_config.merge_frozen_dict('crn', crn_updates)
+            updated_config = replace(updated_config, crn=updated_crn)
+        if encoder_updates:
+            updated_encoder = updated_config.merge_frozen_dict('encoder', encoder_updates)
+            updated_config = replace(updated_config, encoder=updated_encoder)
+        if decoder_updates:
+            updated_decoder = updated_config.merge_frozen_dict('decoder', decoder_updates)
+            updated_config = replace(updated_config, decoder=updated_decoder)
+        if noise_schedule_updates:
+            updated_noise_schedule = updated_config.merge_frozen_dict('noise_schedule', noise_schedule_updates)
+            updated_config = replace(updated_config, noise_schedule=updated_noise_schedule)
+        
+        return updated_config
     
     def override_from_args_regression(self, args: "argparse.Namespace", model_type: str) -> "Config":
         """
@@ -281,11 +300,8 @@ class Config(BaseConfig):
             'recon_weight': args.recon_weight,
             'reg_weight': args.reg_weight,
             'recon_loss_type': args.recon_loss_type,
-            'use_snr_weight': args.use_snr_weight if hasattr(args, 'use_snr_weight') and args.use_snr_weight is not None else main_dict.get('use_snr_weight', True),
-            'use_recon_snr_weight': args.use_recon_snr_weight if hasattr(args, 'use_recon_snr_weight') and args.use_recon_snr_weight is not None else main_dict.get('use_recon_snr_weight', False),
             'normalize_snr_weight': args.normalize_snr_weight if hasattr(args, 'normalize_snr_weight') and args.normalize_snr_weight is not None else main_dict.get('normalize_snr_weight', (model_type != 'flow_matching')),
             'integration_method': getattr(args, 'integration_method', None) if getattr(args, 'integration_method', None) is not None else main_dict.get('integration_method', ('midpoint' if model_type in ('ct', 'diffusion') else 'euler')),
-            'num_steps': getattr(args, 'num_steps', None) if getattr(args, 'num_steps', None) is not None else main_dict.get('num_steps', 20),
         }
         # Add vae_weight if it exists in args (for sequences)
         if hasattr(args, 'vae_weight') and args.vae_weight is not None:
@@ -326,17 +342,30 @@ class Config(BaseConfig):
             decoder_updates_dict['latent_shape'] = latent_shape
         decoder_updates = BaseConfig.filter_none(decoder_updates_dict)
         
-        # Consolidate all updates
-        updates = {
-            'main': main_updates,
-            'crn': crn_updates,
-            'encoder': encoder_updates,
-            'decoder': decoder_updates,
-            'flow_schedule': BaseConfig.filter_none({
-                'schedule_type': args.noise_schedule,
-                'learnable': args.noise_schedule_learnable,
-            }),
-        }
+        # Build updates for noise schedule config
+        noise_schedule_updates = BaseConfig.filter_none({
+            'schedule_type': args.noise_schedule,
+            'learnable': args.noise_schedule_learnable,
+            'latent_shape': latent_shape,  # Propagate latent_shape to noise schedule
+        })
         
-        return self.merge_updates(updates)
+        # Apply updates using merge_frozen_dict and replace
+        updated_config = self
+        if main_updates:
+            updated_main = updated_config.merge_frozen_dict('main', main_updates)
+            updated_config = replace(updated_config, main=updated_main)
+        if crn_updates:
+            updated_crn = updated_config.merge_frozen_dict('crn', crn_updates)
+            updated_config = replace(updated_config, crn=updated_crn)
+        if encoder_updates:
+            updated_encoder = updated_config.merge_frozen_dict('encoder', encoder_updates)
+            updated_config = replace(updated_config, encoder=updated_encoder)
+        if decoder_updates:
+            updated_decoder = updated_config.merge_frozen_dict('decoder', decoder_updates)
+            updated_config = replace(updated_config, decoder=updated_decoder)
+        if noise_schedule_updates:
+            updated_noise_schedule = updated_config.merge_frozen_dict('noise_schedule', noise_schedule_updates)
+            updated_config = replace(updated_config, noise_schedule=updated_noise_schedule)
+        
+        return updated_config
 

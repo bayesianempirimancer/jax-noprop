@@ -5,6 +5,24 @@ import flax.linen as nn
 from jax import lax
 
 
+class L2Norm(nn.Module):
+    """L2 normalization module that projects vectors onto unit sphere."""
+    eps: float = 1e-8
+    
+    @nn.compact
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        """Normalize input to unit length (L2 norm = 1).
+        
+        Args:
+            x: Input array of shape [..., features]
+            
+        Returns:
+            Normalized array with same shape, where each vector has L2 norm = 1
+        """
+        norm = jnp.linalg.norm(x, axis=-1, keepdims=True)
+        return x / (norm + self.eps)
+
+
 class RMSNormGated(nn.Module):
     eps: float = 1e-5
 

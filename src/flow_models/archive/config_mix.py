@@ -18,10 +18,9 @@ if TYPE_CHECKING:
 class Config(BaseConfig):
     """Unified configuration for VAE with flow models (FM, DF, CT)."""
     # BaseConfig fields
-    model_name: str = "flow_net"
+    model_name: str = "vae_flow_network"
 
     main: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "loss_type": "flow_loss",  # Options: "flow", "target", "noise"
         "input_shape": "NA",  # Will be set based on z_dim
         "output_shape": "NA",  # Will be set based on z_dim or z_dim**2
         "latent_shape": "NA",  # Will be set based on x_dim
@@ -29,29 +28,29 @@ class Config(BaseConfig):
         "recon_weight": 0.0,  # Weight for reconstruction loss in total loss
         "reg_weight": 0.0,  # Weight for regularization loss in total loss
         "vae_weight": 1.0,  # Weight for VAE loss in total loss
-        "use_snr_weight": False,
-        "use_recon_snr_weight": False,
         "normalize_snr_weight": False,  # Normalize SNR weights by their mean (False for flow_matching, True for diffusion/ct)
         "integration_method": "midpoint",  # Options: "euler", "heun", "rk4", "adaptive", "midpoint"
                                         # "euler" for flow_matching, "midpoint" for diffusion/ct
-        "num_steps": 20,  # Number of integration steps for generation
         "encode_x": False,  # Whether to encode x before passing to CRN (True for sequences, False for backward compatibility)
     }))
     
-    flow_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "schedule_type": "linear",  # Type of schedule: "linear", "cosine", "sigmoid", "exponential", "cauchy", "laplace", "polynomial", "network"
-        "learnable": False,  # Whether schedule parameters are learnable
-        "hidden_dims": (64, 64),  # Hidden dimensions for network schedule
-        "alpha_min": 0.025,
-        "alpha_max": 1.0,
-        "sigma_min": 0.025,
-        "sigma_max": 1.0,
-        "k": 10.0,  # For sigmoid schedule (steepness)
-        "beta": 2.0,  # For exponential schedule (rate)
-        "loc": 0.5,  # For cauchy/laplace schedules (location)
-        "log_scale": -1.0,  # For cauchy/laplace schedules (log scale)
-        "log_power": 0.69,  # For polynomial schedule (log power, default ~0.69)
-        "eps": 1e-4,  # Epsilon for numerical stability
+    flow_planner: FrozenDict = field(default_factory=lambda: FrozenDict({
+        "top_k": 3,  # Number of top clusters to sample from for each data point
+        "sample_method": "mixture",  # Sampling method: "mixture" (GMM) or "normal"
+        "sinkhorn_refinement": True,  # Whether to use sinkhorn refinement
+        "alpha_min": 0.05,  # Minimum alpha for flow schedule
+        "alpha_max": 0.95,  # Maximum alpha for flow schedule
+        "sigma_min": 0.05,  # Minimum sigma for flow schedule
+        "sigma_max": 0.95,  # Maximum sigma for flow schedule
+        "gmm": FrozenDict({
+            "num_clusters": 8,  # Number of GMM clusters
+            "shared_variances": False,  # Whether to tie precisions across clusters
+            "prior_mu": 0.0,  # Prior mean for GMM
+            "prior_alpha": 1.0,  # Prior alpha for GMM precision
+            "prior_beta": 1.0,  # Prior beta for GMM precision
+            "prior_alpha_mix": 0.5,  # Prior alpha for mixing weights
+            "beta_mix": 1.0,  # Beta inverse temperature parameter for mixing weights
+        }),
     }))
 
     crn: FrozenDict = field(default_factory=lambda: FrozenDict({
@@ -87,18 +86,16 @@ class Config(BaseConfig):
         "hidden_dims": (16, 32, 16),
         "activation": "swish",
         "dropout_rate": 0.0,
-        "rescale": False,
     }))
     
     decoder: FrozenDict = field(default_factory=lambda: FrozenDict({
         "model_type": "identity",  # Options: "mlp", "resnet", "identity", "linear"
-        "decoder_type": "mse",  # Options: "linear", "softmax", "none"
+        "decoder_type": "none",  # Options: "linear", "softmax", "none"
         "latent_shape": "NA",  # Will be set from main config if not specified
         "output_shape": "NA",
         "hidden_dims": (16, 32, 16),
         "activation": "swish",
         "dropout_rate": 0.0,
-        "rescale": False,
     }))
     
     def override_from_args(self, args: "argparse.Namespace", model_type: str, 
@@ -174,43 +171,76 @@ class Config(BaseConfig):
             'recon_weight': args.recon_weight,
             'reg_weight': args.reg_weight,
             'recon_loss_type': args.recon_loss_type,
-            'use_snr_weight': args.use_snr_weight if hasattr(args, 'use_snr_weight') and args.use_snr_weight is not None else main_dict.get('use_snr_weight', True),
-            'use_recon_snr_weight': args.use_recon_snr_weight if hasattr(args, 'use_recon_snr_weight') and args.use_recon_snr_weight is not None else main_dict.get('use_recon_snr_weight', False),
             'normalize_snr_weight': args.normalize_snr_weight if hasattr(args, 'normalize_snr_weight') and args.normalize_snr_weight is not None else main_dict.get('normalize_snr_weight', None),
             'integration_method': getattr(args, 'integration_method', None) if getattr(args, 'integration_method', None) is not None else main_dict.get('integration_method', None),
-            'num_steps': getattr(args, 'num_steps', None) if getattr(args, 'num_steps', None) is not None else main_dict.get('num_steps', 20),
         }
         # Add vae_weight if it exists in args (for sequences)
         if hasattr(args, 'vae_weight') and args.vae_weight is not None:
             main_updates_dict['vae_weight'] = args.vae_weight
         main_updates = BaseConfig.filter_none(main_updates_dict)
         
-        # Consolidate all updates
-        updates = {
-            'main': main_updates,
-            'crn': BaseConfig.filter_none({
-                'model_type': args.crn_type,
-                'network_type': args.network_type,
-                'hidden_dims': tuple(args.hidden_dims) if args.hidden_dims is not None else None,
-            }),
-            'encoder': BaseConfig.filter_none({
-                'model_type': args.encoder_model_type,
-                'input_shape': output_shape,  # Encoder encodes x (coordinates) - always override from main config
-                'latent_shape': latent_shape,  # Must match main config - always override
-            }),
-            'decoder': BaseConfig.filter_none({
-                'model_type': args.decoder_model_type,
-                'decoder_type': args.decoder_type,
-                'output_shape': output_shape,  # Always override from main config
-                'latent_shape': latent_shape,  # Must match main config - always override
-            }),
-            'flow_schedule': BaseConfig.filter_none({
-                'schedule_type': args.noise_schedule,
-                'learnable': args.noise_schedule_learnable,
-            }),
-        }
+        # Build updates for CRN config
+        # CRN needs input_shape from main config (it's the conditional input)
+        crn_updates = BaseConfig.filter_none({
+            'model_type': args.crn_type,
+            'network_type': args.network_type,
+            'hidden_dims': tuple(args.hidden_dims) if args.hidden_dims is not None else None,
+            'input_shape': input_shape,  # CRN conditional input shape (from main config)
+        })
         
-        return self.merge_updates(updates)
+        # Build updates for encoder config (encoder encodes coordinates x)
+        encoder_updates = BaseConfig.filter_none({
+            'model_type': args.encoder_model_type,
+            'input_shape': output_shape,  # Encoder encodes x (coordinates)
+            'latent_shape': latent_shape,  # Must match main config
+        })
+        
+        # Build updates for decoder config
+        decoder_updates = BaseConfig.filter_none({
+            'model_type': args.decoder_model_type,
+            'decoder_type': args.decoder_type,
+            'output_shape': output_shape,
+            'latent_shape': latent_shape,  # Must match main config
+        })
+        
+        # Build updates for flow planner config
+        flow_planner_updates = BaseConfig.filter_none({
+            'top_k': getattr(args, 'top_k', None),
+            'sample_method': getattr(args, 'sample_method', None),
+            'sinkhorn_refinement': getattr(args, 'sinkhorn_refinement', None),
+        })
+        # Build nested GMM updates if any GMM args provided
+        gmm_updates = BaseConfig.filter_none({
+            'num_clusters': getattr(args, 'num_clusters', None),
+            'shared_variances': getattr(args, 'shared_variances', None),
+            'prior_mu': getattr(args, 'prior_mu', None),
+            'prior_alpha': getattr(args, 'prior_alpha', None),
+            'prior_beta': getattr(args, 'prior_beta', None),
+            'prior_alpha_mix': getattr(args, 'prior_alpha_mix', None),
+            'beta_mix': getattr(args, 'beta_mix', None),
+        })
+        if gmm_updates:
+            flow_planner_updates['gmm'] = gmm_updates
+        
+        # Apply updates using merge_frozen_dict and replace
+        updated_config = self
+        if main_updates:
+            updated_main = updated_config.merge_frozen_dict('main', main_updates)
+            updated_config = replace(updated_config, main=updated_main)
+        if crn_updates:
+            updated_crn = updated_config.merge_frozen_dict('crn', crn_updates)
+            updated_config = replace(updated_config, crn=updated_crn)
+        if encoder_updates:
+            updated_encoder = updated_config.merge_frozen_dict('encoder', encoder_updates)
+            updated_config = replace(updated_config, encoder=updated_encoder)
+        if decoder_updates:
+            updated_decoder = updated_config.merge_frozen_dict('decoder', decoder_updates)
+            updated_config = replace(updated_config, decoder=updated_decoder)
+        if flow_planner_updates:
+            updated_flow_planner = updated_config.merge_frozen_dict('flow_planner', flow_planner_updates)
+            updated_config = replace(updated_config, flow_planner=updated_flow_planner)
+        
+        return updated_config
     
     def override_from_args_regression(self, args: "argparse.Namespace", model_type: str) -> "Config":
         """
@@ -218,59 +248,28 @@ class Config(BaseConfig):
         
         For regression: inputs are x, outputs are y (no shape reversal needed).
         
-        Rules:
-        - "NA" values in main config must be provided via command-line arguments (error if not)
-        - "NA" values in encoder/decoder config will use values from main config
-        - No fallback defaults - strict validation
-        
         Args:
             args: Parsed command-line arguments
             model_type: Model type
             
         Returns:
             Updated config instance with overrides applied, configured for regression
-            
-        Raises:
-            ValueError: If main config has "NA" values but args are not provided
         """
         main_dict = dict(self.main)
         
         # Determine shapes for regression (x -> y):
         # - If args provided, use them directly
-        # - If config has "NA", require args (throw error)
         # - Otherwise, use config file values (no reversal needed for regression)
-        input_shape_val = main_dict.get('input_shape')
-        if args.input_shape is not None:
-            input_shape = tuple(args.input_shape)
-        elif isinstance(input_shape_val, str) and input_shape_val == "NA":
-            raise ValueError(
-                "main.input_shape is 'NA' but --input_shape or --input_dim was not provided. "
-                "You must specify input shape via command-line arguments."
-            )
+        if args.input_shape is not None or args.output_shape is not None:
+            # Args provided: use them directly
+            input_shape = tuple(args.input_shape) if args.input_shape is not None else tuple(main_dict.get('input_shape', (2,)))
+            output_shape = tuple(args.output_shape) if args.output_shape is not None else tuple(main_dict.get('output_shape', (2,)))
         else:
-            input_shape = tuple(input_shape_val) if not isinstance(input_shape_val, tuple) else input_shape_val
+            # No args: use config file values as-is (no reversal for regression)
+            input_shape = tuple(main_dict.get('input_shape', (2,)))
+            output_shape = tuple(main_dict.get('output_shape', (2,)))
         
-        output_shape_val = main_dict.get('output_shape')
-        if args.output_shape is not None:
-            output_shape = tuple(args.output_shape)
-        elif isinstance(output_shape_val, str) and output_shape_val == "NA":
-            raise ValueError(
-                "main.output_shape is 'NA' but --output_shape or --output_dim was not provided. "
-                "You must specify output shape via command-line arguments."
-            )
-        else:
-            output_shape = tuple(output_shape_val) if not isinstance(output_shape_val, tuple) else output_shape_val
-        
-        latent_shape_val = main_dict.get('latent_shape')
-        if args.latent_shape is not None:
-            latent_shape = tuple(args.latent_shape)
-        elif isinstance(latent_shape_val, str) and latent_shape_val == "NA":
-            raise ValueError(
-                "main.latent_shape is 'NA' but --latent_shape or --latent_dim was not provided. "
-                "You must specify latent shape via command-line arguments."
-            )
-        else:
-            latent_shape = tuple(latent_shape_val) if not isinstance(latent_shape_val, tuple) else latent_shape_val
+        latent_shape = tuple(args.latent_shape) if args.latent_shape is not None else tuple(main_dict.get('latent_shape', (2,)))
         
         # Build updates for main config (filter None values)
         # Check if vae_weight is in args (for sequences)
@@ -281,11 +280,8 @@ class Config(BaseConfig):
             'recon_weight': args.recon_weight,
             'reg_weight': args.reg_weight,
             'recon_loss_type': args.recon_loss_type,
-            'use_snr_weight': args.use_snr_weight if hasattr(args, 'use_snr_weight') and args.use_snr_weight is not None else main_dict.get('use_snr_weight', True),
-            'use_recon_snr_weight': args.use_recon_snr_weight if hasattr(args, 'use_recon_snr_weight') and args.use_recon_snr_weight is not None else main_dict.get('use_recon_snr_weight', False),
             'normalize_snr_weight': args.normalize_snr_weight if hasattr(args, 'normalize_snr_weight') and args.normalize_snr_weight is not None else main_dict.get('normalize_snr_weight', (model_type != 'flow_matching')),
             'integration_method': getattr(args, 'integration_method', None) if getattr(args, 'integration_method', None) is not None else main_dict.get('integration_method', ('midpoint' if model_type in ('ct', 'diffusion') else 'euler')),
-            'num_steps': getattr(args, 'num_steps', None) if getattr(args, 'num_steps', None) is not None else main_dict.get('num_steps', 20),
         }
         # Add vae_weight if it exists in args (for sequences)
         if hasattr(args, 'vae_weight') and args.vae_weight is not None:
@@ -293,50 +289,71 @@ class Config(BaseConfig):
         main_updates = BaseConfig.filter_none(main_updates_dict)
         
         # Build updates for CRN config
+        # CRN needs input_shape from main config (it's the conditional input)
         crn_updates = BaseConfig.filter_none({
             'model_type': args.crn_type,
             'network_type': args.network_type,
             'hidden_dims': tuple(args.hidden_dims) if args.hidden_dims is not None else None,
+            'input_shape': input_shape,  # CRN conditional input shape (from main config)
         })
         
-        # Build updates for encoder config (encoder encodes y for regression)
-        # Preserve existing encoder shapes if they are not "NA" or None
+        # Build updates for encoder config (encoder encodes x)
+        # For sequences: encoder/decoder shapes should NOT be overridden - they operate on terminal dimension only
+        # Only override if explicitly provided in args, otherwise keep config values
         encoder_dict = dict(self.encoder)
-        encoder_updates_dict = {
+        encoder_updates = BaseConfig.filter_none({
             'model_type': args.encoder_model_type,
-        }
-        # Only override shapes if they are "NA" or None in the config
-        if encoder_dict.get('input_shape') in ("NA", None):
-            encoder_updates_dict['input_shape'] = output_shape  # Encoder encodes y (output) for regression
-        if encoder_dict.get('latent_shape') in ("NA", None):
-            encoder_updates_dict['latent_shape'] = latent_shape
-        encoder_updates = BaseConfig.filter_none(encoder_updates_dict)
+            # Only override input_shape/latent_shape if not already set in config (for sequences, config has correct values)
+            'input_shape': input_shape if encoder_dict.get('input_shape') == "NA" or encoder_dict.get('input_shape') is None else None,
+            'latent_shape': latent_shape if encoder_dict.get('latent_shape') == "NA" or encoder_dict.get('latent_shape') is None else None,
+        })
         
         # Build updates for decoder config
-        # Preserve existing decoder shapes if they are not "NA" or None
         decoder_dict = dict(self.decoder)
-        decoder_updates_dict = {
+        decoder_updates = BaseConfig.filter_none({
             'model_type': args.decoder_model_type,
             'decoder_type': args.decoder_type,
-        }
-        # Only override shapes if they are "NA" or None in the config
-        if decoder_dict.get('output_shape') in ("NA", None):
-            decoder_updates_dict['output_shape'] = output_shape
-        if decoder_dict.get('latent_shape') in ("NA", None):
-            decoder_updates_dict['latent_shape'] = latent_shape
-        decoder_updates = BaseConfig.filter_none(decoder_updates_dict)
+            # Only override output_shape/latent_shape if not already set in config (for sequences, config has correct values)
+            'output_shape': output_shape if decoder_dict.get('output_shape') == "NA" or decoder_dict.get('output_shape') is None else None,
+            'latent_shape': latent_shape if decoder_dict.get('latent_shape') == "NA" or decoder_dict.get('latent_shape') is None else None,
+        })
         
-        # Consolidate all updates
-        updates = {
-            'main': main_updates,
-            'crn': crn_updates,
-            'encoder': encoder_updates,
-            'decoder': decoder_updates,
-            'flow_schedule': BaseConfig.filter_none({
-                'schedule_type': args.noise_schedule,
-                'learnable': args.noise_schedule_learnable,
-            }),
-        }
+        # Build updates for flow planner config
+        flow_planner_updates = BaseConfig.filter_none({
+            'top_k': getattr(args, 'top_k', None),
+            'sample_method': getattr(args, 'sample_method', None),
+            'sinkhorn_refinement': getattr(args, 'sinkhorn_refinement', None),
+        })
+        # Build nested GMM updates if any GMM args provided
+        gmm_updates = BaseConfig.filter_none({
+            'num_clusters': getattr(args, 'num_clusters', None),
+            'shared_variances': getattr(args, 'shared_variances', None),
+            'prior_mu': getattr(args, 'prior_mu', None),
+            'prior_alpha': getattr(args, 'prior_alpha', None),
+            'prior_beta': getattr(args, 'prior_beta', None),
+            'prior_alpha_mix': getattr(args, 'prior_alpha_mix', None),
+            'beta_mix': getattr(args, 'beta_mix', None),
+        })
+        if gmm_updates:
+            flow_planner_updates['gmm'] = gmm_updates
         
-        return self.merge_updates(updates)
+        # Apply updates using merge_frozen_dict and replace
+        updated_config = self
+        if main_updates:
+            updated_main = updated_config.merge_frozen_dict('main', main_updates)
+            updated_config = replace(updated_config, main=updated_main)
+        if crn_updates:
+            updated_crn = updated_config.merge_frozen_dict('crn', crn_updates)
+            updated_config = replace(updated_config, crn=updated_crn)
+        if encoder_updates:
+            updated_encoder = updated_config.merge_frozen_dict('encoder', encoder_updates)
+            updated_config = replace(updated_config, encoder=updated_encoder)
+        if decoder_updates:
+            updated_decoder = updated_config.merge_frozen_dict('decoder', decoder_updates)
+            updated_config = replace(updated_config, decoder=updated_decoder)
+        if flow_planner_updates:
+            updated_flow_planner = updated_config.merge_frozen_dict('flow_planner', flow_planner_updates)
+            updated_config = replace(updated_config, flow_planner=updated_flow_planner)
+        
+        return updated_config
 

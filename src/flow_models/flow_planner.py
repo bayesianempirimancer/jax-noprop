@@ -45,25 +45,15 @@ class GMMFlowPlanner(LinearFlowSchedule):
     
     The planner uses a GMM to cluster target samples and generates initial conditions by sampling
     from the top-k clusters associated with each target sample.
-    
-    The GMM uses shared means across clusters (all clusters share the same mean) and optionally
-    shared variances. This simplifies the model while still allowing for flexible transport plans.
     """
-    # GMM configuration (optional in field definition, but required in practice)
-    gmm_config: GMMVBEMConfig = None  # GMM configuration
-    # Optional fields (after required fields)
+
+    gmm_config: GMMVBEMConfig
     top_k: int = 3  # Number of top clusters to sample from for each data point
     sample_method: str = "mixture"  # "mixture" or "normal"
     sinkhorn_refinement: bool = False  # Whether to use sinkhorn refinement (default: False)
     
     def setup(self):
         """Initialize the GMM component."""
-        
-        # Validate gmm_config is provided
-        if self.gmm_config is None:
-            raise ValueError("gmm_config must be provided when creating FlowPlanner")
-        
-        # Create GMM using factory function
         self.gmm = create_gmm_vbem(self.gmm_config)
     
     def __call__(self, x_target: jnp.ndarray, key: jr.PRNGKey, training: bool = True) -> jnp.ndarray:
@@ -219,12 +209,15 @@ class GMMFlowPlanner(LinearFlowSchedule):
             # Use GMM's unconditional sample method (sample from GMM prior, not conditioned on x_target)
             # Extract batch_shape from x_target
             batch_shape = x_target.shape[:-1]  # Remove latent_dim dimension
+            # Ensure batch_shape is not empty (handle case where x_target is 1D)
+            if len(batch_shape) == 0:
+                batch_shape = (1,)
             x_0 = self.gmm.sample(
                 key=sample_key,
                 batch_shape=batch_shape,
                 training=training
             )
-            x_0 = x_0 + jr.normal(noise_key, x_0.shape)
+#            x_0 = x_0 + jr.normal(noise_key, x_0.shape)
         elif self.sample_method == "normal":
             # Sample from standard normal distribution
             x_0 = jr.normal(noise_key, x_target.shape)
@@ -233,7 +226,8 @@ class GMMFlowPlanner(LinearFlowSchedule):
         
         # Apply sinkhorn refinement if enabled and in training mode (not during prediction)
         # Sinkhorn refinement requires x_target, which we only have during training
-        if self.sinkhorn_refinement and training:
+        # Skip sinkhorn refinement during initialization (when x_target might be 1D)
+        if self.sinkhorn_refinement and training and x_target.ndim >= 2:
             key, sinkhorn_key = jr.split(key)
             x_0 = self.apply_sinkhorn_refinement(x_0, x_target, sinkhorn_key, training=training)
         

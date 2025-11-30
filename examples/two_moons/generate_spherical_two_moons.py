@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Generate two moons dataset for VAE_flow testing.
+Generate spherical two moons dataset for VAE_flow testing.
 
-This script creates a two moons classification dataset with 10,000 points,
-ensuring both moons are evenly and completely sampled.
+This script creates a spherical two moons dataset by:
+1. Loading or generating the two moons dataset (2D)
+2. Adding a third dimension with value 1: [x, y, 1]
+3. Normalizing each point to put it on the unit sphere
 
 NOTE: This script should be called from the project root directory:
-    python examples/two_moons/generate_two_moons.py [args]
+    python examples/two_moons/generate_spherical_two_moons.py [args]
 
 All paths (output_dir) are relative to the project root directory.
 """
@@ -14,108 +16,106 @@ All paths (output_dir) are relative to the project root directory.
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
-from sklearn.datasets import make_moons
+from mpl_toolkits.mplot3d import Axes3D
 from sklearn.model_selection import train_test_split
 import argparse
 import os
+import sys
+from pathlib import Path
+
+# Add project root to path to import generate_two_moons functions
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+from examples.two_moons.generate_two_moons import generate_two_moons_dataset, load_dataset
 
 
-def generate_two_moons_dataset(
-    n_samples: int = 10000,
-    noise: float = 0.1,
-    scale_factor: float = 10.0,
-    center: bool = True,
-    standardize: bool = False,
-    seed: int = 42
-) -> tuple:
+def create_spherical_two_moons(x_data_2d: np.ndarray) -> np.ndarray:
     """
-    Generate two moons dataset with balanced sampling.
+    Convert 2D two moons data to 3D spherical data.
+    
+    Process:
+    1. Standardize 2D data: center and scale so x and y have mean 0 and std 1
+    2. Add third dimension with value 1: [x_std, y_std, 1]
+    3. Normalize each point to unit sphere: point / ||point||
     
     Args:
-        n_samples: Total number of samples
-        noise: Standard deviation of Gaussian noise added to the data
-        scale_factor: Scale factor to multiply x coordinates by (default: 1.0)
-        center: Whether to center the data after scaling (default: True)
-        standardize: Whether to standardize the data to zero mean and unit variance (default: False)
-                     If True, this overrides center and scale_factor
-        seed: Random seed for reproducibility
+        x_data_2d: 2D coordinates [n_samples, 2]
         
     Returns:
-        Tuple of (x_data, y_data) where:
-        - x_data: 2D coordinates [n_samples, 2]
-        - y_data: One-hot encoded class labels [n_samples, 2] where each row is [1, 0] or [0, 1]
+        3D coordinates on unit sphere [n_samples, 3]
     """
-    # Generate the two moons dataset
-    x_data, y_data_int = make_moons(
-        n_samples=n_samples,
-        noise=noise,
-        random_state=seed
-    )
+    n_samples = x_data_2d.shape[0]
     
-    # Standardize if requested (overrides center and scale_factor)
-    if standardize:
-        x_mean = x_data.mean(axis=0, keepdims=True)
-        x_std = x_data.std(axis=0, keepdims=True)
-        # Avoid division by zero
-        x_std = np.where(x_std == 0, 1.0, x_std)
-        x_data = (x_data - x_mean) / x_std
-        print(f"Data standardized: mean={x_data.mean(axis=0)}, std={x_data.std(axis=0)}")
-    else:
-        # Apply scale factor to x coordinates
-        x_data = x_data * scale_factor
-        
-        # Optionally center the data
-        if center:
-            x_data = x_data - x_data.mean(axis=0, keepdims=True)
+    # Step 1: Standardize 2D data (center and scale to mean=0, std=1)
+    x_mean = np.mean(x_data_2d, axis=0)
+    x_std = np.std(x_data_2d, axis=0)
+    x_data_standardized = (x_data_2d - x_mean) / x_std
     
-    # Convert integer labels to one-hot encoding
-    num_classes = len(np.unique(y_data_int))
-    y_data = np.eye(num_classes)[y_data_int.astype(int)]  # [n_samples, num_classes]
+    # Step 2: Add third dimension with value 1
+    x_data_3d = np.zeros((n_samples, 3))
+    x_data_3d[:, :2] = x_data_standardized
+    x_data_3d[:, 2] = 1.0
     
-    # Ensure both classes are represented
-    unique_classes, counts = np.unique(y_data_int, return_counts=True)
-    print(f"Class distribution:")
-    for cls, count in zip(unique_classes, counts):
-        print(f"  Class {cls}: {count} samples ({count/n_samples*100:.1f}%)")
-    print(f"Labels converted to one-hot encoding: shape {y_data.shape}")
+    # Step 3: Normalize to unit sphere
+    norms = np.linalg.norm(x_data_3d, axis=1, keepdims=True)
+    x_data_spherical = x_data_3d / norms
     
-    return x_data, y_data
+    # Verify all points are on unit sphere
+    norms_after = np.linalg.norm(x_data_spherical, axis=1)
+    assert np.allclose(norms_after, 1.0), "Points are not on unit sphere!"
+    
+    return x_data_spherical
 
 
-def visualize_dataset(x_data: np.ndarray, y_data: np.ndarray, save_path: str = None):
+def visualize_spherical_dataset(x_data: np.ndarray, y_data: np.ndarray, save_path: str = None):
     """
-    Visualize the two moons dataset.
+    Visualize the spherical two moons dataset in 3D.
     
     Args:
-        x_data: 2D coordinates [n_samples, 2]
+        x_data: 3D coordinates on unit sphere [n_samples, 3]
         y_data: Class labels [n_samples] (integer) or [n_samples, num_classes] (one-hot)
         save_path: Path to save the plot (optional)
     """
-    plt.figure(figsize=(10, 8))
+    fig = plt.figure(figsize=(14, 6))
     
     # Convert one-hot to integer labels if needed
     if len(y_data.shape) == 2 and y_data.shape[1] > 1:
-        # One-hot encoded: convert to integer labels
         y_int = np.argmax(y_data, axis=1)
     else:
-        # Already integer labels
         y_int = y_data
     
-    # Plot the two moons
+    # 3D scatter plot
+    ax1 = fig.add_subplot(121, projection='3d')
     colors = ['red', 'blue']
     labels = ['Moon 0', 'Moon 1']
     
     for i in range(2):
         mask = y_int == i
-        plt.scatter(x_data[mask, 0], x_data[mask, 1], 
+        ax1.scatter(x_data[mask, 0], x_data[mask, 1], x_data[mask, 2],
                    c=colors[i], label=labels[i], alpha=0.6, s=20)
     
-    plt.xlabel('X coordinate')
-    plt.ylabel('Y coordinate')
-    plt.title('Two Moons Dataset')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.axis('equal')
+    ax1.set_xlabel('X')
+    ax1.set_ylabel('Y')
+    ax1.set_zlabel('Z')
+    ax1.set_title('Spherical Two Moons (3D)')
+    ax1.legend()
+    
+    # 2D projection (first two dimensions)
+    ax2 = fig.add_subplot(122)
+    for i in range(2):
+        mask = y_int == i
+        ax2.scatter(x_data[mask, 0], x_data[mask, 1],
+                   c=colors[i], label=labels[i], alpha=0.6, s=20)
+    
+    ax2.set_xlabel('X')
+    ax2.set_ylabel('Y')
+    ax2.set_title('Spherical Two Moons (XY Projection)')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    ax2.axis('equal')
+    
+    plt.tight_layout()
     
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -130,10 +130,10 @@ def save_dataset(x_data: np.ndarray, y_data: np.ndarray, filepath: str,
     Save the dataset in the formatted format with train/val splits.
     
     NOTE: Data is ALWAYS shuffled before splitting. This cannot be disabled.
-    y_data should already be one-hot encoded (from generate_two_moons_dataset).
+    y_data should already be one-hot encoded.
     
     Args:
-        x_data: 2D coordinates [n_samples, 2]
+        x_data: 3D coordinates on unit sphere [n_samples, 3]
         y_data: Class labels [n_samples, num_classes] (one-hot encoded) or [n_samples] (integer)
         filepath: Path to save the pickle file
         train_ratio: Fraction of data for training (default: 0.80)
@@ -141,14 +141,12 @@ def save_dataset(x_data: np.ndarray, y_data: np.ndarray, filepath: str,
     """
     # Check if y_data is already one-hot encoded
     if len(y_data.shape) == 2 and y_data.shape[1] > 1:
-        # Already one-hot encoded
         y_onehot = y_data
         y_int = np.argmax(y_data, axis=1)  # For stratification
         num_classes = y_onehot.shape[1]
         print(f"Using one-hot encoded labels (already converted):")
         print(f"  y shape: {y_onehot.shape}")
     else:
-        # Convert integer labels to one-hot encoding
         num_classes = len(np.unique(y_data))
         y_onehot = np.eye(num_classes)[y_data.astype(int)]  # [n_samples, num_classes]
         y_int = y_data  # For stratification
@@ -159,7 +157,6 @@ def save_dataset(x_data: np.ndarray, y_data: np.ndarray, filepath: str,
     
     # Split into train and validation sets
     # IMPORTANT: shuffle=True is MANDATORY - data must always be shuffled before splitting
-    # This ensures proper randomization and prevents data leakage
     x_train, x_val, y_train, y_val = train_test_split(
         x_data, y_onehot, 
         train_size=train_ratio, 
@@ -191,41 +188,22 @@ def save_dataset(x_data: np.ndarray, y_data: np.ndarray, filepath: str,
     print(f"  Classes: {num_classes}")
 
 
-def load_dataset(filepath: str) -> dict:
-    """
-    Load the dataset from a pickle file.
-    
-    Args:
-        filepath: Path to the pickle file
-        
-    Returns:
-        Dictionary containing the dataset
-    """
-    with open(filepath, 'rb') as f:
-        dataset = pickle.load(f)
-    
-    print(f"Dataset loaded from {filepath}")
-    return dataset
-
-
 def main():
-    """Main function to generate and save the two moons dataset."""
-    parser = argparse.ArgumentParser(description='Generate two moons dataset')
+    """Main function to generate and save the spherical two moons dataset."""
+    parser = argparse.ArgumentParser(description='Generate spherical two moons dataset')
+    parser.add_argument('--input_data', type=str, default='./data/two_moons.pkl',
+                       help='Path to input two moons dataset (will generate if not found)')
     parser.add_argument('--n_samples', type=int, default=10000, 
-                       help='Number of samples to generate')
+                       help='Number of samples to generate (if generating from scratch)')
     parser.add_argument('--noise', type=float, default=0.1, 
-                       help='Noise level for the dataset')
+                       help='Noise level for the dataset (if generating from scratch)')
     parser.add_argument('--scale_factor', type=float, default=8.0,
-                       help='Scale factor to multiply x coordinates by (default: 8.0)')
-    parser.add_argument('--no_center', action='store_true',
-                       help='Do not center the data after scaling (default: center=True)')
-    parser.add_argument('--standardize', action='store_true',
-                       help='Standardize the data to zero mean and unit variance (overrides center and scale_factor)')
+                       help='Scale factor for the dataset (if generating from scratch)')
     parser.add_argument('--seed', type=int, default=42, 
                        help='Random seed for reproducibility')
     parser.add_argument('--output_dir', type=str, default='./data', 
                        help='Directory to save the dataset')
-    parser.add_argument('--filename', type=str, default='two_moons.pkl', 
+    parser.add_argument('--filename', type=str, default='spherical_two_moons.pkl', 
                        help='Filename for the dataset')
     parser.add_argument('--train_ratio', type=float, default=0.80,
                        help='Fraction of data for training (default: 0.80)')
@@ -237,14 +215,10 @@ def main():
     args = parser.parse_args()
     
     print("=" * 50)
-    print("Two Moons Dataset Generator")
+    print("Spherical Two Moons Dataset Generator")
     print("=" * 50)
     print(f"Configuration:")
-    print(f"  Number of samples: {args.n_samples}")
-    print(f"  Noise level: {args.noise}")
-    print(f"  Scale factor: {args.scale_factor}")
-    print(f"  Center data: {not args.no_center}")
-    print(f"  Standardize data: {args.standardize}")
+    print(f"  Input data: {args.input_data}")
     print(f"  Seed: {args.seed}")
     print(f"  Output directory: {args.output_dir}")
     print(f"  Filename: {args.filename}")
@@ -253,20 +227,39 @@ def main():
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Generate the dataset
-    print("Generating two moons dataset...")
-    x_data, y_data = generate_two_moons_dataset(
-        n_samples=args.n_samples,
-        noise=args.noise,
-        scale_factor=args.scale_factor,
-        center=not args.no_center,  # Default is True, use --no_center to disable
-        standardize=args.standardize,  # Standardize to zero mean and unit variance
-        seed=args.seed
-    )
+    # Load or generate the 2D two moons dataset
+    if os.path.exists(args.input_data):
+        print(f"Loading existing two moons dataset from {args.input_data}...")
+        dataset_2d = load_dataset(args.input_data)
+        x_data_2d = np.concatenate([dataset_2d['train']['x'], dataset_2d['val']['x']], axis=0)
+        y_data = np.concatenate([dataset_2d['train']['y'], dataset_2d['val']['y']], axis=0)
+        print(f"Loaded {x_data_2d.shape[0]} samples from existing dataset")
+    else:
+        print(f"Input dataset not found. Generating two moons dataset...")
+        x_data_2d, y_data = generate_two_moons_dataset(
+            n_samples=args.n_samples,
+            noise=args.noise,
+            scale_factor=args.scale_factor,
+            center=True,
+            seed=args.seed
+        )
+        print(f"Generated {x_data_2d.shape[0]} samples")
+    
+    # Convert to spherical coordinates
+    print("\nConverting to spherical coordinates...")
+    print(f"  Input shape: {x_data_2d.shape}")
+    x_data_spherical = create_spherical_two_moons(x_data_2d)
+    print(f"  Output shape: {x_data_spherical.shape}")
+    
+    # Verify points are on unit sphere
+    norms = np.linalg.norm(x_data_spherical, axis=1)
+    print(f"  Norm statistics: min={norms.min():.6f}, max={norms.max():.6f}, mean={norms.mean():.6f}")
+    assert np.allclose(norms, 1.0, atol=1e-6), "Points are not on unit sphere!"
+    print("  ✓ All points verified to be on unit sphere")
     
     # Save the dataset
     filepath = os.path.join(args.output_dir, args.filename)
-    save_dataset(x_data, y_data, filepath, 
+    save_dataset(x_data_spherical, y_data, filepath, 
                  train_ratio=args.train_ratio, 
                  seed=args.seed)
     
@@ -274,10 +267,10 @@ def main():
     if args.visualize or args.save_plot:
         plot_path = None
         if args.save_plot:
-            plot_path = os.path.join(args.output_dir, 'two_moons_visualization.png')
+            plot_path = os.path.join(args.output_dir, 'spherical_two_moons_visualization.png')
         
         print("Creating visualization...")
-        visualize_dataset(x_data, y_data, save_path=plot_path)
+        visualize_spherical_dataset(x_data_spherical, y_data, save_path=plot_path)
     
     # Test loading the dataset
     print("\nTesting dataset loading...")
@@ -295,8 +288,10 @@ def main():
     print(f"\nDataset ready for VAE_flow training!")
     print(f"Use: x_train = dataset['train']['x'], y_train = dataset['train']['y']")
     print(f"     x_val = dataset['val']['x'], y_val = dataset['val']['y']")
+    print(f"Note: x is 3D coordinates on unit sphere with shape (n_samples, 3)")
     print(f"Note: y is one-hot encoded with shape (n_samples, 2)")
 
 
 if __name__ == "__main__":
     main()
+

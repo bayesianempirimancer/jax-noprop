@@ -636,93 +636,8 @@ class VBVAETrainer:
     
     def _plot_training_progress(self, history: Dict[str, list], save_path: Path):
         """Create training progress plot."""
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-        
-        epochs = range(len(history['train_losses']))
-        
-        # Calculate validation epochs
-        val_epochs = []
-        if len(history['val_losses']) > 0:
-            val_epochs = [i for i in range(len(history['train_losses'])) 
-                         if i % 10 == 0 or i == len(history['train_losses']) - 1]
-            val_epochs = val_epochs[:len(history['val_losses'])]
-        
-        # Total loss
-        axes[0, 0].plot(epochs, history['train_losses'], label='Train', alpha=0.7)
-        if len(history['val_losses']) > 0 and len(val_epochs) == len(history['val_losses']):
-            axes[0, 0].plot(val_epochs, history['val_losses'], label='Val', marker='o', alpha=0.7)
-        axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_ylabel('Total Loss')
-        axes[0, 0].set_title('Total Loss')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True, alpha=0.3)
-        
-        # Reconstruction loss
-        axes[0, 1].plot(epochs, history['train_recon_losses'], label='Train', alpha=0.7)
-        if len(history['val_recon_losses']) > 0 and len(val_epochs) == len(history['val_recon_losses']):
-            axes[0, 1].plot(val_epochs, history['val_recon_losses'], label='Val', marker='o', alpha=0.7)
-        axes[0, 1].set_xlabel('Epoch')
-        axes[0, 1].set_ylabel('Reconstruction Loss')
-        axes[0, 1].set_title('Reconstruction Loss')
-        axes[0, 1].legend()
-        axes[0, 1].grid(True, alpha=0.3)
-        
-        # Empty panel in top row (can be used for additional metrics)
-        axes[0, 2].axis('off')
-        
-        # GMM loss
-        axes[1, 0].plot(epochs, history['train_gmm_losses'], label='Train', alpha=0.7)
-        if len(history['val_gmm_losses']) > 0 and len(val_epochs) == len(history['val_gmm_losses']):
-            axes[1, 0].plot(val_epochs, history['val_gmm_losses'], label='Val', marker='o', alpha=0.7)
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('GMM Loss')
-        axes[1, 0].set_title('GMM Loss')
-        axes[1, 0].legend()
-        axes[1, 0].grid(True, alpha=0.3)
-        
-        # Active clusters over time (if tracked in history)
-        if 'active_clusters' in history and len(history['active_clusters']) > 0:
-            axes[1, 1].plot(epochs, history['active_clusters'], label='Active Clusters', color='green', linewidth=2)
-            axes[1, 1].set_xlabel('Epoch')
-            axes[1, 1].set_ylabel('Number of Active Clusters')
-            axes[1, 1].set_title('Active Clusters Over Time')
-            axes[1, 1].legend()
-            axes[1, 1].grid(True, alpha=0.3)
-        else:
-            axes[1, 1].axis('off')
-        
-        # Normalized mixing weights (alpha_mix normalized) over time
-        if 'normalized_pi' in history and len(history['normalized_pi']) > 0:
-            ax = axes[1, 2]
-            # Get number of clusters
-            num_clusters = len(history['normalized_pi'][0]) if len(history['normalized_pi']) > 0 else 0
-            
-            # Plot top clusters by final mixing weight
-            if num_clusters > 0:
-                final_pi = np.array(history['normalized_pi'][-1])
-                top_cluster_indices = np.argsort(final_pi)[-min(10, num_clusters):][::-1]  # Top 10 clusters
-                
-                # Plot mixing weights over time for top clusters
-                pi_over_time = np.array(history['normalized_pi'])  # [num_epochs, num_clusters]
-                colors = plt.cm.tab10(np.linspace(0, 1, len(top_cluster_indices)))
-                
-                for idx, k in enumerate(top_cluster_indices):
-                    ax.plot(epochs, pi_over_time[:, k], label=f'Cluster {k}', 
-                           color=colors[idx], alpha=0.7, linewidth=1.5)
-                
-                ax.set_xlabel('Epoch')
-                ax.set_ylabel('Normalized Mixing Weight (E[π])')
-                ax.set_title('Top Cluster Mixing Weights Over Time')
-                ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8, ncol=1)
-                ax.grid(True, alpha=0.3)
-            else:
-                ax.axis('off')
-        else:
-            axes[1, 2].axis('off')
-        
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
+        from src.utils.plotting.plot_vae_loss_trends import create_vae_loss_trends_plot
+        create_vae_loss_trends_plot(history, save_path.parent, save_name=save_path.name)
     
     def plot_cluster_means_over_time(
         self,
@@ -738,73 +653,8 @@ class VBVAETrainer:
             save_path: Optional path to save the plot
             top_n_clusters: Number of top clusters to plot
         """
-        if 'cluster_means' not in history or len(history['cluster_means']) == 0:
-            print("Warning: No cluster means tracked in history")
-            return
-        
-        if 'normalized_pi' not in history or len(history['normalized_pi']) == 0:
-            print("Warning: No mixing weights tracked in history")
-            return
-        
-        # Get final mixing weights to determine top clusters
-        final_pi = np.array(history['normalized_pi'][-1])
-        top_cluster_indices = np.argsort(final_pi)[-top_n_clusters:][::-1]  # Top N clusters
-        
-        # Get cluster means over time
-        cluster_means_over_time = np.array(history['cluster_means'])  # [num_epochs, num_clusters, 2]
-        epochs = range(len(cluster_means_over_time))
-        
-        # Create figure
-        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-        fig.suptitle('Cluster Means Over Time (Top Clusters)', fontsize=16, fontweight='bold')
-        
-        colors = plt.cm.tab10(np.linspace(0, 1, len(top_cluster_indices)))
-        
-        # Plot 1: Cluster means trajectory (x1, x2) over epochs
-        ax = axes[0]
-        for idx, k in enumerate(top_cluster_indices):
-            means_k = cluster_means_over_time[:, k, :]  # [num_epochs, 2]
-            ax.plot(means_k[:, 0], means_k[:, 1], 
-                   color=colors[idx], alpha=0.6, linewidth=2, label=f'Cluster {k}')
-            # Mark start and end points
-            ax.scatter(means_k[0, 0], means_k[0, 1], 
-                      color=colors[idx], marker='o', s=100, alpha=0.8, zorder=5)
-            ax.scatter(means_k[-1, 0], means_k[-1, 1], 
-                      color=colors[idx], marker='s', s=100, alpha=0.8, zorder=5)
-        
-        ax.set_xlabel('Latent Dimension 0 (x1)')
-        ax.set_ylabel('Latent Dimension 1 (x2)')
-        ax.set_title(f'Cluster Mean Trajectories (Top {len(top_cluster_indices)} Clusters)\nCircles=Start, Squares=End')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
-        ax.grid(True, alpha=0.3)
-        ax.set_aspect('equal', adjustable='box')
-        
-        # Plot 2: Cluster means over epochs (separate plots for x1 and x2)
-        ax = axes[1]
-        for idx, k in enumerate(top_cluster_indices):
-            means_k = cluster_means_over_time[:, k, :]  # [num_epochs, 2]
-            ax.plot(epochs, means_k[:, 0], 
-                   color=colors[idx], linestyle='-', alpha=0.7, linewidth=1.5, 
-                   label=f'Cluster {k} (x1)')
-            ax.plot(epochs, means_k[:, 1], 
-                   color=colors[idx], linestyle='--', alpha=0.7, linewidth=1.5, 
-                   label=f'Cluster {k} (x2)')
-        
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Cluster Mean Value')
-        ax.set_title(f'Cluster Means Over Time\nSolid=x1, Dashed=x2')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=7, ncol=2)
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"Cluster means plot saved to {save_path}")
-        else:
-            plt.show()
-        
-        plt.close()
+        from src.utils.plotting.plot_vae_loss_trends import create_cluster_means_over_time_plot
+        create_cluster_means_over_time_plot(history, save_path, top_n_clusters)
     
     def plot_cluster_diagnostics(
         self,

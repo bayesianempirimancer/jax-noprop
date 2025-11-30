@@ -11,91 +11,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 
-def create_training_progress_plot(results: Dict[str, Any], output_dir: str):
-    """Create 4-panel training progress plot: Total loss, Reconstruction loss, Flow loss, Residuals vs Targets."""
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    fig.suptitle('Training Progress', fontsize=16, fontweight='bold')
-    
-    epochs = range(len(results['train_losses']))
-    
-    # Panel 1: Total loss
-    axes[0, 0].plot(epochs, results['train_losses'], label='Train', color='blue', linewidth=2)
-    if 'val_losses' in results and len(results['val_losses']) > 0:
-        val_epochs = range(len(results['val_losses']))
-        axes[0, 0].plot(val_epochs, results['val_losses'], label='Validation', color='red', linewidth=2)
-    axes[0, 0].set_title('Total Loss', fontsize=14, fontweight='bold')
-    axes[0, 0].set_xlabel('Epoch')
-    axes[0, 0].set_ylabel('Loss')
-    axes[0, 0].legend()
-    axes[0, 0].grid(True, alpha=0.3)
-    
-    # Panel 2: Reconstruction loss
-    if 'train_recon_losses' in results and len(results['train_recon_losses']) > 0:
-        axes[0, 1].plot(epochs, results['train_recon_losses'], label='Train', color='blue', linewidth=2)
-        if 'val_recon_losses' in results and len(results['val_recon_losses']) > 0:
-            axes[0, 1].plot(val_epochs, results['val_recon_losses'], label='Validation', color='red', linewidth=2)
-    axes[0, 1].set_title('Reconstruction Loss', fontsize=14, fontweight='bold')
-    axes[0, 1].set_xlabel('Epoch')
-    axes[0, 1].set_ylabel('Loss')
-    axes[0, 1].legend()
-    axes[0, 1].grid(True, alpha=0.3)
-    
-    # Panel 3: Flow loss
-    if 'train_flow_losses' in results and len(results['train_flow_losses']) > 0:
-        axes[1, 0].plot(epochs, results['train_flow_losses'], label='Train', color='blue', linewidth=2)
-        if 'val_flow_losses' in results and len(results['val_flow_losses']) > 0:
-            val_epochs = range(len(results['val_flow_losses']))
-            axes[1, 0].plot(val_epochs, results['val_flow_losses'], label='Validation', color='red', linewidth=2)
-    axes[1, 0].set_title('Flow Loss', fontsize=14, fontweight='bold')
-    axes[1, 0].set_xlabel('Epoch')
-    axes[1, 0].set_ylabel('Loss')
-    axes[1, 0].legend()
-    axes[1, 0].grid(True, alpha=0.3)
-    
-    # Panel 4: Residuals vs Targets
-    if 'train_pred' in results and 'train_y' in results:
-        train_pred = np.array(results['train_pred'])
-        train_y = np.array(results['train_y'])
-        val_pred = np.array(results.get('val_pred', []))
-        val_y = np.array(results.get('val_y', []))
-
-        # Flatten
-        train_pred_flat = train_pred.reshape(-1) if train_pred.ndim > 2 else train_pred.flatten()
-        train_y_flat = train_y.reshape(-1) if train_y.ndim > 2 else train_y.flatten()
-
-        # Sample indices
-        n_sample = min(1000, len(train_y_flat))
-        indices = np.random.choice(len(train_y_flat), n_sample, replace=False)
-
-        residuals = train_pred_flat - train_y_flat
-        axes[1, 1].scatter(train_y_flat[indices], residuals[indices], alpha=0.6, s=15, color='blue', label='Train')
-
-        if len(val_pred) > 0 and len(val_y) > 0:
-            val_pred_flat = val_pred.reshape(-1) if val_pred.ndim > 2 else val_pred.flatten()
-            val_y_flat = val_y.reshape(-1) if val_y.ndim > 2 else val_y.flatten()
-            n_val_sample = min(500, len(val_y_flat))
-            val_indices = np.random.choice(len(val_y_flat), n_val_sample, replace=False)
-            val_residuals = val_pred_flat - val_y_flat
-            axes[1, 1].scatter(val_y_flat[val_indices], val_residuals[val_indices], alpha=0.6, s=15, color='red', label='Val')
-
-        axes[1, 1].axhline(y=0, color='k', linestyle='--', linewidth=2)
-        axes[1, 1].set_xlabel('True Values')
-        axes[1, 1].set_ylabel('Residuals (Predicted - True)')
-        axes[1, 1].set_title('Residuals vs Targets', fontsize=14, fontweight='bold')
-        axes[1, 1].legend()
-        axes[1, 1].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plot_file = os.path.join(output_dir, "training_progress.png")
-    plt.savefig(plot_file, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Training progress plot saved to {plot_file}")
-
-
-def create_data_visualization_plot(results: Dict[str, Any], output_dir: str):
-    """Create data visualization plot with more data points."""
+def plot_class_labels(results: Dict[str, Any], output_dir: str):
+    """Create data visualization plot with class labels."""
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
     fig, axes = plt.subplots(1, 2, figsize=(15, 6))
@@ -163,292 +80,6 @@ def create_data_visualization_plot(results: Dict[str, Any], output_dir: str):
     print(f"Data visualization plot saved to {plot_file}")
 
 
-def create_predictions_plot(results: Dict[str, Any], output_dir: str):
-    """Create predictions vs targets plot."""
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    
-    if 'train_pred' not in results or 'train_y' not in results:
-        return
-    
-    train_pred = results['train_pred']
-    train_y = results['train_y']
-    
-    # Convert to numpy if needed
-    if hasattr(train_pred, 'shape'):
-        pred_np = np.array(train_pred)
-    else:
-        pred_np = train_pred
-    
-    if hasattr(train_y, 'shape'):
-        y_np = np.array(train_y)
-    else:
-        y_np = train_y
-    
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle('Predictions vs Targets', fontsize=16)
-    
-    # Flatten for plotting if needed
-    if pred_np.ndim > 2:
-        pred_flat = pred_np.reshape(-1)
-    else:
-        pred_flat = pred_np.flatten()
-    
-    if y_np.ndim > 2:
-        y_flat = y_np.reshape(-1)
-    else:
-        y_flat = y_np.flatten()
-    
-    # Scatter plot
-    axes[0].scatter(y_flat, pred_flat, alpha=0.6)
-    axes[0].plot([y_flat.min(), y_flat.max()], [y_flat.min(), y_flat.max()], 'r--', lw=2)
-    axes[0].set_xlabel('Target')
-    axes[0].set_ylabel('Prediction')
-    axes[0].set_title('Predictions vs Targets')
-    axes[0].grid(True)
-    
-    # Residuals
-    residuals = pred_flat - y_flat
-    axes[1].scatter(y_flat, residuals, alpha=0.6)
-    axes[1].axhline(y=0, color='r', linestyle='--')
-    axes[1].set_xlabel('Target')
-    axes[1].set_ylabel('Residuals')
-    axes[1].set_title('Residuals')
-    axes[1].grid(True)
-    
-    plt.tight_layout()
-    plot_file = os.path.join(output_dir, "predictions.png")
-    plt.savefig(plot_file, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Predictions plot saved to {plot_file}")
-
-
-def create_trajectory_plot(results: Dict[str, Any], model, params, output_dir: str):
-    """Create trajectory plot using the trajectory plotting utilities."""
-    try:
-        from src.utils.plotting.plot_trajectories import create_simple_trajectory_plot
-        
-        # Get sample data for trajectory generation
-        if 'train_x' not in results or 'train_y' not in results:
-            return
-        
-        # Sample a few points for trajectory visualization
-        train_x = np.array(results['train_x'])
-        train_y = np.array(results['train_y'])
-        n_samples = min(5, len(train_x))
-        
-        # Get trajectories using the model's predict method
-        x_sample = train_x[:n_samples]
-        y_sample = train_y[:n_samples]
-        
-        # Generate trajectories using the model
-        trajectories = []
-        for i in range(n_samples):
-            x_single = x_sample[i:i+1]  # Keep batch dimension
-            y_single = y_sample[i:i+1]
-            traj = model.predict(
-                params, 
-                x_single, 
-                num_steps=20, 
-                output_type="trajectory"
-            )
-            if traj.ndim == 3 and traj.shape[1] == 1:
-                traj = traj[:, 0, :]  # Remove batch dimension
-            trajectories.append(traj)
-        
-        trajectories = np.array(trajectories)  # Shape: [n_samples, n_steps, output_dim]
-        
-        # Create trajectory plot
-        plot_file = os.path.join(output_dir, "trajectories.png")
-        create_simple_trajectory_plot(
-            trajectories=trajectories,
-            targets=y_sample,
-            output_path=plot_file,
-            model_name="Model",
-            num_samples=n_samples
-        )
-        
-    except Exception:
-        import traceback
-        traceback.print_exc()
-
-
-def create_trajectory_diagnostics_plot(results: Dict[str, Any], model, params, output_dir: str):
-    """Create trajectory diagnostics plot using the trajectory plotting utilities."""
-    try:
-        from src.utils.plotting.plot_trajectories import create_trajectory_diagnostic_plot
-        
-        # Get sample data for trajectory generation
-        if 'train_x' not in results or 'train_y' not in results:
-            return
-        
-        # Sample more points for diagnostics
-        train_x = np.array(results['train_x'])
-        train_y = np.array(results['train_y'])
-        n_samples = min(10, len(train_x))
-        
-        # Get trajectories using the model's predict method
-        x_sample = train_x[:n_samples]
-        y_sample = train_y[:n_samples]
-        
-        trajectories = []
-        for i in range(n_samples):
-            x_single = x_sample[i:i+1]  # Keep batch dimension
-            y_single = y_sample[i:i+1]
-            traj = model.predict(
-                params, 
-                x_single, 
-                num_steps=20, 
-                output_type="trajectory"
-            )
-            if traj.ndim == 3 and traj.shape[1] == 1:
-                traj = traj[:, 0, :]  # Remove batch dimension
-            trajectories.append(traj)
-        
-        trajectories = np.array(trajectories)  # Shape: [n_samples, n_steps, output_dim]
-        
-        # Create trajectory diagnostics plot
-        plot_file = os.path.join(output_dir, "trajectory_diagnostics.png")
-        create_trajectory_diagnostic_plot(
-            trajectories=trajectories,
-            targets=y_sample,
-            output_path=plot_file,
-            model_name="Model",
-            num_samples=n_samples
-        )
-        
-    except Exception:
-        import traceback
-        traceback.print_exc()
-
-
-def create_loss_trends_plot(history: Dict[str, Any], model_type: str, output_dir: str):
-    """
-    Plot loss terms over training epochs to diagnose training issues.
-    Always uses 2x3 layout with 6 panels.
-    
-    Args:
-        history: Training history dictionary containing loss values
-        model_type: Type of model ('flow_matching', 'diffusion', 'ct')
-        output_dir: Directory to save the plot
-    """
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    
-    # Always use 2x3 layout
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle(f'Loss Trends - {model_type.title()} Model', fontsize=16, fontweight='bold')
-    
-    epochs = range(len(history['train_losses']))
-    
-    # Total Loss
-    ax = axes[0, 0]
-    ax.plot(epochs, history['train_losses'], label='Train Total', color='blue', linewidth=2)
-    if history.get('val_losses') and len(history['val_losses']) > 0:
-        ax.plot(epochs, history['val_losses'], label='Val Total', color='red', linewidth=2, linestyle='--')
-    ax.set_title('Total Loss', fontsize=12, fontweight='bold')
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Loss')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # Flow Loss
-    ax = axes[0, 1]
-    ax.plot(epochs, history['train_flow_losses'], label='Train Flow', color='green', linewidth=2)
-    if history.get('val_flow_losses') and len(history['val_flow_losses']) > 0:
-        ax.plot(epochs, history['val_flow_losses'], label='Val Flow', color='orange', linewidth=2, linestyle='--')
-    ax.set_title('Flow Loss', fontsize=12, fontweight='bold')
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Loss')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # Reconstruction Loss
-    ax = axes[0, 2]
-    ax.plot(epochs, history['train_recon_losses'], label='Train Recon', color='purple', linewidth=2)
-    if history.get('val_recon_losses') and len(history['val_recon_losses']) > 0:
-        ax.plot(epochs, history['val_recon_losses'], label='Val Recon', color='brown', linewidth=2, linestyle='--')
-    ax.set_title('Reconstruction Loss', fontsize=12, fontweight='bold')
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Loss')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # Regularization Loss
-    ax = axes[1, 0]
-    ax.plot(epochs, history['train_reg_losses'], label='Train Reg', color='cyan', linewidth=2)
-    if history.get('val_reg_losses') and len(history['val_reg_losses']) > 0:
-        ax.plot(epochs, history['val_reg_losses'], label='Val Reg', color='magenta', linewidth=2, linestyle='--')
-    ax.set_title('Regularization Loss', fontsize=12, fontweight='bold')
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Loss')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # Percent Variance Explained (R²)
-    ax = axes[1, 1]
-    train_pve = []
-    val_pve = []
-    
-    # Use per-epoch PVE values if available
-    if 'train_pve' in history and len(history['train_pve']) > 0:
-        train_pve = history['train_pve']
-    # Fallback to computing from final predictions if per-epoch values not available
-    elif 'train_pred' in history and 'train_y' in history:
-        train_pred = np.array(history['train_pred'])
-        train_y = np.array(history['train_y'])
-                
-        # Calculate R² = 1 - (SS_res / SS_tot)
-        ss_res = np.sum((train_y - train_pred) ** 2)
-        ss_tot = np.sum((train_y - np.mean(train_y, axis=0, keepdims=True)) ** 2)
-        if ss_tot > 0:
-            r2_train = 1 - (ss_res / ss_tot)
-            train_pve = [r2_train * 100] * len(epochs)  # Same value for all epochs (final predictions)
-    
-    if 'val_pve' in history and len(history['val_pve']) > 0:
-        val_pve = history['val_pve']
-    # Fallback to computing from final predictions if per-epoch values not available
-    elif 'val_pred' in history and 'val_y' in history and len(history.get('val_pred', [])) > 0:
-        val_pred = np.array(history['val_pred'])
-        val_y = np.array(history['val_y'])
-        # Calculate R²
-        ss_res = np.sum((val_y - val_pred) ** 2)
-        ss_tot = np.sum((val_y - np.mean(val_y, axis=0, keepdims=True)) ** 2)
-        if ss_tot > 0:
-            r2_val = 1 - (ss_res / ss_tot)
-            val_pve = [r2_val * 100] * len(epochs)  # Same value for all epochs (final predictions)
-    
-    if len(train_pve) > 0:
-        ax.plot(epochs[:len(train_pve)], train_pve, label='Train % Variance Explained', color='darkgreen', linewidth=2)
-    if len(val_pve) > 0:
-        ax.plot(epochs[:len(val_pve)], val_pve, label='Val % Variance Explained', color='darkred', linewidth=2, linestyle='--')
-    
-    ax.set_title('% Variance Explained (R²)', fontsize=12, fontweight='bold')
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('% Variance Explained', color='darkgreen')
-    ax.tick_params(axis='y', labelcolor='darkgreen')
-    if len(train_pve) > 0 or len(val_pve) > 0:
-        ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # VAE Loss
-    ax = axes[1, 2]
-    if history.get('train_vae_losses') and len(history['train_vae_losses']) > 0:
-        ax.plot(epochs, history['train_vae_losses'], label='Train VAE', color='teal', linewidth=2)
-        if history.get('val_vae_losses') and len(history['val_vae_losses']) > 0:
-            ax.plot(epochs, history['val_vae_losses'], label='Val VAE', color='coral', linewidth=2, linestyle='--')
-        ax.set_title('VAE Loss', fontsize=12, fontweight='bold')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Loss')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-    else:
-        ax.axis('off')
-        ax.text(0.5, 0.5, 'VAE Loss\n(Not Available)', ha='center', va='center', fontsize=12, alpha=0.5)
-    
-    fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, 'loss_trends.png'), dpi=200, bbox_inches='tight')
-    plt.close(fig)
-
-
 def create_all_regression_plots(results: Dict[str, Any], model, params, output_dir: str, model_type: Optional[str] = None):
     """Create all diagnostic plots for regression tasks.
     
@@ -463,7 +94,7 @@ def create_all_regression_plots(results: Dict[str, Any], model, params, output_d
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
     try:
-        # 1. Loss Trends Plot (2x3 layout with VAE loss)
+        # 1. Loss Trends Plot (unified 8-panel layout)
         if 'train_losses' in results and len(results['train_losses']) > 0:
             # Get model_type from parameter, model attribute, or infer from class name
             if model_type is None:
@@ -477,19 +108,42 @@ def create_all_regression_plots(results: Dict[str, Any], model, params, output_d
                     model_type = 'ct'
                 else:
                     model_type = 'flow_matching'
+            from src.utils.plotting.plot_loss_trends import create_loss_trends_plot
             create_loss_trends_plot(results, model_type, output_dir)
         
         # 2. Data visualization
         if 'train_x' in results and 'train_y' in results:
-            create_data_visualization_plot(results, output_dir)
+            plot_class_labels(results, output_dir)
         
         # 3. Trajectory plot
-        if 'train_pred' in results and 'train_y' in results:
-            create_trajectory_plot(results, model, params, output_dir)
-        
-        # 4. Trajectory diagnostics plot
-        if 'train_pred' in results and 'train_y' in results:
-            create_trajectory_diagnostics_plot(results, model, params, output_dir)
+        if 'train_x' in results and 'train_y' in results:
+            from src.utils.plotting.plot_trajectories import create_simple_trajectory_plot
+            
+            train_x = np.array(results['train_x'])
+            train_y = np.array(results['train_y'])
+            
+            # Trajectory plot (5 samples)
+            n_samples = min(5, len(train_x))
+            x_sample = train_x[:n_samples]
+            y_sample = train_y[:n_samples]
+            
+            trajectories = []
+            for i in range(n_samples):
+                x_single = x_sample[i:i+1]  # Keep batch dimension
+                traj = model.predict(params, x_single, num_steps=20, output_type="trajectory")
+                if traj.ndim == 3 and traj.shape[1] == 1:
+                    traj = traj[:, 0, :]  # Remove batch dimension
+                trajectories.append(traj)
+            
+            trajectories = np.array(trajectories)  # Shape: [n_samples, n_steps, output_dim]
+            plot_file = os.path.join(output_dir, "trajectories.png")
+            create_simple_trajectory_plot(
+                trajectories=trajectories,
+                targets=y_sample,
+                output_path=plot_file,
+                model_name="Model",
+                num_samples=n_samples
+            )
             
     except Exception as e:
         import traceback

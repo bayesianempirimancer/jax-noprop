@@ -73,19 +73,19 @@ See the [Two Moons Example README](examples/two_moons/README.md) for a complete 
 python examples/two_moons/generate_two_moons.py
 
 # Regression: Predict labels from coordinates
-python -m src.flow_models.train \
+python -m src.flow_models.trainers.train \
     --config_file examples/two_moons/config.yaml \
     --data_path data/two_moons.pkl \
     --model_type flow_matching
 
 # Conditional Generation: Generate coordinates from labels
-python -m src.flow_models.train_gen \
+python -m src.flow_models.trainers.train_gen \
     --config_file examples/two_moons/config.yaml \
     --data_path data/two_moons.pkl \
     --model_type flow_matching
 
 # Unconditional Generation: Generate coordinates without labels
-python -m src.flow_models.train_gen \
+python -m src.flow_models.trainers.train_gen \
     --config_file examples/two_moons/config.yaml \
     --data_path data/two_moons.pkl \
     --model_type flow_matching \
@@ -118,13 +118,13 @@ All training scripts support YAML configuration files:
 
 ```bash
 # Use a YAML config file (recommended)
-python -m src.flow_models.train_gen \
+python -m src.flow_models.trainers.train_gen \
     --config_file examples/two_moons/config.yaml \
     --data_path data/two_moons.pkl \
     --model_type flow_matching
 
 # Use a custom config class
-python -m src.flow_models.train_gen \
+python -m src.flow_models.trainers.train_gen \
     --config_file examples/two_moons/config.yaml \
     --config_class examples.two_moons.config.Config \
     --data_path data/two_moons.pkl \
@@ -137,7 +137,7 @@ Command-line arguments override values in config files.
 
 ```bash
 # Generate samples without conditioning
-python -m src.flow_models.train_gen \
+python -m src.flow_models.trainers.train_gen \
     --config_file examples/two_moons/config.yaml \
     --data_path data/two_moons.pkl \
     --model_type flow_matching \
@@ -149,7 +149,7 @@ python -m src.flow_models.train_gen \
 
 ```bash
 # Override config file values via command line
-python -m src.flow_models.train_gen \
+python -m src.flow_models.trainers.train_gen \
     --config_file examples/two_moons/config.yaml \
     --data_path data/two_moons.pkl \
     --model_type flow_matching \
@@ -163,7 +163,7 @@ python -m src.flow_models.train_gen \
 
 ```bash
 # Override noise schedule (for diffusion/CT models)
-python -m src.flow_models.train_gen \
+python -m src.flow_models.trainers.train_gen \
     --config_file examples/two_moons/config.yaml \
     --data_path data/two_moons.pkl \
     --model_type diffusion \
@@ -176,7 +176,7 @@ python -m src.flow_models.train_gen \
 
 ```bash
 # Use dropout for first 80 epochs, then disable it
-python -m src.flow_models.train_gen \
+python -m src.flow_models.trainers.train_gen \
     --config_file examples/two_moons/config.yaml \
     --data_path data/two_moons.pkl \
     --model_type flow_matching \
@@ -215,7 +215,7 @@ python -m src.flow_models.train_gen \
 ### Training a Model
 
 ```python
-from src.flow_models.trainer_gen import GenerationTrainer
+from src.flow_models.trainers.trainer import Trainer
 from src.flow_models.config import Config
 
 # Load configuration from YAML or create default
@@ -224,12 +224,12 @@ config = Config.load_yaml('examples/two_moons/config.yaml')
 # config = Config()
 
 # Create trainer
-trainer = GenerationTrainer(
+trainer = Trainer(
     config=config,
     learning_rate=1e-3,
     optimizer_name='adam',
     seed=42,
-    unconditional=False  # Set to True for unconditional generation
+    model_type='flow_matching'
 )
 
 # Initialize and train
@@ -313,7 +313,7 @@ x_gen = trainer.unconditional_generate(
 
 - `--unconditional`: Train for unconditional generation (only for `train_gen.py`)
 
-See `python -m src.flow_models.train --help`, `python -m src.flow_models.train_gen --help`, or `python -m src.flow_models.train_seq --help` for full lists of options.
+See `python -m src.flow_models.trainers.train --help`, `python -m src.flow_models.trainers.train_gen --help`, or `python -m src.flow_models.trainers.train_seq --help` for full lists of options.
 
 ## Project Structure
 
@@ -321,21 +321,17 @@ See `python -m src.flow_models.train --help`, `python -m src.flow_models.train_g
 jax-noprop/
 ├── src/
 │   ├── flow_models/
-│   │   ├── fm.py              # Flow Matching implementation
-│   │   ├── df.py              # Diffusion implementation
-│   │   ├── ct.py              # Continuous-Time implementation
+│   │   ├── flow_model.py      # Unified Flow Model implementation
 │   │   ├── config.py          # Unified Config class
-│   │   ├── train.py           # Regression/classification training CLI
-│   │   ├── train_gen.py       # Generation training CLI
-│   │   ├── train_seq.py       # Sequence training CLI
-│   │   ├── trainer.py         # Regression trainer
-│   │   ├── trainer_gen.py     # Generation trainer
-│   │   ├── trainer_seq.py      # Sequence trainer
-│   │   └── training_utils.py  # Shared training utilities
+│   │   ├── trainers/
+│   │   │   ├── train.py       # Regression/classification training CLI
+│   │   │   ├── train_gen.py   # Generation training CLI
+│   │   │   ├── trainer.py     # Unified trainer
+│   │   │   └── training_utils.py # Shared training utilities
 │   ├── configs/
 │   │   └── base_config.py     # BaseConfig class with YAML support
 │   ├── embeddings/
-│   │   └── noise_schedules.py # Noise schedule implementations
+│   │   └── flow_schedules.py  # Flow schedule implementations
 │   └── vae/                   # Encoder/decoder architectures
 ├── examples/
 │   └── two_moons/             # Two moons dataset example

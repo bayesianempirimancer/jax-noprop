@@ -37,6 +37,7 @@ def get_encoder_class(encoder_type: str):
         'resnet_normal': ResNetNormalEncoder,
         'identity': IdentityEncoder,
         'linear': LinearEncoder,
+        'spherical_projection': SphericalProjectionEncoder,
     }
     
     if encoder_type not in ENCODER_CLASSES:
@@ -284,12 +285,16 @@ class IdentityEncoder(nn.Module):
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        # Identity function - return input unchanged, but ensure it matches latent_shape
-        batch_shape = x.shape[:-len(self.input_shape)]
-        # Flatten input to (batch, input_dim)
-        x_flat = x.reshape(-1, self.input_dim)
-        # Reshape to match latent_shape
-        return x_flat.reshape(batch_shape + self.latent_shape)
+        # Identity function with optional learnable scale parameter
+        rescale = self.config.get("rescale", False)
+        if rescale:
+            # Learnable scale parameter (initialized to 5.0 by default)
+            scale_init = self.config.get("scale_init", 5.0)
+            scale = self.param('scale', nn.initializers.constant(scale_init), ())
+            return x * scale
+        else:
+            # True identity: return input unchanged
+            return x
 
 
 class LinearEncoder(nn.Module):
@@ -323,3 +328,43 @@ class LinearEncoder(nn.Module):
         
         # Reshape to latent shape
         return output.reshape(batch_shape + self.latent_shape)
+
+
+class SphericalProjectionEncoder(nn.Module):
+    """Spherical projection encoder that applies a single Dense layer."""
+    config: dict
+    input_shape: Tuple[int,...]
+    latent_shape: Tuple[int]
+
+    @cached_property
+    def input_dim(self) -> int:
+        total_dim = 1
+        for dim in self.input_shape:
+            total_dim *= dim
+        return total_dim
+
+    @cached_property
+    def latent_dim(self) -> int:
+        total_dim = 1
+        for dim in self.latent_shape:
+            total_dim *= dim
+        return total_dim
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+        batch_shape = x.shape[:-len(self.input_shape)]
+        x_flat = x.reshape(-1, self.input_dim)
+        
+
+        x_flat = jnp.concatenate([x_flat, jnp.ones((x_flat.shape[0], self.latent_dim - x_flat.shape[-1]))], axis=-1)
+        
+        # Apply L2 normalization to project onto unit sphere
+        x_flat = x_flat / jnp.linalg.norm(x_flat, axis=-1, keepdims=True)
+        
+        # Learnable scale parameter (initialized to 5.0 by default)
+        scale_init = self.config.get("scale_init", 5.0)
+        scale = self.param('scale', nn.initializers.constant(scale_init), ())
+        x_flat = x_flat * scale
+
+        return x_flat.reshape(batch_shape + self.latent_shape)
+    

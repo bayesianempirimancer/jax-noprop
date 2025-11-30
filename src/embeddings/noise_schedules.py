@@ -49,19 +49,6 @@ All noise schedules are Flax Linen modules with learnable parameters. Here's how
    alpha_bar = schedule.apply({"params": params}, t, method=schedule.get_alpha_bar)
    alpha_bar, gamma_prime = schedule.apply({"params": params}, t, method=schedule.get_alpha_bar_gamma_prime)
 
-3. Training with learnable parameters:
-   
-   All parameters are automatically included in the params dict and will be updated
-   during training. Parameters are transformed to enforce constraints:
-   - Positive parameters use softplus transformation
-   - Bounded parameters use sigmoid + scaling
-   - Ordering constraints (e.g., max > min) are enforced via delta parameters
-   
-   # Parameters are automatically learned during optimization
-   loss = compute_loss(model, params, data)
-   grads = jax.grad(loss)(params)  # gradients include schedule parameters
-   params = optimizer.update(grads, params)
-
 4. Using the factory function:
    
    schedule = create_noise_schedule("linear")
@@ -281,6 +268,22 @@ class NoiseSchedule(nn.Module):
         alpha_bar_t, gamma_prime_t = self.alpha_bar_gamma_prime(variables, t)
         return alpha_bar_t * (1.0 - alpha_bar_t) * gamma_prime_t
 
+    def lazy_noise_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t
+    def lazy_target_snr(self, alpha_t, gamma_prime_t): return gamma_prime_t * alpha_t / (1.0 - alpha_t)
+    def lazy_error_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t / (1.0 - alpha_t)
+    def lazy_score_snr(self, alpha_t, gamma_prime_t):  return gamma_prime_t * (1.0 - alpha_t)
+    def lazy_flow_snr(self, alpha_t, gamma_prime_t):   return  1.0 / ((1.0 - alpha_t) * gamma_prime_t)
+
+    def lazy_score(self, z_t, z_target, alpha_t):     return (jnp.sqrt(alpha_t)*z_target - z_t) / (1.0 - alpha_t)
+    def lazy_error(self, z_t, z_target, alpha_t):     return z_t - jnp.sqrt(alpha_t)* z_target
+    def lazy_noise(self, z_t, z_target, alpha_t):     return self.lazy_error(z_t, z_target, alpha_t) / jnp.sqrt(1.0 - alpha_t)
+
+    def lazy_flow_from_noise(self, z_t, noise, alpha_t, gamma_prime_t):
+        return 0.5 * gamma_prime_t * ((1.0 - alpha_t) * z_t - jnp.sqrt(1.0 - alpha_t) * noise)
+
+    def lazy_flow_from_target(self, z_t, z_target, alpha_t, gamma_prime_t):
+        return 0.5 * gamma_prime_t * (jnp.sqrt(alpha_t) * z_target - alpha_t * z_t)
+
 
 class LinearNoiseSchedule(NoiseSchedule):
     """Linear noise schedule with learnable parameters.
@@ -342,6 +345,52 @@ class LinearNoiseSchedule(NoiseSchedule):
         self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None
     ) -> jnp.ndarray:
         return self._get_alpha_bar_gamma_prime(t, params)[0]
+
+class QuadraticNoiseSchedule(NoiseSchedule):
+    """Quadratic noise schedule with learnable parameters.
+    
+    Uses a quadratic parameterization: alpha_bar(t) = alpha_bar_min + (alpha_bar_max - alpha_bar_min) * t^2
+    
+    All parameters are learnable:
+    - alpha_bar_min: bounded to [0.001, 0.999]
+    - alpha_bar_max: alpha_bar_min + delta_fraction * (0.999 - alpha_bar_min) to ensure max > min and max <= 0.999
+    """
+    alpha_bar_min: float = 0.01  # Initial alpha_bar_min value (safe: max gamma_prime ~7.50)
+    alpha_bar_max: float = 0.99  # Initial alpha_bar_max value (safe: max gamma_prime ~7.50)
+
+    @staticmethod
+    def default_params() -> Dict[str, Any]:
+        """Return default parameter dictionary for this schedule.
+        """
+        return {
+            "alpha_bar_min": 0.01,
+            "alpha_bar_max": 0.99,
+        }
+
+    @nn.compact
+    def _get_alpha_bar_gamma_prime(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """Get alpha_bar(t) for quadratic schedule."""
+        if params is not None:
+            alpha_bar_min = jnp.clip(params['alpha_bar_min'], self.alpha_bar_min, self.alpha_bar_max)
+            alpha_bar_max = jnp.clip(params['alpha_bar_max'], alpha_bar_min, self.alpha_bar_max)
+        else:
+            alpha_bar_min = self.param('alpha_bar_min', nn.initializers.constant(self.alpha_bar_min), ())
+            alpha_bar_max = self.param('alpha_bar_max', nn.initializers.constant(self.alpha_bar_max), ())
+
+            alpha_bar_min = jnp.clip(alpha_bar_min, self.alpha_bar_min, self.alpha_bar_max)
+            alpha_bar_max = jnp.clip(alpha_bar_max, alpha_bar_min, self.alpha_bar_max)
+
+        delta_alpha = alpha_bar_max - alpha_bar_min
+
+        alpha_bar_t = alpha_bar_min + delta_alpha * t**2
+        gamma_prime_t = 2.0 * delta_alpha * t / (1.0 - alpha_bar_t) / alpha_bar_t
+        gamma_prime_t = jnp.clip(gamma_prime_t, 0.0, self.gamma_prime_max)
+
+        return alpha_bar_t, gamma_prime_t
+
+    def _get_alpha_bar(self, t: jnp.ndarray, params: Optional[Dict[str, Any]] = None) -> jnp.ndarray:
+        return self._get_alpha_bar_gamma_prime(t, params)[0]
+
         
 class CosineNoiseSchedule(NoiseSchedule):
     """Cosine noise schedule with learnable parameters.
@@ -395,9 +444,8 @@ class CosineNoiseSchedule(NoiseSchedule):
             s_max_val = jnp.clip(s_max_val, s_min_val, s_max)
 
         s = s_min_val + (s_max_val-s_min_val) * t        
-        sin_s_squared = jnp.sin(s)**2
-        alpha_bar_t = self.alpha_bar_min + (self.alpha_bar_max - self.alpha_bar_min) * sin_s_squared
-        alpha_bar_prime_t = 2.0 * jnp.sin(s) * jnp.cos(s) * (s_max_val - s_min_val) * (self.alpha_bar_max - self.alpha_bar_min)
+        alpha_bar_t = jnp.sin(s)**2
+        alpha_bar_prime_t = 2.0 * jnp.sin(s) * jnp.cos(s) * (s_max_val - s_min_val)
 
         gamma_prime_t = alpha_bar_prime_t / (alpha_bar_t * (1.0 - alpha_bar_t))
         gamma_prime_t = jnp.clip(gamma_prime_t, 0.0, self.gamma_prime_max)

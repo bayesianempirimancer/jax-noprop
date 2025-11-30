@@ -37,10 +37,10 @@ def plot_noise_schedules(
     num_points: int = 1000,
     default_params: Optional[dict] = None,
     output_path: Optional[str] = None,
-    figsize: tuple = (14, 6)
+    figsize: tuple = (20, 6)
 ):
     """
-    Plot alpha_bar and gamma values for different noise schedules.
+    Plot alpha_bar, gamma_prime, and SNR values for different noise schedules.
     
     Args:
         schedule_types: List of schedule types to plot. If None, plots all available types.
@@ -82,8 +82,9 @@ def plot_noise_schedules(
     # Initialize JAX random key
     key = jax.random.PRNGKey(42)
     
-    # Create figure with two panels
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    # Create figure with five panels
+    fig, axes = plt.subplots(1, 5, figsize=figsize)
+    ax1, ax2, ax3, ax4, ax5 = axes
     
     # Colors for different schedules
     colors = plt.cm.tab10(np.linspace(0, 1, len(schedule_types)))
@@ -116,15 +117,37 @@ def plot_noise_schedules(
             alpha_bar = np.array(alpha_bar_gamma_prime[0])
             gamma_prime = np.array(alpha_bar_gamma_prime[1])
             
+            # Compute SNR values using formulas from lazy routines
+            # target_snr = gamma_prime * alpha_bar / (1.0 - alpha_bar)
+            target_snr = gamma_prime * alpha_bar / (1.0 - alpha_bar + 1e-8)  # Add small epsilon to avoid division by zero
+            
+            # noise_snr = gamma_prime
+            noise_snr = gamma_prime
+            
+            # flow_snr = 1.0 / ((1.0 - alpha_bar) * gamma_prime)
+            flow_snr = 1.0 / ((1.0 - alpha_bar + 1e-8) * (gamma_prime + 1e-8))
+            
             # Plot alpha_bar
             ax1.plot(t, alpha_bar, label=schedule_type, color=colors[i], linewidth=2, alpha=0.8)
             
             # Plot gamma_prime
             ax2.plot(t, gamma_prime, label=schedule_type, color=colors[i], linewidth=2, alpha=0.8)
             
+            # Plot target_snr
+            ax3.plot(t, target_snr, label=schedule_type, color=colors[i], linewidth=2, alpha=0.8)
+            
+            # Plot noise_snr
+            ax4.plot(t, noise_snr, label=schedule_type, color=colors[i], linewidth=2, alpha=0.8)
+            
+            # Plot flow_snr
+            ax5.plot(t, flow_snr, label=schedule_type, color=colors[i], linewidth=2, alpha=0.8)
+            
             results[schedule_type] = {
                 'alpha_bar': alpha_bar,
-                'gamma_prime': gamma_prime
+                'gamma_prime': gamma_prime,
+                'target_snr': target_snr,
+                'noise_snr': noise_snr,
+                'flow_snr': flow_snr
             }
             
         except Exception as e:
@@ -147,6 +170,33 @@ def plot_noise_schedules(
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc='best', fontsize=10)
     ax2.set_xlim(t_range)
+    
+    # Format target_snr panel
+    ax3.set_xlabel('Time t', fontsize=12)
+    ax3.set_ylabel(r'Target SNR', fontsize=14)
+    ax3.set_title('Target SNR', fontsize=14, fontweight='bold')
+    ax3.grid(True, alpha=0.3)
+    ax3.legend(loc='best', fontsize=10)
+    ax3.set_xlim(t_range)
+    ax3.set_yscale('log')  # Use log scale for SNR values
+    
+    # Format noise_snr panel
+    ax4.set_xlabel('Time t', fontsize=12)
+    ax4.set_ylabel(r'Noise SNR', fontsize=14)
+    ax4.set_title('Noise SNR', fontsize=14, fontweight='bold')
+    ax4.grid(True, alpha=0.3)
+    ax4.legend(loc='best', fontsize=10)
+    ax4.set_xlim(t_range)
+    ax4.set_yscale('log')  # Use log scale for SNR values
+    
+    # Format flow_snr panel
+    ax5.set_xlabel('Time t', fontsize=12)
+    ax5.set_ylabel(r'Flow SNR', fontsize=14)
+    ax5.set_title('Flow SNR', fontsize=14, fontweight='bold')
+    ax5.grid(True, alpha=0.3)
+    ax5.legend(loc='best', fontsize=10)
+    ax5.set_xlim(t_range)
+    ax5.set_yscale('log')  # Use log scale for SNR values
     
     plt.tight_layout()
     

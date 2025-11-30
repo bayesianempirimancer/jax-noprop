@@ -36,7 +36,7 @@ Usage Examples:
     new_config = replace(config, main=updated_main)
 """
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import Dict, Any, TypeVar, Union, Optional
 import copy
 import json
@@ -87,6 +87,38 @@ class BaseConfig:
         # Use merge_frozen_dict_impl for the actual merging
         return self.merge_frozen_dict_impl(base, updates)
     
+    def merge_updates(self: T, updates: Dict[str, Any]) -> T:
+        """
+        Merge a dictionary of updates into the config.
+        
+        Args:
+            updates: Dictionary where keys match config fields. 
+                     Values can be nested dicts (merged) or values (replaced).
+                     
+        Returns:
+            New config instance with updates applied.
+        """
+        changes = {}
+        for field_name, update_val in updates.items():
+            if not hasattr(self, field_name):
+                continue
+                
+            current_val = getattr(self, field_name)
+            
+            # Apply filter_none if it's a dict, to avoid merging Nones?
+            # Or assume caller handles it. 
+            # config.py uses filter_none.
+            # Let's just merge what is given.
+            
+            if isinstance(current_val, (FrozenDict, dict)) and isinstance(update_val, (dict, FrozenDict)):
+                # Use existing merge logic for dict fields
+                changes[field_name] = self.merge_frozen_dict(field_name, update_val)
+            else:
+                # Direct replacement for non-dict fields
+                changes[field_name] = update_val
+                
+        return replace(self, **changes)
+
     def merge_frozen_dict_impl(self, base: Union[FrozenDict, dict], updates: Union[FrozenDict, dict]) -> FrozenDict:
         """
         Internal helper method to merge updates into a base FrozenDict/dict.
@@ -210,12 +242,13 @@ class BaseConfig:
         
         return cls(**config_dict)
     
-    def save_yaml(self, filepath: Union[str, Path]):
+    def save_yaml(self, filepath: Union[str, Path], desired_order: Optional[list] = None):
         """
         Save configuration to a YAML file.
         
         Args:
             filepath: Path to save the YAML file to
+            desired_order: Optional list of keys to order the output. Default order provided if None.
             
         Example:
             config.save_yaml('config.yaml')
@@ -225,18 +258,20 @@ class BaseConfig:
         
         config_dict = self._prepare_for_serialization()
         
-        # Reorder keys to desired order: model_name, main, noise_schedule, encoder, decoder, crn
+        # Reorder keys to desired order
         # Any additional keys will be appended at the end
-        desired_order = ['model_name', 'main', 'noise_schedule', 'encoder', 'decoder', 'crn']
-        ordered_dict = {}
-        # Add keys in desired order
-        for key in desired_order:
-            if key in config_dict:
-                ordered_dict[key] = config_dict[key]
-        # Add any remaining keys that weren't in the desired order
-        for key, value in config_dict.items():
-            if key not in ordered_dict:
-                ordered_dict[key] = value
+        if desired_order is None:
+            ordered_dict = config_dict
+        else:
+            ordered_dict = {}
+            # Add keys in desired order
+            for key in desired_order:
+                if key in config_dict:
+                    ordered_dict[key] = config_dict[key]
+            # Add any remaining keys that weren't in the desired order
+            for key, value in config_dict.items():
+                if key not in ordered_dict:
+                    ordered_dict[key] = value
         
         filepath = self._prepare_save_path(filepath)
         

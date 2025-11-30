@@ -50,6 +50,7 @@ def get_decoder_class(decoder_type: str):
         'resnet': ResNetDecoder,
         'identity': IdentityDecoder,
         'linear': LinearDecoder,
+        'spherical_projection': SphericalProjectionDecoder,
     }
     
     if decoder_type not in DECODER_CLASSES:
@@ -201,25 +202,16 @@ class IdentityDecoder(nn.Module):
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        # For identity model_type, always return x as-is (reshape if needed to match output_shape)
-        # Determine desired batch shape and reshape if total elements match
-        batch_ndims = x.ndim - len(self.latent_shape) if self.latent_shape is not None else x.ndim - len(self.output_shape)
-        batch_ndims = max(batch_ndims, 1)
-        batch_shape = x.shape[:batch_ndims]
-        # If already in desired output shape, return directly
-        if x.shape[-len(self.output_shape):] == self.output_shape:
+        # Identity decoder with optional learnable scale parameter
+        rescale = self.config.get("rescale", False)
+        if rescale:
+            # Learnable scale parameter (initialized to 5.0 by default)
+            scale_init = self.config.get("scale_init", 5.0)
+            scale = self.param('scale', nn.initializers.constant(scale_init), ())
+            return x * scale
+        else:
+            # True identity: return input unchanged
             return x
-        # Attempt reshape to output shape if sizes match
-        total_current = 1
-        for d in x.shape[batch_ndims:]:
-            total_current *= d
-        total_target = 1
-        for d in self.output_shape:
-            total_target *= d
-        if total_current == total_target:
-            return x.reshape(batch_shape + self.output_shape)
-        # If shapes are incompatible, return x as-is (should not happen with correct config)
-        return x
 
 
 class LinearDecoder(nn.Module):
@@ -257,3 +249,55 @@ class LinearDecoder(nn.Module):
         # Apply output transformation based on decoder type
         decoder_type = self.config.get("decoder_type", "linear")
         return apply_output_transformation(output, decoder_type)
+
+class SphericalProjectionDecoder(nn.Module):
+    """Spherical projection decoder projects onto sphere then inverts the operation of the SphericalProjectionEncoder."""
+    config: dict
+    latent_shape: Tuple[int]
+    output_shape: Tuple[int,...]
+
+    @cached_property
+    def latent_dim(self) -> int:
+        total_dim = 1
+        for dim in self.latent_shape:
+            total_dim *= dim
+        return total_dim
+
+    @cached_property
+    def output_dim(self) -> int:
+        total_dim = 1
+        for dim in self.output_shape:
+            total_dim *= dim
+        return total_dim
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+        batch_shape = x.shape[:-len(self.latent_shape)]
+        x_flat = x.reshape(-1, self.latent_dim)
+        
+        # Learnable scale parameter (initialized to 1/5.0 by default, reciprocal of encoder scale)
+        scale_init = self.config.get("scale_init", 5.0)
+        decoder_scale_init = 1.0 / scale_init
+        scale = self.param('scale', nn.initializers.constant(decoder_scale_init), ())
+        
+        # First divide by encoder scale to get back to unit sphere
+        x_flat = x_flat * scale
+        
+        # Apply L2 normalization with numerical stability (encoder should already normalize, but this is safe)
+        norm_x = jnp.linalg.norm(x_flat, axis=-1, keepdims=True)
+        eps = 1e-4
+        x_flat = x_flat / jnp.clip(norm_x, eps, None)
+
+        y1_flat = x_flat[...,:self.output_dim]
+        y2_flat = x_flat[...,self.output_dim:]
+
+        # Invert normalization: recover original scale using y2 (which should be all ones after normalization)
+        # y2_flat should have norm = sqrt(dim_y2) after normalization
+        norm_y2 = jnp.linalg.norm(y2_flat, axis=-1, keepdims=True)
+        dim_y2 = self.latent_dim - self.output_dim
+        # Add epsilon to prevent division by zero
+        original_norm = jnp.sqrt(dim_y2) / jnp.clip(norm_y2, eps, None)
+        y1_flat = y1_flat * original_norm
+
+        return jnp.clip(y1_flat.reshape(batch_shape + self.output_shape), -5, 5)
+

@@ -21,6 +21,8 @@ from src.embeddings.flow_schedules import (
     CauchyFlowSchedule,
     LaplaceFlowSchedule,
     PolynomialFlowSchedule,
+    FlowScheduleNetwork,
+    FlowScheduleConfig,
 )
 
 
@@ -59,6 +61,7 @@ def plot_flow_schedules(
             CauchyFlowSchedule,
             LaplaceFlowSchedule,
             PolynomialFlowSchedule,
+            FlowScheduleNetwork,
         ]
     
     if default_params is None:
@@ -81,8 +84,8 @@ def plot_flow_schedules(
     # Initialize JAX random key
     key = jr.PRNGKey(42)
     
-    # Create figure with three panels
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(21, 6))
+    # Create figure with four panels
+    fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(28, 6))
     
     # Colors for different schedules
     colors = plt.cm.tab10(np.linspace(0, 1, len(schedule_classes)))
@@ -95,26 +98,31 @@ def plot_flow_schedules(
             # Get schedule name
             schedule_name = schedule_class.__name__.replace('FlowSchedule', '').lower()
             
-            # Create schedule with default parameters
+            # Create config
+            config = FlowScheduleConfig(
+                schedule_type=schedule_name,
+                latent_shape=(ndims,) if isinstance(ndims, int) else tuple(ndims),
+                learnable=False
+            )
+            
+            # Base kwargs
             schedule_kwargs = {
-                "ndims": ndims,
-                "learnable": True,
-                "alpha_min": default_params.get("alpha_min", 0.0),
-                "alpha_max": default_params.get("alpha_max", 1.0),
-                "sigma_min": default_params.get("sigma_min", 0.0),
-                "sigma_max": default_params.get("sigma_max", 1.0),
+                "config": config,
             }
             
             # Add schedule-specific parameters
             if schedule_name == "sigmoid":
-                schedule_kwargs["k"] = default_params.get("k", 10.0)
+                # These are already in config, but kept here just in case the logic changes later
+                # However, since we refactored FlowSchedule to take only config, we shouldn't pass these
+                pass
             elif schedule_name == "exponential":
-                schedule_kwargs["beta"] = default_params.get("beta", 2.0)
-            elif schedule_name == "cauchy" or schedule_name == "laplace":
-                schedule_kwargs["loc"] = default_params.get("loc", 0.5)
-                schedule_kwargs["log_scale"] = default_params.get("log_scale", -1.0)
+                pass
+            elif schedule_name == "cauchy":
+                pass
+            elif schedule_name == "laplace":
+                pass
             elif schedule_name == "polynomial":
-                schedule_kwargs["log_power"] = default_params.get("log_power", 0.0)
+                pass
             
             schedule = schedule_class(**schedule_kwargs)
             
@@ -127,10 +135,18 @@ def plot_flow_schedules(
             variables_sigma = schedule.init(key, t_jax, method=schedule.sigma)
             sigma_vals = schedule.apply(variables_sigma, t_jax, method=schedule.sigma)
             sigma_vals = np.array(sigma_vals)
+
+            # Initialize and evaluate tau_inverse
+            # Note: tau_inverse might need different initialization or method calling depending on implementation
+            # Assuming it relies on alpha/sigma and their derivatives which are computed internally
+            # We need to initialize the model fully to access all methods
+            variables_full = schedule.init(key, t_jax, method=schedule.tau_inverse)
+            tau_inv_vals = schedule.apply(variables_full, t_jax, method=schedule.tau_inverse)
+            tau_inv_vals = np.array(tau_inv_vals)
             
             # Compute SNR: alpha^2 / sigma^2
             # Add small epsilon to avoid division by zero
-            epsilon = 1e-8
+            epsilon = config.eps
             snr_vals = (alpha_vals ** 2) / (sigma_vals ** 2 + epsilon)
             
             # Plot alpha
@@ -141,11 +157,15 @@ def plot_flow_schedules(
             
             # Plot SNR
             ax3.plot(t, snr_vals, label=schedule_name, color=colors[i], linewidth=2, alpha=0.8)
+
+            # Plot Tau Inverse
+            ax4.plot(t, tau_inv_vals, label=schedule_name, color=colors[i], linewidth=2, alpha=0.8)
             
             results[schedule_name] = {
                 'alpha': alpha_vals,
                 'sigma': sigma_vals,
-                'snr': snr_vals
+                'snr': snr_vals,
+                'tau_inverse': tau_inv_vals
             }
             
         except Exception as e:
@@ -180,6 +200,16 @@ def plot_flow_schedules(
     ax3.legend(loc='best', fontsize=10)
     ax3.set_xlim(t_range)
     ax3.set_yscale('log')  # Use log scale for SNR as it can span many orders of magnitude
+
+    # Format Tau Inverse panel
+    ax4.set_xlabel('Time t', fontsize=12)
+    ax4.set_ylabel(r'$\tau^{-1}(t)$', fontsize=14)
+    ax4.set_title('Flow Schedules: Tau Inverse', fontsize=14, fontweight='bold')
+    ax4.grid(True, alpha=0.3)
+    ax4.legend(loc='best', fontsize=10)
+    ax4.set_xlim(t_range)
+    # ax4.set_yscale('log') # Optional: depending on range of tau_inverse
+
     
     plt.tight_layout()
     
@@ -201,4 +231,3 @@ if __name__ == "__main__":
     plot_flow_schedules(
         output_path="artifacts/flow_schedules_comparison.png"
     )
-

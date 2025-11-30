@@ -37,7 +37,7 @@ class Config(BaseConfig):
         # Data shapes
         "input_shape": (784,),  # Input dimension: flattened MNIST images (28x28 = 784)
         "output_shape": (10,),  # Output dimension: continuous predictions (e.g., digit class probabilities)
-        "latent_shape": (10,),  # Latent space shape: same as output for regression
+        "latent_shape": (40,),  # Latent space shape: same as output for regression
         
         # Loss configuration
         "recon_loss_type": "mse",  # Reconstruction loss type: "mse", "cross_entropy", or "none"
