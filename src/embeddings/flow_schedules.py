@@ -77,6 +77,7 @@ class FlowScheduleConfig(BaseConfig):
     # Schedule-specific parameters (optional, with defaults)
     k: float = 10.0  # For sigmoid schedule (steepness)
     beta: float = 2.0  # For exponential schedule (rate)
+    softplus_beta: float = 50.0  # For softplus schedule (smoothness)
     loc: float = 0.5  # For cauchy/laplace schedules (location)
     log_scale: float = -1.0  # For cauchy/laplace schedules (log scale)
     log_power: float = 0.69  # For polynomial schedule (log power, default ~0.69)
@@ -540,6 +541,148 @@ class SigmoidFlowSchedule(FlowSchedule):
         sigmoid_0 = jax.nn.sigmoid(k * -0.5)
         
         return (sigma_min - sigma_max) * sigmoid_prime / (sigmoid_1 - sigmoid_0)
+
+    @nn.compact
+    def log_sigma_prime(self, t):
+        return self.sigma_prime(t) / (self.sigma(t) + self.config.eps)
+
+
+class SoftplusFlowSchedule(FlowSchedule):
+    """Softplus flow schedule with learnable parameters.
+    
+    Uses softplus interpolation: f(t) = (1/beta) * log(1 + exp(beta*t))
+    Normalized such that f(1) = 1.
+    """
+
+    @nn.compact
+    def get_alpha_params(self):
+        if self.learnable:
+            alpha_min_logit_val = jax.scipy.special.logit(jnp.clip(self.config.alpha_min, self.config.eps, 1.0 - self.config.eps))
+            alpha_max_logit_val = jax.scipy.special.logit(jnp.clip(self.config.alpha_max, self.config.eps, 1.0 - self.config.eps))
+            
+            alpha_min_logit = self.param('alpha_min_logit', 
+                                        nn.initializers.constant(alpha_min_logit_val), ())
+            alpha_max_logit = self.param('alpha_max_logit',
+                                         nn.initializers.constant(alpha_max_logit_val), ())
+            
+            alpha_min = jax.nn.sigmoid(alpha_min_logit)
+            alpha_max = jax.nn.sigmoid(alpha_max_logit)
+            alpha_max = jnp.maximum(alpha_max, alpha_min + self.config.eps)
+        else:
+            alpha_min = self.config.alpha_min
+            alpha_max = self.config.alpha_max
+        
+        return alpha_min, alpha_max
+
+    @nn.compact
+    def get_beta_param(self):
+        if self.learnable:
+            # Initialize with log of softplus_beta (default 50.0) or config.softplus_beta if specified
+            
+            init_val = self.config.softplus_beta if self.config.softplus_beta != 50.0 else 50.0
+            
+            beta_log = self.param('beta_log', nn.initializers.constant(jnp.log(init_val)), ())
+            beta = jnp.exp(beta_log)
+        else:
+            beta = self.config.softplus_beta
+        return beta
+
+    @nn.compact
+    def alpha(self, t):
+        alpha_min, alpha_max = self.get_alpha_params()
+        beta = self.get_beta_param()
+        
+        # Softplus: f(t) = (1/beta) * log(1 + exp(beta*t))
+        # Normalized: f_norm(t) = f(t) / f(1)
+        # f(t) / f(1) = log(1 + exp(beta*t)) / log(1 + exp(beta))
+        
+        log_1_plus_exp_beta_t = jnp.logaddexp(0.0, beta * t)
+        log_1_plus_exp_beta = jnp.logaddexp(0.0, beta)
+        
+        softplus_norm = log_1_plus_exp_beta_t / log_1_plus_exp_beta
+        
+        # Use alpha_min as an offset, scaling the range (alpha_max - alpha_min)
+        # alpha(t) = alpha_min + (alpha_max - alpha_min) * softplus_norm(t)
+        # Note: softplus_norm(0) > 0, so alpha(0) > alpha_min.
+        # This preserves the "well behaved log" property (natural softplus floor)
+        # while allowing alpha_min to shift the whole curve up.
+        
+        alpha_val = alpha_min + (alpha_max - alpha_min) * softplus_norm
+        return jnp.clip(alpha_val, 0.0, 1.0)
+
+    @nn.compact
+    def alpha_prime(self, t):
+        alpha_min, alpha_max = self.get_alpha_params()
+        beta = self.get_beta_param()
+        
+        # f(t) = log(1 + exp(beta*t)) / C
+        # f'(t) = (1/C) * (beta * exp(beta*t)) / (1 + exp(beta*t))
+        #       = (1/C) * beta * sigmoid(beta*t)
+        # alpha'(t) = (alpha_max - alpha_min) * f'(t)
+        
+        log_1_plus_exp_beta = jnp.logaddexp(0.0, beta)
+        
+        # sigmoid(x) = 1 / (1 + exp(-x))
+        sigmoid_beta_t = jax.nn.sigmoid(beta * t)
+        
+        return (alpha_max - alpha_min) * (beta * sigmoid_beta_t) / log_1_plus_exp_beta
+
+    @nn.compact
+    def log_alpha_prime(self, t):
+        return self.alpha_prime(t) / (self.alpha(t) + self.config.eps)
+
+    @nn.compact
+    def get_sigma_params(self):
+        if self.learnable:
+            sigma_min_logit_val = jax.scipy.special.logit(jnp.clip(self.config.sigma_min, self.config.eps, 1.0 - self.config.eps))
+            sigma_max_logit_val = jax.scipy.special.logit(jnp.clip(self.config.sigma_max, self.config.eps, 1.0 - self.config.eps))
+            
+            sigma_min_logit = self.param('sigma_min_logit', 
+                                        nn.initializers.constant(sigma_min_logit_val), ())
+            sigma_max_logit = self.param('sigma_max_logit',
+                                         nn.initializers.constant(sigma_max_logit_val), ())
+            
+            sigma_min = jax.nn.sigmoid(sigma_min_logit)
+            sigma_max = jax.nn.sigmoid(sigma_max_logit)
+            sigma_max = jnp.maximum(sigma_max, sigma_min + self.config.eps)
+        else:
+            sigma_min = self.config.sigma_min
+            sigma_max = self.config.sigma_max
+        
+        return sigma_min, sigma_max
+
+    @nn.compact
+    def sigma(self, t):
+        sigma_min, sigma_max = self.get_sigma_params()
+        beta = self.get_beta_param() # Use same beta for symmetry? Or separate?
+        # Usually symmetric logic.
+        
+        # For sigma (decreasing 1 -> 0):
+        # sigma(t) = sigma_min + (sigma_max - sigma_min) * softplus_norm(1.0 - t)
+        # Note: softplus_norm(0) > 0.
+        # At t=1 (argument 0): sigma(1) = sigma_min + (diff) * small > sigma_min.
+        # At t=0 (argument 1): sigma(0) = sigma_min + (diff) * 1 = sigma_max.
+        
+        log_1_plus_exp_beta_t_rev = jnp.logaddexp(0.0, beta * (1.0 - t))
+        log_1_plus_exp_beta = jnp.logaddexp(0.0, beta)
+        
+        softplus_norm_rev = log_1_plus_exp_beta_t_rev / log_1_plus_exp_beta
+        
+        sigma_val = sigma_min + (sigma_max - sigma_min) * softplus_norm_rev
+        return jnp.clip(sigma_val, 0.0, 1.0)
+
+    @nn.compact
+    def sigma_prime(self, t):
+        sigma_min, sigma_max = self.get_sigma_params()
+        beta = self.get_beta_param()
+        
+        # sigma(t) = sigma_min + (sigma_max - sigma_min) * f(1-t)
+        # sigma'(t) = (sigma_max - sigma_min) * f'(1-t) * (-1)
+        
+        log_1_plus_exp_beta = jnp.logaddexp(0.0, beta)
+        sigmoid_beta_t_rev = jax.nn.sigmoid(beta * (1.0 - t))
+        
+        return -(sigma_max - sigma_min) * (beta * sigmoid_beta_t_rev) / log_1_plus_exp_beta
 
     @nn.compact
     def log_sigma_prime(self, t):
@@ -1097,7 +1240,8 @@ class PolynomialFlowSchedule(FlowSchedule):
         sigma_min, sigma_max, power = self.get_sigma_params()
         # Polynomial for decreasing function: use t^power which goes from 0 to 1
         # We want sigma to go from sigma_max (at t=0) to sigma_min (at t=1)
-        poly_val = t ** power  # Goes from 0 to 1 as t goes from 0 to 1
+        # poly_val goes from 0 to 1 as t goes from 0 to 1
+        poly_val = t ** power  
         return sigma_max + (sigma_min - sigma_max) * poly_val
 
     @nn.compact
@@ -1121,7 +1265,6 @@ class PolynomialFlowSchedule(FlowSchedule):
     @nn.compact
     def log_sigma_prime(self, t):
         return self.sigma_prime(t) / (self.sigma(t) + self.config.eps)
-
 
 
 
@@ -1341,6 +1484,7 @@ def create_flow_schedule(
         sigma_max = config.get("sigma_max", 0.95)
         k = config.get("k", 10.0)
         beta = config.get("beta", 2.0)
+        softplus_beta = config.get("softplus_beta", 50.0)
         loc = config.get("loc", 0.5)
         log_scale = config.get("log_scale", -1.0)
         log_power = config.get("log_power", 0.69)
@@ -1356,6 +1500,7 @@ def create_flow_schedule(
         sigma_max = config.sigma_max
         k = config.k
         beta = config.beta
+        softplus_beta = config.softplus_beta
         loc = config.loc
         log_scale = config.log_scale
         log_power = config.log_power
@@ -1374,6 +1519,7 @@ def create_flow_schedule(
     sigma_max = kwargs.get("sigma_max", sigma_max)
     k = kwargs.get("k", k)
     beta = kwargs.get("beta", beta)
+    softplus_beta = kwargs.get("softplus_beta", softplus_beta)
     loc = kwargs.get("loc", loc)
     log_scale = kwargs.get("log_scale", log_scale)
     log_power = kwargs.get("log_power", log_power)
@@ -1402,6 +1548,7 @@ def create_flow_schedule(
         sigma_max=sigma_max,
         k=k,
         beta=beta,
+        softplus_beta=softplus_beta,
         loc=loc,
         log_scale=log_scale,
         log_power=log_power,
@@ -1415,6 +1562,8 @@ def create_flow_schedule(
         return CosineFlowSchedule(config=schedule_config)
     elif schedule_type == "sigmoid":
         return SigmoidFlowSchedule(config=schedule_config)
+    elif schedule_type == "softplus":
+        return SoftplusFlowSchedule(config=schedule_config)
     elif schedule_type == "exponential":
         return ExponentialFlowSchedule(config=schedule_config)
     elif schedule_type == "pure_exponential":
@@ -1430,6 +1579,5 @@ def create_flow_schedule(
     else:
         raise ValueError(
             f"Unknown schedule_type: {schedule_type}. "
-            f"Options: linear, cosine, sigmoid, exponential, cauchy, laplace, polynomial, network/neural/learnable"
+            f"Options: linear, cosine, sigmoid, softplus, exponential, cauchy, laplace, polynomial, network/neural/learnable"
         )
-

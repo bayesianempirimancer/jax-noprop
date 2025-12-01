@@ -28,16 +28,17 @@ class Config(BaseConfig):
     }))
     
     flow_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "schedule_type": "linear",
+        "schedule_type": "softplus",
         "learnable": False,
         "latent_shape": (2,),
         "hidden_dims": (64, 64),
-        "alpha_min": 0.025,
+        "alpha_min": 0.0,
         "alpha_max": 1.0,
-        "sigma_min": 0.025,
+        "sigma_min": 0.0,
         "sigma_max": 1.0,
         "k": 10.0,
         "beta": 2.0,
+        "softplus_beta": 50.0,
         "loc": 0.5,
         "log_scale": -1.0,
         "log_power": 0.69,

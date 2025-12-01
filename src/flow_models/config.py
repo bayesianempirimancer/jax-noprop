@@ -39,15 +39,16 @@ class Config(BaseConfig):
     }))
     
     flow_schedule: FrozenDict = field(default_factory=lambda: FrozenDict({
-        "schedule_type": "linear",  # Type of schedule: "linear", "cosine", "sigmoid", "exponential", "cauchy", "laplace", "polynomial", "network"
+        "schedule_type": "softplus",  # Type of schedule: "linear", "cosine", "sigmoid", "exponential", "cauchy", "laplace", "polynomial", "network"
         "learnable": False,  # Whether schedule parameters are learnable
         "hidden_dims": (64, 64),  # Hidden dimensions for network schedule
-        "alpha_min": 0.025,
+        "alpha_min": 0.0,
         "alpha_max": 1.0,
-        "sigma_min": 0.025,
+        "sigma_min": 0.0,
         "sigma_max": 1.0,
         "k": 10.0,  # For sigmoid schedule (steepness)
         "beta": 2.0,  # For exponential schedule (rate)
+        "softplus_beta": 50.0,  # For softplus schedule (smoothness)
         "loc": 0.5,  # For cauchy/laplace schedules (location)
         "log_scale": -1.0,  # For cauchy/laplace schedules (log scale)
         "log_power": 0.69,  # For polynomial schedule (log power, default ~0.69)
